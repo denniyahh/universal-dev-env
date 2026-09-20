@@ -1,0 +1,45 @@
+_min_copier_version: "9.0.0"
+
+project_name:
+  type: str
+  help: "Project name (kebab-case)"
+  default: "my-project"
+
+project_description:
+  type: str
+  help: "Short project summary"
+  default: "DevFlow & GSD compliant development project"
+
+project_type:
+  type: str
+  help: "Primary project ecosystem"
+  choices:
+    - rust
+    - node
+    - polyglot
+  default: rust
+
+enable_mempalace:
+  type: bool
+  help: "Initialize MemPalace stage and room taxonomy"
+  default: true
+
+enable_memtrace:
+  type: bool
+  help: "Register project into Memtrace personal workspace and restart service"
+  default: true
+
+# Tasks executed after project generation / copier update
+_tasks:
+  - >-
+    bash -c '
+      chmod +x scripts/*.sh scripts/hooks/* scratch/*.sh 2>/dev/null || true
+      if [ "{{ enable_memtrace }}" = "True" ] && command -v memtrace >/dev/null 2>&1; then
+        echo "🧠 Registering repository in Memtrace personal workspace..."
+        memtrace workspace add personal "$PWD" >/dev/null 2>&1 || true
+        systemctl --user reload-or-restart memtrace.service >/dev/null 2>&1 || true
+      fi
+      if [ "{{ enable_mempalace }}" = "True" ] && command -v mempalace >/dev/null 2>&1; then
+        echo "🏛️  MemPalace stage ready under .planning/.mempalace-stage"
+      fi
+    '

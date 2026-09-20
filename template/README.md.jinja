@@ -1,0 +1,14 @@
+# {{ project_name }}
+
+> {{ project_description }}
+
+## Development Workflow
+
+This repository uses DevFlow and GSD workflow standards.
+
+- **Tasks**: Managed via \`mise\` (\`mise tasks\`).
+- **Memory & Context**: Automatically integrated with **Memtrace** (bi-temporal memory daemon) and **MemPalace** (\`.planning/.mempalace-stage\`).
+- **Syncing Environment**:
+  - Pull personal environment: \`mise run sync:env\`
+  - Push back changes: \`mise run push:env\`
+- **Worktree-Isolated Tasks**: \`mise run start:wt <type> <issue-number> <slug>\`

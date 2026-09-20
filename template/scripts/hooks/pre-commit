@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Pre-commit hook: chain to global hooks, protect main/develop from direct commits
+set -euo pipefail
+
+# 1. Chain to global pre-commit hook (e.g. gitleaks)
+GLOBAL_HOOK_DIR=$(git config --global --get core.hooksPath 2>/dev/null || echo "$HOME/.config/git/hooks")
+if [ -d "$GLOBAL_HOOK_DIR" ] && [ -x "$GLOBAL_HOOK_DIR/pre-commit" ]; then
+    "$GLOBAL_HOOK_DIR/pre-commit" "$@"
+fi
+
+# 2. Refuse direct commits to protected branches
+BRANCH=$(git symbolic-ref --short HEAD 2>/dev/null || true)
+if [ "$BRANCH" = "main" ] || [ "$BRANCH" = "develop" ]; then
+    if [ "${ALLOW_DIRECT_PROTECTED_COMMIT:-0}" != "1" ]; then
+        echo "ERROR: Direct commits to '$BRANCH' are prohibited." >&2
+        echo "  Create a feature branch first: git switch -c feature/<name>" >&2
+        exit 1
+    fi
+fi
+
+exit 0

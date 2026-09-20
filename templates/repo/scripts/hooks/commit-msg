@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# Conventional Commit validator and hook delegation chain
+set -euo pipefail
+
+COMMIT_MSG_FILE="$1"
+FIRST_LINE=$(head -n 1 "$COMMIT_MSG_FILE")
+
+# 1. Chain to global commit-msg hook if one is configured outside this repository
+GLOBAL_HOOK_DIR=$(git config --global --get core.hooksPath 2>/dev/null || echo "$HOME/.config/git/hooks")
+if [ -d "$GLOBAL_HOOK_DIR" ] && [ -x "$GLOBAL_HOOK_DIR/commit-msg" ]; then
+    "$GLOBAL_HOOK_DIR/commit-msg" "$@"
+fi
+
+# 2. Escape hatch for automated tools
+if [ "${ALLOW_ANY_COMMIT:-0}" = "1" ]; then
+    exit 0
+fi
+
+# 3. Exempt automated merge, squash, and fixup commits
+if [[ "$FIRST_LINE" =~ ^(Merge|fixup!|squash!) ]]; then
+    exit 0
+fi
+
+# 4. Enforce Conventional Commit format
+PATTERN='^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([a-zA-Z0-9_.-]+\))?!?: .+$'
+if ! [[ "$FIRST_LINE" =~ $PATTERN ]]; then
+    echo "ERROR: Invalid commit message format." >&2
+    echo "  Commit message: '$FIRST_LINE'" >&2
+    echo "  Expected format: <type>(<scope>): <description>" >&2
+    echo "  Valid types: feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert" >&2
+    exit 1
+fi
+
+# 5. Reject trailing period in subject line
+if [[ "$FIRST_LINE" =~ \.$ ]]; then
+    echo "ERROR: Commit subject line must not end with a period." >&2
+    echo "  Subject: '$FIRST_LINE'" >&2
+    exit 1
+fi
+
+# 6. Warn if subject exceeds 72 characters
+if [ "${#FIRST_LINE}" -gt 72 ]; then
+    echo "WARNING: Commit subject exceeds 72 characters (${#FIRST_LINE} chars)." >&2
+fi
+
+exit 0

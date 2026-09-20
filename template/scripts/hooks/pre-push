@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# Pre-push hook: scrubs GIT_* environment variables and runs verification suite
+set -euo pipefail
+
+# 1. Scrub repository-local git environment variables.
+# When pushing from a linked worktree, Git exports GIT_DIR, which causes any child process
+# or test harness shelling out to git to retarget the host checkout instead of its fixture.
+for var in $(git rev-parse --local-env-vars 2>/dev/null || true); do
+    unset "$var"
+done
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_PREFIX
+
+# 2. Refuse direct push to main if protected
+PROTECTED_TARGET="refs/heads/main"
+while read -r local_ref local_sha remote_ref remote_sha; do
+    if [ "$remote_ref" = "$PROTECTED_TARGET" ]; then
+        if [ "${ALLOW_DIRECT_MAIN_PUSH:-0}" != "1" ]; then
+            echo "ERROR: Direct push to 'main' is prohibited. Use a pull request." >&2
+            exit 1
+        fi
+    fi
+done
+
+# 3. Run container parity checks or test suite if check script exists
+if [ -x "scripts/check-in-container.sh" ] && [ "${SKIP_CONTAINER_CHECK:-0}" != "1" ]; then
+    echo "==> Running container parity check..."
+    scripts/check-in-container.sh all
+elif [ -x "scripts/check.sh" ]; then
+    echo "==> Running local verification checks..."
+    scripts/check.sh all
+fi
+
+exit 0

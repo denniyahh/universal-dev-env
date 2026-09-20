@@ -1,0 +1,28 @@
+# Public-safe repository git configuration template
+# Included via: git config --local include.path ../.gitconfig
+#
+# Deliberately EXCLUDES:
+# - user.name / user.email (per-contributor)
+# - user.signingkey (per-contributor, local or machine-specific)
+# - absolute paths
+
+[gpg]
+    format = ssh
+
+[commit]
+    gpgsign = true
+
+[tag]
+    gpgsign = true
+
+# Git Flow branch model and prefixes
+[gitflow "branch"]
+    master = main
+    develop = develop
+
+[gitflow "prefix"]
+    feature = feature/
+    release = release/
+    hotfix = hotfix/
+    support = support/
+    versiontag = v

@@ -1,0 +1,27 @@
+# Standard Project .gitignore Template
+
+# Build artifacts
+target/
+dist/
+build/
+node_modules/
+
+# OS & Editor
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+
+# Local agent ephemeral state
+**/.claude/settings.local.json
+**/.claude/scheduled_tasks.lock
+**/.claude/checkpoints/
+
+# Generated knowledge graphs / reports (allowlist pattern)
+# Ignores directory contents while allowing explicit tracked baselines
+graphify-out/*
+!graphify-out/graph.json
+!graphify-out/manifest.json
