@@ -29,6 +29,11 @@ enable_memtrace:
   help: "Register project into Memtrace personal workspace and restart service"
   default: true
 
+enable_graphify:
+  type: bool
+  help: "Initialize graphify knowledge graph scaffold and directory anchor"
+  default: true
+
 # Tasks executed after project generation / copier update
 _tasks:
   - >-
@@ -41,5 +46,10 @@ _tasks:
       fi
       if [ "{{ enable_mempalace }}" = "True" ] && command -v mempalace >/dev/null 2>&1; then
         echo "🏛️  MemPalace stage ready under .planning/.mempalace-stage"
+      fi
+      if [ "{{ enable_graphify }}" = "True" ]; then
+        mkdir -p graphify-out
+        echo "." > graphify-out/.graphify_root
+        echo "🕸️  Graphify anchor configured under graphify-out/"
       fi
     '

@@ -7,7 +7,10 @@
 This repository uses DevFlow and GSD workflow standards.
 
 - **Tasks**: Managed via \`mise\` (\`mise tasks\`).
-- **Memory & Context**: Automatically integrated with **Memtrace** (bi-temporal memory daemon) and **MemPalace** (\`.planning/.mempalace-stage\`).
+- **Memory & Context**:
+  - **Memtrace**: Bi-temporal memory daemon (registered into personal workspace).
+  - **MemPalace**: Cross-session memory (\`.planning/.mempalace-stage\`).
+  - **Graphify**: Knowledge graph engine (\`graphify-out/\`, run via \`mise run graphify\`).
 - **Syncing Environment**:
   - Pull personal environment: \`mise run sync:env\`
   - Push back changes: \`mise run push:env\`

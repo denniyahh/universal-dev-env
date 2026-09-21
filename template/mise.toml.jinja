@@ -20,6 +20,10 @@ run = "./scratch/sync-personal-env.sh push"
 description = "Create a new isolated task worktree with inherited capabilities"
 run = "./scratch/new-worktree.sh"
 
+[tasks.graphify]
+description = "Run graphify knowledge graph extraction on this codebase"
+run = "graphify . --update"
+
 [tasks.check]
 description = "Run pre-flight checks"
 run = "./scratch/ci-mac.sh"
