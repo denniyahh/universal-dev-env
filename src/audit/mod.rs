@@ -1,14 +1,16 @@
+use serde::Serialize;
 use std::path::{Path, PathBuf};
 use which::which;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "status", content = "message")]
 pub enum CheckStatus {
     Pass,
     Warning(String),
     Fail(String),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct AuditReport {
     pub category: String,
     pub name: String,
