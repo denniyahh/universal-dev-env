@@ -1,0 +1,15 @@
+# Build & compiler artifacts
+/target/
+node_modules/
+
+# Local state & overrides
+*.local.*
+*.local
+.ude/overrides/
+.ude/cache/
+
+# IDE & OS scratch files
+.DS_Store
+Thumbs.db
+*.swp
+*~

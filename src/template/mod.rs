@@ -1,0 +1,143 @@
+use directories::BaseDirs;
+use minijinja::Environment;
+use serde::Serialize;
+use std::collections::HashMap;
+
+/// System context parameters available in all UDE templates
+#[derive(Debug, Clone, Serialize)]
+pub struct TemplateContext {
+    pub user_home: String,
+    pub xdg_config: String,
+    pub xdg_data: String,
+    pub git_user_name: String,
+    pub git_email: String,
+    pub project_name: String,
+    pub project_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub maintainer_ssh_pubkey: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_ssh_pubkey: Option<String>,
+    #[serde(flatten)]
+    pub extra: HashMap<String, String>,
+}
+
+impl TemplateContext {
+    /// Detects host defaults from system environment and git config
+    pub fn detect(project_name: &str, project_type: &str) -> Self {
+        let base_dirs = BaseDirs::new();
+        let user_home = base_dirs
+            .as_ref()
+            .map(|b| b.home_dir().to_string_lossy().to_string())
+            .unwrap_or_else(|| {
+                std::env::var("HOME")
+                    .or_else(|_| std::env::var("USERPROFILE"))
+                    .unwrap_or_else(|_| ".".to_string())
+            });
+
+        let xdg_config = base_dirs
+            .as_ref()
+            .map(|b| b.config_dir().to_string_lossy().to_string())
+            .unwrap_or_else(|| format!("{}/.config", user_home));
+
+        let xdg_data = base_dirs
+            .as_ref()
+            .map(|b| b.data_dir().to_string_lossy().to_string())
+            .unwrap_or_else(|| format!("{}/.local/share", user_home));
+
+        let git_user_name = std::process::Command::new("git")
+            .args(["config", "--get", "user.name"])
+            .output()
+            .ok()
+            .and_then(|out| {
+                if out.status.success() {
+                    Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| "Developer".to_string());
+
+        let git_email = std::process::Command::new("git")
+            .args(["config", "--get", "user.email"])
+            .output()
+            .ok()
+            .and_then(|out| {
+                if out.status.success() {
+                    Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| "developer@example.com".to_string());
+
+        Self {
+            user_home,
+            xdg_config,
+            xdg_data,
+            git_user_name,
+            git_email,
+            project_name: project_name.to_string(),
+            project_type: project_type.to_string(),
+            maintainer_ssh_pubkey: None,
+            agent_ssh_pubkey: None,
+            extra: HashMap::new(),
+        }
+    }
+}
+
+pub struct TemplateRenderer {
+    env: Environment<'static>,
+}
+
+impl Default for TemplateRenderer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TemplateRenderer {
+    pub fn new() -> Self {
+        Self {
+            env: Environment::new(),
+        }
+    }
+
+    /// Renders a template string given a context
+    pub fn render_str(&self, template_str: &str, ctx: &TemplateContext) -> Result<String, String> {
+        let mut env = self.env.clone();
+        env.add_template("template", template_str)
+            .map_err(|e| format!("Template compilation error: {e}"))?;
+        let tmpl = env
+            .get_template("template")
+            .map_err(|e| format!("Template fetch error: {e}"))?;
+        tmpl.render(ctx)
+            .map_err(|e| format!("Template render error: {e}"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_template_rendering_basic() {
+        let renderer = TemplateRenderer::new();
+        let ctx = TemplateContext {
+            user_home: "/home/testuser".to_string(),
+            xdg_config: "/home/testuser/.config".to_string(),
+            xdg_data: "/home/testuser/.local/share".to_string(),
+            git_user_name: "Test User".to_string(),
+            git_email: "test@example.com".to_string(),
+            project_name: "sample-proj".to_string(),
+            project_type: "rust".to_string(),
+            maintainer_ssh_pubkey: Some("AAAAC3NzaC1lZDI1NTE5AAAA...".to_string()),
+            agent_ssh_pubkey: Some("AAAAC3NzaC1lZDI1NTE5AAAA_AGENT...".to_string()),
+            extra: HashMap::new(),
+        };
+
+        let tmpl = "{{ git_email }} ssh-ed25519 {{ maintainer_ssh_pubkey }} maintainer\n{{ xdg_config }}/git/allowed_signers";
+        let rendered = renderer.render_str(tmpl, &ctx).expect("render");
+        assert!(rendered.contains("test@example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA..."));
+        assert!(rendered.contains("/home/testuser/.config/git/allowed_signers"));
+    }
+}
