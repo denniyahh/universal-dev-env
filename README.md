@@ -64,7 +64,7 @@ universal-dev-env/
 ## 4. Project Roadmap
 
 - [x] **Phase 1: 2x2 Matrix & Sync Contract Specification** — Define the four quadrants, bidirectional reconciliation lifecycle, sanitization gate, and TypeSafe judgment integration.
-- [ ] **Phase 2: Canonical Template Matrix Reorganization** — Align `templates/` and `template/` into the four-quadrant structure with Minijinja parameterization.
-- [ ] **Phase 3: Rust CLI Engine (`ude`) Scaffolding** — Implement core engine crate with manifest parsing, path resolution, and template renderer.
-- [ ] **Phase 4: Non-Destructive Auditor (`ude doctor`)** — Implement host and project integrity scanner asserting signing keys, hooks, and agent rules mesh.
-- [ ] **Phase 5: Bidirectional Reconciler (`ude sync`)** — Implement 3-way diffing, `.local` overlay handling, secret sanitization, and upstream push with high-assurance negative controls.
+- [x] **Phase 2: Canonical Template Matrix Reorganization** — Align `templates/` into the four-quadrant structure with Minijinja parameterization.
+- [x] **Phase 3: Rust CLI Engine (`ude`) Scaffolding** — Implement core engine crate with manifest parsing, path resolution, and template renderer.
+- [x] **Phase 4: Non-Destructive Auditor (`ude doctor`)** — Implement host and project integrity scanner asserting signing keys, hooks, and agent rules mesh.
+- [x] **Phase 5: Bidirectional Reconciler (`ude sync`)** — Implement 3-way diffing, `.local` overlay handling, secret sanitization, and upstream push with high-assurance negative controls.
