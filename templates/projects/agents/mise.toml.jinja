@@ -1,0 +1,29 @@
+[tools]
+{% if project_type == 'node' %}
+node = "24"
+{% elif project_type == 'rust' %}
+rust = "latest"
+{% else %}
+node = "24"
+rust = "latest"
+{% endif %}
+
+[tasks."sync:env"]
+description = "Pull latest personal environment (.planning, scratch, .agents) from personal workspace"
+run = "./scratch/sync-personal-env.sh pull"
+
+[tasks."push:env"]
+description = "Reconcile worktree .planning and scratch changes back to personal workspace"
+run = "./scratch/sync-personal-env.sh push"
+
+[tasks."start:wt"]
+description = "Create a new isolated task worktree with inherited capabilities"
+run = "./scratch/new-worktree.sh"
+
+[tasks.graphify]
+description = "Run graphify knowledge graph extraction on this codebase"
+run = "graphify . --update"
+
+[tasks.check]
+description = "Run pre-flight checks"
+run = "./scratch/ci-mac.sh"

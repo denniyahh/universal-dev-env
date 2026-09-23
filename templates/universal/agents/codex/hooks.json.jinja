@@ -1,0 +1,14 @@
+{
+  "pre_tool_guards": [
+    {
+      "pattern": "rm\\s+-[rf]{2,}\\s+/",
+      "action": "reject",
+      "reason": "Destructive root filesystem modification prohibited"
+    }
+  ],
+  "post_tool_formatters": {
+    "rs": "cargo fmt",
+    "py": "ruff check --fix",
+    "ts": "prettier --write"
+  }
+}

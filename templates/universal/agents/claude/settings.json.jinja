@@ -1,0 +1,18 @@
+{
+  "commands": {
+    "deny": [
+      "^rm\\s+(-[a-zA-Z]*r[a-zA-Z]*f|-[a-zA-Z]*f[a-zA-Z]*r)\\s+(/|/var|/usr|~|\\$HOME)$",
+      "^mkfs\\.",
+      "^dd\\s+if=.*\\s+of=/dev/",
+      "^git\\s+push\\s+.*--force\\s+(main|master|develop)$"
+    ]
+  },
+  "formatters": {
+    "rust": "cargo fmt",
+    "python": "ruff format && ruff check --fix",
+    "javascript": "prettier --write",
+    "typescript": "prettier --write",
+    "zig": "zig fmt"
+  },
+  "rulesDirectory": "{{ user_home }}/.claude/rules"
+}

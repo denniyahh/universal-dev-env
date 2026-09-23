@@ -1,0 +1,10 @@
+# Allowed SSH Signers File (rendered to {{ xdg_config }}/git/allowed_signers)
+# Maps SSH signing public keys to contributor email addresses for GitHub "Verified" attribution.
+#
+# Format: <email> <key-type> <public-key> <optional-comment>
+
+# Maintainer Key (used for release tags and personal commits)
+{{ git_email }} {{ maintainer_ssh_key_type | default("ssh-ed25519") }} {{ maintainer_ssh_pubkey }} maintainer-key
+
+# Autonomous Agent Key (used for AI agent commits on task branches)
+{{ git_email }} {{ agent_ssh_key_type | default("ssh-ed25519") }} {{ agent_ssh_pubkey }} agent-local-key

@@ -1,0 +1,19 @@
+# Global baseline Gitleaks configuration (rendered to {{ xdg_config }}/gitleaks/gitleaks.toml)
+title = "UDE Global Secret Scanner Baseline"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Global allowlist for benign placeholder tokens and documentation fixtures"
+regexes = [
+    '''(?i)example[_-]?key''',
+    '''(?i)dummy[_-]?token''',
+    '''AAAAC3NzaC1lZDI1NTE5AAAAI\.\.\.''',
+    '''{{[ \t]*[a-zA-Z0-9_]+[ \t]*}}''',
+]
+paths = [
+    '''(^|/)templates/.*''',
+    '''(^|/)\.devcontainer/.*''',
+    '''(^|/)tests?/fixtures/.*''',
+]
