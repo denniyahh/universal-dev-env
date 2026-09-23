@@ -1,44 +1,70 @@
-# Universal Development Environment & Project Bootstrapper
+# Universal Development Environment & Configuration System (`ude`)
 
-**Project Status:** DESIGN & EXTRACTION PHASE  
-**Origin:** Extracted from DevFlow's development setup audit on 2026-09-13.
-
-## Mission
-
-Automate the capturing, provisioning, auditing, and maintenance of:
-1. **Machine-Global Setup (`[GLOBAL]`):** Machine-wide developer configuration, SSH signing architectures, global git hooks, AI agent instructions, toolchain installations, and credential management across Fedora Blue/Kinoite immutable systems.
-2. **Portable Project Baseline (`[PATTERN]`):** A zero-drift, drop-in repository scaffold providing git-flow branching, SSH signing includes, chained git hooks (Conventional Commits, secret scanning, protected branch guards), CI/devcontainer container parity, and AI workflow integration.
+An auditable, iterable, and bidirectionally synchronizable AI development environment system. Configures host-wide developer baselines and bootstraps zero-drift, high-assurance repositories across Linux, macOS, and Windows.
 
 ---
 
-## Directory Structure
+## 1. Core Architecture: The 2x2 Matrix
+
+UDE separates configuration state cleanly across two independent axes:
+- **Scope Axis:** **Universal (Machine-Global)** vs. **Project-Specific (Repo-Local)**
+- **Actor Axis:** **Agent-Generic (Human & Toolchain Baseline)** vs. **Agent-Specific (AI Agent Adaptations)**
+
+```text
+                        AGENT-GENERIC                          AGENT-SPECIFIC
+             ┌───────────────────────────────────┬───────────────────────────────────┐
+             │ [UG] Universal Generic            │ [UA] Universal Agent-Specific     │
+             │ • Dual SSH signing infrastructure │ • ~/.claude/settings.json hooks   │
+  UNIVERSAL  │ • ~/.config/git/allowed_signers   │ • ~/.codex/hooks.json formatters  │
+  (Host-Wide)│ • Global commit attribution       │ • Canonical AGENTS.md mesh        │
+             │ • Gitleaks pre-commit guard       │ • PreToolUse destructive guards   │
+             ├───────────────────────────────────┼───────────────────────────────────┤
+             │ [PG] Project Generic              │ [PA] Project Agent-Specific       │
+             │ • Public-safe root .gitconfig     │ • .agents/AGENTS.md instructions  │
+   PROJECT   │ • Chained scripts/hooks/          │ • mise tasks (sync, wt, check)    │
+ (Repo-Local)│ • Worktree GIT_* env scrubbing    │ • .planning/.mempalace-stage      │
+             │ • Container test parity runner    │ • check-publish-boundary guards   │
+             └───────────────────────────────────┴───────────────────────────────────┘
+```
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for detailed architecture and design contracts.
+
+---
+
+## 2. Bidirectional Sync & Drift Reconciliation
+
+UDE connects local host environments and project checkouts with the central configuration repository:
+- **Downstream Sync (`ude sync pull` / `ude project init`)**: Idempotently materializes and updates environment baselines.
+- **Upstream Sync (`ude sync push`)**: Captures local rule/prompt/tool refinements back upstream with automated sanitization:
+  - **Conflict Strategy**: Option A (3-way merge with explicit conflict rejection) by default; Option B (Layered `.local` / `.override` layers) for permanent unpushed local adaptations.
+  - **Sanitization Gate**: Scrubbing of high-entropy secrets and automatic parameterization of user paths (`{{ user.home }}`).
+  - **Semantic Intelligence**: Optional TypeSafe System One (Jev) semantic drift classification and credential screening.
+
+---
+
+## 3. Repository Structure
 
 ```text
 universal-dev-env/
-├── README.md                           # This overview and roadmap
+├── README.md                           # Project mission and roadmap
+├── copier.yaml                         # Copier project template configuration
 ├── docs/
-│   ├── ARCHITECTURE.md                 # Two-tier architecture & design principles
-│   ├── GLOBAL_MACHINE_BASELINE.md      # Tier 1: Complete machine-global specification
-│   └── PORTABLE_PROJECT_BASELINE.md    # Tier 2: Reusable project baseline specification
-└── templates/
-    ├── global/                         # Machine-wide configuration templates
-    │   ├── allowed_signers.example     # SSH key-to-email mapping for GitHub verification
-    │   └── gitconfig.example           # Global ~/.gitconfig baseline
-    └── repo/                           # Drop-in project scaffold templates
-        ├── .gitconfig                  # Tracked project git-flow & signing include
-        ├── .gitignore                  # Standard ignore with allowlist-based inclusions
-        └── scripts/
-            └── hooks/                  # Non-shadowing, chain-delegating git hooks
-                ├── commit-msg          # Conventional Commits validator
-                ├── pre-commit          # Branch protection & global hook chaining
-                ├── pre-push            # Environment scrubbing & release key check
-                └── post-commit         # Non-destructive warning hooks
+│   ├── ARCHITECTURE.md                 # 2x2 matrix, sync engine, and design contract
+│   ├── SPECIFICATION.md                # CLI commands, schemas, and test invariants
+│   ├── GLOBAL_MACHINE_BASELINE.md      # Tier 1: Host specification
+│   └── PORTABLE_PROJECT_BASELINE.md    # Tier 2: Repository baseline
+├── templates/                          # Canonical 2x2 configuration matrix
+│   ├── universal/                      # [UG] and [UA] host-level configurations
+│   └── projects/                       # [PG] and [PA] repo-level templates
+└── template/                           # Copier baseline template tree
 ```
 
 ---
 
-## Project Roadmap
+## 4. Project Roadmap
 
-- [x] **Phase 1: Extraction & Inventory** — Extract all universal patterns, global specifications, and hook designs from DevFlow's historical audit into a clean baseline.
-- [ ] **Phase 2: Project Bootstrapper CLI / Script** — Implement a one-line command (`bootstrap-project <repo-path>`) that initializes any new repository with the portable project baseline.
-- [ ] **Phase 3: Machine-Global Drift Scanner** — Implement a CLI scanner (`audit-dev-env`) that asserts host tools, SSH signing keys, allowed signers, global git hooks, and agent configurations against the specification.
+- [x] **Phase 1: 2x2 Matrix & Sync Contract Specification** — Define the four quadrants, bidirectional reconciliation lifecycle, sanitization gate, and TypeSafe judgment integration.
+- [ ] **Phase 2: Canonical Template Matrix Reorganization** — Align `templates/` and `template/` into the four-quadrant structure with Minijinja parameterization.
+- [ ] **Phase 3: Rust CLI Engine (`ude`) Scaffolding** — Implement core engine crate with manifest parsing, path resolution, and template renderer.
+- [ ] **Phase 4: Non-Destructive Auditor (`ude doctor`)** — Implement host and project integrity scanner asserting signing keys, hooks, and agent rules mesh.
+- [ ] **Phase 5: Bidirectional Reconciler (`ude sync`)** — Implement 3-way diffing, `.local` overlay handling, secret sanitization, and upstream push with high-assurance negative controls.
