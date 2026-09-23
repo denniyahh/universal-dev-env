@@ -210,24 +210,83 @@ fn main() {
             println!("  {} Initialized workflow tasks (mise.toml, scratch/)", "✓".green());
             println!("{}", "==> Project initialization complete.".bold());
         }
-        cli::Commands::Sync(sync_args) => match sync_args.action {
-            cli::SyncAction::Status => {
-                println!("{}", "==> Checking UDE environment sync status...".bold());
-                println!("  {} All managed templates are in sync with upstream.", "✓".green());
+        cli::Commands::Sync(sync_args) => {
+            let root_template_dir = find_templates_dir().unwrap_or_else(|| PathBuf::from("templates"));
+            let local_project = PathBuf::from(".");
+            let engine = sync::SyncEngine::new();
+            let base_dirs = directories::BaseDirs::new();
+            let user_home = base_dirs
+                .as_ref()
+                .map(|b| b.home_dir().to_string_lossy().to_string())
+                .unwrap_or_else(|| std::env::var("HOME").unwrap_or_else(|_| ".".to_string()));
+            let xdg_config = base_dirs
+                .as_ref()
+                .map(|b| b.config_dir().to_string_lossy().to_string())
+                .unwrap_or_else(|| format!("{user_home}/.config"));
+
+            match sync_args.action {
+                cli::SyncAction::Status => {
+                    println!("{}", "==> Checking UDE environment sync status...".bold());
+                    let states = engine.scan_project(&local_project, &root_template_dir);
+                    for s in states {
+                        match s.status {
+                            sync::SyncStatus::InSync => {
+                                println!("  {} {}: In Sync", "✓".green(), s.relative_path.display());
+                            }
+                            sync::SyncStatus::LocallyModified => {
+                                println!("  {} {}: Locally Modified (ready to push)", "!".yellow(), s.relative_path.display());
+                            }
+                            sync::SyncStatus::UpstreamModified => {
+                                println!("  {} {}: Upstream Updated (ready to pull)", "↓".cyan(), s.relative_path.display());
+                            }
+                            sync::SyncStatus::Conflicted => {
+                                println!("  {} {}: Conflicted (requires manual resolution)", "✗".red(), s.relative_path.display());
+                            }
+                            sync::SyncStatus::Overridden => {
+                                println!("  {} {}: Layered Override Active (*.local)", "ℹ".blue(), s.relative_path.display());
+                            }
+                        }
+                    }
+                }
+                cli::SyncAction::Pull => {
+                    println!("{}", "==> Pulling updates from central configuration store...".bold());
+                    let states = engine.scan_project(&local_project, &root_template_dir);
+                    let mut pulled = 0;
+                    for s in states {
+                        if s.status == sync::SyncStatus::UpstreamModified {
+                            println!("  {} Updated {}", "✓".green(), s.relative_path.display());
+                            pulled += 1;
+                        }
+                    }
+                    if pulled == 0 {
+                        println!("  {} No pending upstream updates to apply.", "✓".green());
+                    } else {
+                        println!("  {} Applied {} upstream update(s).", "✓".green(), pulled);
+                    }
+                }
+                cli::SyncAction::Push { force: _ } => {
+                    println!("{}", "==> Running Sanitization Gate & Sync Push...".bold());
+                    match engine.push_updates(&local_project, &root_template_dir, &user_home, &xdg_config) {
+                        sync::PushResult::Success { synced_files } => {
+                            println!("  {} Sanitization gate passed: clean of secrets & parameters applied.", "✓".green());
+                            println!("  {} Successfully synchronized {} file(s) to upstream.", "✓".green(), synced_files);
+                        }
+                        sync::PushResult::SecretBlocked { path, reason } => {
+                            eprintln!("  {} Push rejected on {}: {}", "✗".red(), path.display(), reason);
+                            std::process::exit(1);
+                        }
+                        sync::PushResult::BoundaryBlocked { path } => {
+                            eprintln!("  {} Push rejected: {} is within private publish boundary.", "✗".red(), path.display());
+                            std::process::exit(1);
+                        }
+                        sync::PushResult::ConflictBlocked { path } => {
+                            eprintln!("  {} Push rejected: {} conflicts with upstream.", "✗".red(), path.display());
+                            std::process::exit(1);
+                        }
+                    }
+                }
             }
-            cli::SyncAction::Pull => {
-                println!("{}", "==> Pulling updates from central configuration store...".bold());
-                println!("  {} No pending updates.", "✓".green());
-            }
-            cli::SyncAction::Push { force: _ } => {
-                println!("{}", "==> Running Sanitization Gate before upstream push...".bold());
-                let _sanitizer = sanitizer::Sanitizer::new();
-                println!("  {} Secret scanner: clean.", "✓".green());
-                println!("  {} Path parameterization: clean.", "✓".green());
-                println!("  {} Publish boundary: clean.", "✓".green());
-                println!("{}", "==> Sync push completed successfully.".bold());
-            }
-        },
+        }
     }
 }
 
