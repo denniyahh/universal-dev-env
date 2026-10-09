@@ -44,8 +44,16 @@ pub struct SyncConfig {
     pub allow_overrides: bool,
     #[serde(default)]
     pub central_repo: Option<String>,
+    #[serde(default = "default_branch")]
+    pub branch: String,
+    #[serde(default)]
+    pub auto_pr: bool,
     #[serde(default)]
     pub exclude: Vec<String>,
+}
+
+fn default_branch() -> String {
+    "main".to_string()
 }
 
 impl Default for SyncConfig {
@@ -54,6 +62,8 @@ impl Default for SyncConfig {
             strategy: default_strategy(),
             allow_overrides: true,
             central_repo: None,
+            branch: default_branch(),
+            auto_pr: false,
             exclude: vec![
                 "*.local.*".to_string(),
                 ".ude/overrides/**".to_string(),
@@ -98,17 +108,7 @@ impl Default for UdeManifest {
                     ],
                 },
             },
-            sync: SyncConfig {
-                strategy: default_strategy(),
-                allow_overrides: true,
-                central_repo: None,
-                exclude: vec![
-                    "*.local.*".to_string(),
-                    ".ude/overrides/**".to_string(),
-                    "target/**".to_string(),
-                    "node_modules/**".to_string(),
-                ],
-            },
+            sync: SyncConfig::default(),
         }
     }
 }

@@ -211,8 +211,6 @@ fn main() {
             println!("{}", "==> Project initialization complete.".bold());
         }
         cli::Commands::Sync(sync_args) => {
-            let root_template_dir = find_templates_dir().unwrap_or_else(|| PathBuf::from("templates"));
-            let local_project = PathBuf::from(".");
             let engine = sync::SyncEngine::new();
             let base_dirs = directories::BaseDirs::new();
             let user_home = base_dirs
@@ -223,10 +221,47 @@ fn main() {
                 .as_ref()
                 .map(|b| b.config_dir().to_string_lossy().to_string())
                 .unwrap_or_else(|| format!("{user_home}/.config"));
+            let cache_dir = base_dirs
+                .as_ref()
+                .map(|b| b.cache_dir().join("ude"))
+                .unwrap_or_else(|| PathBuf::from(format!("{user_home}/.cache/ude")));
+
+            // Check if .ude.toml exists in current directory or user config
+            let local_manifest = std::fs::read_to_string(".ude.toml")
+                .ok()
+                .and_then(|c| manifest::UdeManifest::parse_str(&c).ok());
+
+            let remote_url = sync_args
+                .remote
+                .or_else(|| local_manifest.as_ref().and_then(|m| m.sync.central_repo.clone()));
+
+            let branch = sync_args
+                .branch
+                .unwrap_or_else(|| local_manifest.as_ref().map(|m| m.sync.branch.clone()).unwrap_or_else(|| "main".to_string()));
+
+            let (root_template_dir, remote_checkout_root) = if let Some(ref r_url) = remote_url {
+                match engine.ensure_remote_repo(r_url, &branch, &cache_dir) {
+                    Ok(tmpl_dir) => {
+                        let checkout_dir = tmpl_dir.parent().unwrap_or(&tmpl_dir).to_path_buf();
+                        (tmpl_dir, Some(checkout_dir))
+                    }
+                    Err(e) => {
+                        eprintln!("  {} Failed to sync with remote {}: {}", "✗".red(), r_url, e);
+                        std::process::exit(1);
+                    }
+                }
+            } else {
+                (find_templates_dir().unwrap_or_else(|| PathBuf::from("templates")), None)
+            };
+
+            let local_project = PathBuf::from(".");
 
             match sync_args.action {
                 cli::SyncAction::Status => {
                     println!("{}", "==> Checking UDE environment sync status...".bold());
+                    if let Some(ref r_url) = remote_url {
+                        println!("  {} Remote Upstream: {} ({})", "ℹ".blue(), r_url, branch);
+                    }
                     let states = engine.scan_project(&local_project, &root_template_dir);
                     for s in states {
                         match s.status {
@@ -250,6 +285,9 @@ fn main() {
                 }
                 cli::SyncAction::Pull => {
                     println!("{}", "==> Pulling updates from central configuration store...".bold());
+                    if let Some(ref r_url) = remote_url {
+                        println!("  {} Remote Upstream: {} ({})", "ℹ".blue(), r_url, branch);
+                    }
                     let states = engine.scan_project(&local_project, &root_template_dir);
                     let mut pulled = 0;
                     for s in states {
@@ -264,12 +302,23 @@ fn main() {
                         println!("  {} Applied {} upstream update(s).", "✓".green(), pulled);
                     }
                 }
-                cli::SyncAction::Push { force: _ } => {
+                cli::SyncAction::Push { force: _, pr } => {
                     println!("{}", "==> Running Sanitization Gate & Sync Push...".bold());
                     match engine.push_updates(&local_project, &root_template_dir, &user_home, &xdg_config) {
                         sync::PushResult::Success { synced_files } => {
                             println!("  {} Sanitization gate passed: clean of secrets & parameters applied.", "✓".green());
-                            println!("  {} Successfully synchronized {} file(s) to upstream.", "✓".green(), synced_files);
+                            println!("  {} Successfully synchronized {} file(s) into upstream template store.", "✓".green(), synced_files);
+
+                            if let Some(ref remote_checkout) = remote_checkout_root {
+                                println!("  {} Pushing synchronized templates to remote repository...", "==>".cyan());
+                                match engine.push_to_remote(remote_checkout, &branch, pr) {
+                                    Ok(msg) => println!("  {} {msg}", "✓".green()),
+                                    Err(err) => {
+                                        eprintln!("  {} Failed to push to remote: {err}", "✗".red());
+                                        std::process::exit(1);
+                                    }
+                                }
+                            }
                         }
                         sync::PushResult::SecretBlocked { path, reason } => {
                             eprintln!("  {} Push rejected on {}: {}", "✗".red(), path.display(), reason);
@@ -281,6 +330,10 @@ fn main() {
                         }
                         sync::PushResult::ConflictBlocked { path } => {
                             eprintln!("  {} Push rejected: {} conflicts with upstream.", "✗".red(), path.display());
+                            std::process::exit(1);
+                        }
+                        sync::PushResult::GitRemoteFailed { reason } => {
+                            eprintln!("  {} Remote sync failed: {}", "✗".red(), reason);
                             std::process::exit(1);
                         }
                     }

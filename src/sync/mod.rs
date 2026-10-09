@@ -2,6 +2,7 @@ use crate::sanitizer::{SanitizationResult, Sanitizer};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub enum SyncStatus {
@@ -26,6 +27,7 @@ pub enum PushResult {
     SecretBlocked { path: PathBuf, reason: String },
     ConflictBlocked { path: PathBuf },
     BoundaryBlocked { path: PathBuf },
+    GitRemoteFailed { reason: String },
 }
 
 #[derive(Default)]
@@ -122,7 +124,64 @@ impl SyncEngine {
         states
     }
 
-    /// Pre-validates and pushes locally modified files to upstream
+    /// Ensures a remote git repository is cached locally and updated
+    pub fn ensure_remote_repo(
+        &self,
+        remote_url: &str,
+        branch: &str,
+        cache_dir: &Path,
+    ) -> Result<PathBuf, String> {
+        fs::create_dir_all(cache_dir)
+            .map_err(|e| format!("Failed to create cache dir {}: {e}", cache_dir.display()))?;
+
+        // Hash remote URL to isolate checkouts
+        let repo_hash = &Self::compute_hash(remote_url.as_bytes())[..12];
+        let target_checkout = cache_dir.join(format!("remote-{repo_hash}"));
+
+        if !target_checkout.join(".git").exists() {
+            println!("  Cloning remote repository into cache: {}...", remote_url);
+            let status = Command::new("git")
+                .args(["clone", "--depth", "1", "-b", branch, remote_url])
+                .arg(&target_checkout)
+                .status()
+                .map_err(|e| format!("Failed to execute git clone: {e}"))?;
+
+            if !status.success() {
+                return Err(format!("git clone failed with exit status {:?}", status.code()));
+            }
+        } else {
+            // Fetch latest branch
+            let status = Command::new("git")
+                .current_dir(&target_checkout)
+                .args(["fetch", "origin", branch])
+                .status()
+                .map_err(|e| format!("Failed to execute git fetch: {e}"))?;
+
+            if !status.success() {
+                return Err(format!("git fetch failed with exit status {:?}", status.code()));
+            }
+
+            let status = Command::new("git")
+                .current_dir(&target_checkout)
+                .args(["reset", "--hard", &format!("origin/{branch}")])
+                .status()
+                .map_err(|e| format!("Failed to execute git reset: {e}"))?;
+
+            if !status.success() {
+                return Err(format!("git reset failed with exit status {:?}", status.code()));
+            }
+        }
+
+        // Return the templates directory inside the remote checkout
+        let templates_path = target_checkout.join("templates");
+        if templates_path.exists() {
+            Ok(templates_path)
+        } else {
+            Ok(target_checkout)
+        }
+    }
+
+    /// Pre-validates and pushes locally modified files to upstream template directory
     pub fn push_updates(
         &self,
         local_root: &Path,
@@ -184,6 +243,114 @@ impl SyncEngine {
 
         PushResult::Success {
             synced_files: synced,
+        }
+    }
+
+    /// Pushes committed upstream updates to the remote git origin or creates a PR
+    pub fn push_to_remote(
+        &self,
+        remote_checkout: &Path,
+        branch: &str,
+        open_pr: bool,
+    ) -> Result<String, String> {
+        let status = Command::new("git")
+            .current_dir(remote_checkout)
+            .args(["status", "--porcelain"])
+            .output()
+            .map_err(|e| format!("Failed to check git status in remote checkout: {e}"))?;
+
+        if status.stdout.is_empty() {
+            return Ok("No changes to push to remote repository.".to_string());
+        }
+
+        // Stage all changes
+        let add_status = Command::new("git")
+            .current_dir(remote_checkout)
+            .args(["add", "-A"])
+            .status()
+            .map_err(|e| format!("Failed to stage remote changes: {e}"))?;
+
+        if !add_status.success() {
+            return Err("git add failed in remote checkout".to_string());
+        }
+
+        let commit_msg = "chore(sync): synchronize environment refinements from local workstation";
+
+        if open_pr {
+            let sync_branch = format!("ude-sync-{}", &Self::compute_hash(commit_msg.as_bytes())[..8]);
+            let _ = Command::new("git")
+                .current_dir(remote_checkout)
+                .args(["checkout", "-b", &sync_branch])
+                .status();
+
+            let commit_status = Command::new("git")
+                .current_dir(remote_checkout)
+                .args(["commit", "-m", commit_msg])
+                .status()
+                .map_err(|e| format!("Failed to commit in remote checkout: {e}"))?;
+
+            if !commit_status.success() {
+                return Err("git commit failed in remote checkout".to_string());
+            }
+
+            let push_status = Command::new("git")
+                .current_dir(remote_checkout)
+                .args(["push", "-u", "origin", &sync_branch])
+                .status()
+                .map_err(|e| format!("Failed to push sync branch: {e}"))?;
+
+            if !push_status.success() {
+                return Err(format!("git push failed for branch {sync_branch}"));
+            }
+
+            // Attempt to create PR via gh CLI if available
+            let pr_cmd = Command::new("gh")
+                .current_dir(remote_checkout)
+                .args([
+                    "pr",
+                    "create",
+                    "--title",
+                    commit_msg,
+                    "--body",
+                    "Automated pull request from UDE remote synchronization.",
+                    "--base",
+                    branch,
+                    "--head",
+                    &sync_branch,
+                ])
+                .output();
+
+            match pr_cmd {
+                Ok(output) if output.status.success() => {
+                    let pr_url = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    Ok(format!("Opened GitHub Pull Request: {pr_url}"))
+                }
+                _ => Ok(format!(
+                    "Pushed changes to branch '{sync_branch}'. Create a PR on GitHub to merge into '{branch}'."
+                )),
+            }
+        } else {
+            let commit_status = Command::new("git")
+                .current_dir(remote_checkout)
+                .args(["commit", "-m", commit_msg])
+                .status()
+                .map_err(|e| format!("Failed to commit in remote checkout: {e}"))?;
+
+            if !commit_status.success() {
+                return Err("git commit failed in remote checkout".to_string());
+            }
+
+            let push_status = Command::new("git")
+                .current_dir(remote_checkout)
+                .args(["push", "origin", branch])
+                .status()
+                .map_err(|e| format!("Failed to push to remote: {e}"))?;
+
+            if !push_status.success() {
+                return Err(format!("git push origin {branch} failed"));
+            }
+
+            Ok(format!("Directly pushed changes to remote branch '{branch}'."))
         }
     }
 }
@@ -369,5 +536,50 @@ mod tests {
         );
 
         assert_eq!(res, PushResult::Success { synced_files: 0 });
+    }
+
+    #[test]
+    fn test_remote_repo_cache_management() {
+        let engine = SyncEngine::new();
+        let cache_dir = tempdir().unwrap();
+        let fake_remote = tempdir().unwrap();
+
+        // Initialize a fake remote git repository with a templates/ directory
+        let status = Command::new("git")
+            .current_dir(fake_remote.path())
+            .args(["init", "-b", "main"])
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        let fake_templates = fake_remote.path().join("templates");
+        fs::create_dir_all(&fake_templates).unwrap();
+        fs::write(fake_templates.join("test.txt"), "remote template content").unwrap();
+
+        let _ = Command::new("git")
+            .current_dir(fake_remote.path())
+            .args(["add", "-A"])
+            .status();
+        let commit_status = Command::new("git")
+            .current_dir(fake_remote.path())
+            .args([
+                "-c", "user.name=Tester",
+                "-c", "user.email=tester@example.com",
+                "-c", "commit.gpgsign=false",
+                "commit",
+                "--no-gpg-sign",
+                "-m", "init fake remote",
+            ])
+            .status()
+            .unwrap();
+        assert!(commit_status.success());
+
+        let remote_url = fake_remote.path().to_string_lossy().to_string();
+        let resolved = engine
+            .ensure_remote_repo(&remote_url, "main", cache_dir.path())
+            .expect("remote cache resolution");
+
+        assert!(resolved.exists());
+        assert!(resolved.join("test.txt").exists());
     }
 }

@@ -60,6 +60,14 @@ pub struct InitArgs {
 
 #[derive(Args, Debug)]
 pub struct SyncArgs {
+    /// Remote git repository URL to synchronize with (defaults to central_repo in .ude.toml or cached upstream)
+    #[arg(long, global = true)]
+    pub remote: Option<String>,
+
+    /// Branch to synchronize with (defaults to main)
+    #[arg(long, global = true)]
+    pub branch: Option<String>,
+
     #[command(subcommand)]
     pub action: SyncAction,
 }
@@ -75,5 +83,9 @@ pub enum SyncAction {
         /// Force push ignoring non-critical warnings
         #[arg(long)]
         force: bool,
+
+        /// Open a GitHub Pull Request via gh instead of pushing directly to target branch
+        #[arg(long)]
+        pr: bool,
     },
 }
