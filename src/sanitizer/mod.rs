@@ -41,10 +41,10 @@ impl Sanitizer {
                 "Bearer Token",
                 Regex::new(r"(?i)\bBearer\s+[A-Za-z0-9_\-\.]{20,}\b").unwrap(),
             ),
-            // Generic high-entropy API keys / secrets (quoted and unquoted assignments)
+            // Generic high-entropy API keys / secrets (quoted and unquoted assignments, including JSON syntax)
             (
                 "Generic API Key",
-                Regex::new(r#"(?i)\b(api[_-]?key|secret[_-]?key|access[_-]?token|auth[_-]?token)\s*[:=]\s*['"]?[A-Za-z0-9_\-\.]{20,}['"]?"#).unwrap(),
+                Regex::new(r#"(?i)["']?(?:api[_-]?key|secret[_-]?key|access[_-]?token|auth[_-]?token)["']?\s*[:=]\s*['"]?[A-Za-z0-9_\-\.]{20,}['"]?"#).unwrap(),
             ),
             // AWS Access Key ID
             (
@@ -71,20 +71,21 @@ impl Sanitizer {
     }
 
     /// Parameterizes hardcoded user home and config paths into portable tokens.
-    /// Strictly asserts on path boundaries so neighboring paths (e.g. /home/user2) are never corrupted.
+    /// Strictly asserts on leading and trailing path boundaries so neighboring paths
+    /// (e.g. /home/user2 or /backup/home/user) are never corrupted.
     pub fn parameterize_paths(&self, content: &str, user_home: &str, xdg_config: &str) -> String {
         let mut result = content.to_string();
 
         if !xdg_config.is_empty() && xdg_config != user_home {
-            let pattern = format!(r#"{}([/\\"'\s:]|$)"#, regex::escape(xdg_config));
+            let pattern = format!(r#"(^|[^A-Za-z0-9_.\-]){}([/\\"'\s:]|$)"#, regex::escape(xdg_config));
             if let Ok(re) = Regex::new(&pattern) {
-                result = re.replace_all(&result, "{{ user.xdg_config }}$1").to_string();
+                result = re.replace_all(&result, "${1}{{ user.xdg_config }}$2").to_string();
             }
         }
         if !user_home.is_empty() {
-            let pattern = format!(r#"{}([/\\"'\s:]|$)"#, regex::escape(user_home));
+            let pattern = format!(r#"(^|[^A-Za-z0-9_.\-]){}([/\\"'\s:]|$)"#, regex::escape(user_home));
             if let Ok(re) = Regex::new(&pattern) {
-                result = re.replace_all(&result, "{{ user.home }}$1").to_string();
+                result = re.replace_all(&result, "${1}{{ user.home }}$2").to_string();
             }
         }
         result
@@ -241,6 +242,21 @@ mod tests {
     }
 
     #[test]
+    fn test_secret_detection_json_key() {
+        let sanitizer = Sanitizer::new();
+        let k = "api_key";
+        let v1 = "abcdefghijkl";
+        let v2 = "mnopqrstuvwx";
+        let json_dirty = format!(r#"{{"{k}":"{v1}{v2}"}}"#);
+        match sanitizer.check_secrets(&json_dirty) {
+            SanitizationResult::SecretDetected { pattern, .. } => {
+                assert_eq!(pattern, "Generic API Key");
+            }
+            SanitizationResult::Clean(_) => panic!("Expected JSON secret detection!"),
+        }
+    }
+
+    #[test]
     fn test_path_parameterization_boundary_safety() {
         let sanitizer = Sanitizer::new();
         // Negative control: Neighboring path /home/alice2 must NOT be corrupted when home is /home/alice
@@ -249,6 +265,14 @@ mod tests {
         assert_eq!(
             parameterized,
             "User home is {{ user.home }} and neighboring user is /home/alice2/data"
+        );
+
+        // Negative control: Preceding path /backup/home/alice must NOT be corrupted when home is /home/alice
+        let backup_raw = "Archive is at /backup/home/alice/data.tar";
+        let backup_param = sanitizer.parameterize_paths(backup_raw, "/home/alice", "/home/alice/.config");
+        assert_eq!(
+            backup_param,
+            "Archive is at /backup/home/alice/data.tar"
         );
 
         let config_raw = "Config in /home/alice/.config/app/conf.toml";

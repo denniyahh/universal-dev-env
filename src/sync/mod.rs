@@ -291,15 +291,32 @@ impl SyncEngine {
             return Ok("No changes to push to remote repository.".to_string());
         }
 
-        // Stage all changes
+        // Stage only the validated templates directory to prevent accidental untracked file leaks
         let add_status = Command::new("git")
             .current_dir(remote_checkout)
-            .args(["add", "-A"])
+            .args(["add", "templates"])
             .status()
-            .map_err(|e| format!("Failed to stage remote changes: {e}"))?;
+            .map_err(|e| format!("Failed to stage remote template changes: {e}"))?;
 
         if !add_status.success() {
             return Err("git add failed in remote checkout".to_string());
+        }
+
+        // Verify that only files under templates/ are staged
+        let diff_cached = Command::new("git")
+            .current_dir(remote_checkout)
+            .args(["diff", "--cached", "--name-only"])
+            .output()
+            .map_err(|e| format!("Failed to inspect staged diff in remote checkout: {e}"))?;
+
+        let staged_output = String::from_utf8_lossy(&diff_cached.stdout);
+        for line in staged_output.lines() {
+            let trimmed = line.trim();
+            if !trimmed.is_empty() && !trimmed.starts_with("templates/") {
+                return Err(format!(
+                    "Security boundary violation: staging detected file outside templates/: {trimmed}"
+                ));
+            }
         }
 
         let commit_msg = "chore(sync): synchronize environment refinements from local workstation";

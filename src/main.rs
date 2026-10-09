@@ -332,6 +332,13 @@ fn main() {
                             && let (Ok(local_txt), Ok(up_txt)) = (fs::read_to_string(&candidate_rules), fs::read_to_string(&upstream_rules))
                             && local_txt != up_txt
                         {
+                            // Pre-scan secrets locally BEFORE sending candidate text to any external API
+                            let pre_sanitizer = sanitizer::Sanitizer::new();
+                            if let sanitizer::SanitizationResult::SecretDetected { reason, .. } = pre_sanitizer.check_secrets(&local_txt) {
+                                eprintln!("  {} Security Gate: Secret detected in {} before API transmission: {}", "✗".red(), candidate_rules.display(), reason);
+                                std::process::exit(1);
+                            }
+
                             match typesafe.evaluate_drift("AGENTS.md", &up_txt, &local_txt) {
                                 Ok(semantic::SemanticDriftVerdict::PolicyShift) => {
                                     if !force {
