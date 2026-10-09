@@ -2,6 +2,7 @@ pub mod audit;
 pub mod cli;
 pub mod manifest;
 pub mod sanitizer;
+pub mod semantic;
 pub mod sync;
 pub mod template;
 
@@ -302,8 +303,46 @@ fn main() {
                         println!("  {} Applied {} upstream update(s).", "✓".green(), pulled);
                     }
                 }
-                cli::SyncAction::Push { force: _, pr } => {
+                cli::SyncAction::Push { force, pr } => {
                     println!("{}", "==> Running Sanitization Gate & Sync Push...".bold());
+
+                    // If TypeSafe AI API is configured, evaluate semantic drift on agent rules
+                    let typesafe = semantic::TypeSafeClient::new();
+                    if typesafe.is_available() {
+                        println!("  {} TypeSafe System One (Jev) enabled for semantic drift auditing", "✓".green());
+                        let candidate_rules = local_project.join(".agents/AGENTS.md");
+                        let upstream_rules = root_template_dir.join("projects/agents/agents.md.jinja");
+                        if candidate_rules.exists()
+                            && upstream_rules.exists()
+                            && let (Ok(local_txt), Ok(up_txt)) = (fs::read_to_string(&candidate_rules), fs::read_to_string(&upstream_rules))
+                            && local_txt != up_txt
+                        {
+                            match typesafe.evaluate_drift("AGENTS.md", &up_txt, &local_txt) {
+                                Ok(semantic::SemanticDriftVerdict::PolicyShift) => {
+                                    if !force {
+                                        eprintln!("  {} TypeSafe Verdict: [policy_shift] Staged rule modification alters or weakens core governance policies.", "✗".red());
+                                        eprintln!("     Use --force to override if this policy change is intentional.");
+                                        std::process::exit(1);
+                                    } else {
+                                        println!("  {} TypeSafe Warning: [policy_shift] Overriding policy change due to --force flag.", "!".yellow());
+                                    }
+                                }
+                                Ok(semantic::SemanticDriftVerdict::ProjectException) => {
+                                    println!("  {} TypeSafe Notice: [project_exception] Local rule additions detected. Ensure repository-specific quirks belong in *.local rather than universal baseline.", "ℹ".blue());
+                                }
+                                Ok(semantic::SemanticDriftVerdict::BenignRephrase) => {
+                                    println!("  {} TypeSafe Verdict: [benign_rephrase] Clear phrasing / stylistic refinement.", "✓".green());
+                                }
+                                Ok(semantic::SemanticDriftVerdict::Uncertain(u)) => {
+                                    println!("  {} TypeSafe Notice: Semantic verdict: {}", "ℹ".blue(), u);
+                                }
+                                Err(e) => {
+                                    println!("  {} TypeSafe semantic evaluation bypassed: {}", "!".yellow(), e);
+                                }
+                            }
+                        }
+                    }
+
                     match engine.push_updates(&local_project, &root_template_dir, &user_home, &xdg_config) {
                         sync::PushResult::Success { synced_files } => {
                             println!("  {} Sanitization gate passed: clean of secrets & parameters applied.", "✓".green());
