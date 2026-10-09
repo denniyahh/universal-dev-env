@@ -17,6 +17,12 @@ pub struct AuditReport {
     pub status: CheckStatus,
 }
 
+impl AuditReport {
+    pub fn is_fail(&self) -> bool {
+        matches!(self.status, CheckStatus::Fail(_))
+    }
+}
+
 pub struct Auditor {
     #[allow(dead_code)]
     user_home: PathBuf,

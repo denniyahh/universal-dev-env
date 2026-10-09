@@ -27,6 +27,7 @@ pub enum PushResult {
     SecretBlocked { path: PathBuf, reason: String },
     ConflictBlocked { path: PathBuf },
     BoundaryBlocked { path: PathBuf },
+    IoFailed { path: PathBuf, reason: String },
     GitRemoteFailed { reason: String },
 }
 
@@ -181,17 +182,21 @@ impl SyncEngine {
         }
     }
 
-    /// Pre-validates and pushes locally modified files to upstream template directory
+    /// Pre-validates and pushes locally modified files to upstream template directory.
+    /// Operates atomically: verifies that ALL candidate files pass publish boundary,
+    /// read integrity, and secret scanning before performing any upstream modifications.
     pub fn push_updates(
         &self,
         local_root: &Path,
         upstream_root: &Path,
         user_home: &str,
         xdg_config: &str,
+        allow_agent_rules: bool,
     ) -> PushResult {
         let states = self.scan_project(local_root, upstream_root);
-        let mut synced = 0;
+        let mut candidates_to_write = Vec::new();
 
+        // Pass 1: Strict atomic pre-validation across ALL modified candidates
         for state in states {
             // Overridden files are never pushed upstream (Option B)
             if state.status == SyncStatus::Overridden {
@@ -202,7 +207,10 @@ impl SyncEngine {
                 let local_path = local_root.join(&state.relative_path);
 
                 // Gate 1: Check publish boundary
-                if self.sanitizer.is_local_only_path(&state.relative_path) {
+                if self
+                    .sanitizer
+                    .is_local_only_path(&state.relative_path, allow_agent_rules)
+                {
                     return PushResult::BoundaryBlocked {
                         path: state.relative_path,
                     };
@@ -210,7 +218,12 @@ impl SyncEngine {
 
                 let content = match fs::read_to_string(&local_path) {
                     Ok(c) => c,
-                    Err(_) => continue,
+                    Err(err) => {
+                        return PushResult::IoFailed {
+                            path: state.relative_path,
+                            reason: format!("Failed to read local file: {err}"),
+                        };
+                    }
                 };
 
                 // Gate 2: Secret check (reject credentials)
@@ -229,16 +242,31 @@ impl SyncEngine {
                     .sanitizer
                     .parameterize_paths(&content, user_home, xdg_config);
 
-                // Materialize into upstream template
-                if let Some(target_upstream) = map_to_upstream(upstream_root, &state.relative_path)
-                {
-                    if let Some(parent) = target_upstream.parent() {
-                        let _ = fs::create_dir_all(parent);
-                    }
-                    let _ = fs::write(target_upstream, parameterized);
-                    synced += 1;
+                // Stage into candidates list
+                if let Some(target_upstream) = map_to_upstream(upstream_root, &state.relative_path) {
+                    candidates_to_write.push((state.relative_path, target_upstream, parameterized));
                 }
             }
+        }
+
+        // Pass 2: Transactional materialization of validated files
+        let mut synced = 0;
+        for (rel_path, target_upstream, parameterized) in candidates_to_write {
+            if let Some(parent) = target_upstream.parent()
+                && let Err(err) = fs::create_dir_all(parent)
+            {
+                return PushResult::IoFailed {
+                    path: rel_path,
+                    reason: format!("Failed to create parent directory: {err}"),
+                };
+            }
+            if let Err(err) = fs::write(&target_upstream, parameterized) {
+                return PushResult::IoFailed {
+                    path: rel_path,
+                    reason: format!("Failed to write upstream template: {err}"),
+                };
+            }
+            synced += 1;
         }
 
         PushResult::Success {
@@ -447,6 +475,7 @@ mod tests {
             upstream_dir.path(),
             "/home/denniyahh",
             "/home/denniyahh/.config",
+            false,
         );
 
         assert_eq!(res, PushResult::Success { synced_files: 1 });
@@ -455,7 +484,7 @@ mod tests {
             .path()
             .join("projects/generic/gitconfig.repo");
         let content = fs::read_to_string(written_upstream).unwrap();
-        assert!(content.contains("{{ user_home }}"));
+        assert!(content.contains("{{ user.home }}"));
         assert!(!content.contains("/home/denniyahh"));
     }
 
@@ -479,6 +508,7 @@ mod tests {
             upstream_dir.path(),
             "/home/denniyahh",
             "/home/denniyahh/.config",
+            false,
         );
 
         match res {
@@ -487,6 +517,46 @@ mod tests {
             }
             _ => panic!("Expected SecretBlocked, got {:?}", res),
         }
+    }
+
+    #[test]
+    fn test_push_updates_atomic_prevalidation_no_partial_writes() {
+        let engine = SyncEngine::new();
+        let local_dir = tempdir().unwrap();
+        let upstream_dir = tempdir().unwrap();
+
+        // Candidate 1: Clean file (.gitconfig)
+        let local_gitconfig = local_dir.path().join(".gitconfig");
+        fs::write(&local_gitconfig, "[user]\nname = Alice\n").unwrap();
+
+        // Candidate 2: Dirty file (.gitignore with secret)
+        let local_gitignore = local_dir.path().join(".gitignore");
+        let prefix = "ghp_";
+        let body = "111122223333444455556666777788889999";
+        fs::write(&local_gitignore, format!("target/\n{prefix}{body}\n")).unwrap();
+
+        let res = engine.push_updates(
+            local_dir.path(),
+            upstream_dir.path(),
+            "/home/alice",
+            "/home/alice/.config",
+            false,
+        );
+
+        // Must reject on the dirty file
+        match res {
+            PushResult::SecretBlocked { path, .. } => {
+                assert_eq!(path, PathBuf::from(".gitignore"));
+            }
+            _ => panic!("Expected SecretBlocked, got {:?}", res),
+        }
+
+        // Negative control: Assert that .gitconfig upstream was NOT created / written
+        let upstream_gitconfig = map_to_upstream(upstream_dir.path(), Path::new(".gitconfig")).unwrap();
+        assert!(
+            !upstream_gitconfig.exists(),
+            "Atomicity violation: upstream file was written before pre-validation completed!"
+        );
     }
 
     #[test]
@@ -504,6 +574,7 @@ mod tests {
             upstream_dir.path(),
             "/home/denniyahh",
             "/home/denniyahh/.config",
+            false,
         );
 
         match res {
@@ -533,6 +604,7 @@ mod tests {
             upstream_dir.path(),
             "/home/denniyahh",
             "/home/denniyahh/.config",
+            false,
         );
 
         assert_eq!(res, PushResult::Success { synced_files: 0 });

@@ -3,9 +3,18 @@ use minijinja::Environment;
 use serde::Serialize;
 use std::collections::HashMap;
 
+/// Nested user path variables for structured template access (e.g. {{ user.home }})
+#[derive(Debug, Clone, Serialize)]
+pub struct UserContext {
+    pub home: String,
+    pub xdg_config: String,
+    pub xdg_data: String,
+}
+
 /// System context parameters available in all UDE templates
 #[derive(Debug, Clone, Serialize)]
 pub struct TemplateContext {
+    pub user: UserContext,
     pub user_home: String,
     pub xdg_config: String,
     pub xdg_data: String,
@@ -70,7 +79,14 @@ impl TemplateContext {
             })
             .unwrap_or_else(|| "developer@example.com".to_string());
 
+        let user = UserContext {
+            home: user_home.clone(),
+            xdg_config: xdg_config.clone(),
+            xdg_data: xdg_data.clone(),
+        };
+
         Self {
+            user,
             user_home,
             xdg_config,
             xdg_data,
@@ -123,6 +139,11 @@ mod tests {
     fn test_template_rendering_basic() {
         let renderer = TemplateRenderer::new();
         let ctx = TemplateContext {
+            user: UserContext {
+                home: "/home/testuser".to_string(),
+                xdg_config: "/home/testuser/.config".to_string(),
+                xdg_data: "/home/testuser/.local/share".to_string(),
+            },
             user_home: "/home/testuser".to_string(),
             xdg_config: "/home/testuser/.config".to_string(),
             xdg_data: "/home/testuser/.local/share".to_string(),
@@ -135,9 +156,10 @@ mod tests {
             extra: HashMap::new(),
         };
 
-        let tmpl = "{{ git_email }} ssh-ed25519 {{ maintainer_ssh_pubkey }} maintainer\n{{ xdg_config }}/git/allowed_signers";
+        let tmpl = "{{ git_email }} ssh-ed25519 {{ maintainer_ssh_pubkey }} maintainer\n{{ user.home }}/.config/git/allowed_signers\n{{ user.xdg_config }}";
         let rendered = renderer.render_str(tmpl, &ctx).expect("render");
         assert!(rendered.contains("test@example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA..."));
         assert!(rendered.contains("/home/testuser/.config/git/allowed_signers"));
+        assert!(rendered.contains("/home/testuser/.config"));
     }
 }

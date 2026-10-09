@@ -27,6 +27,12 @@ fn main() {
                 None
             };
 
+            let has_failures = host_reports.iter().any(|r| r.is_fail())
+                || repo_reports
+                    .as_ref()
+                    .map(|(_, reps)| reps.iter().any(|r| r.is_fail()))
+                    .unwrap_or(false);
+
             if doctor_args.format == "json" {
                 #[derive(serde::Serialize)]
                 struct JsonDoctorReport {
@@ -41,6 +47,9 @@ fn main() {
                 };
 
                 println!("{}", serde_json::to_string_pretty(&json_data).unwrap());
+                if has_failures {
+                    std::process::exit(1);
+                }
                 return;
             }
 
@@ -82,7 +91,12 @@ fn main() {
                 }
             }
 
-            println!("\n{}", "==> Doctor check completed.".bold());
+            if has_failures {
+                eprintln!("\n{}", "Doctor detected failing checks. Remediation required.".red().bold());
+                std::process::exit(1);
+            } else {
+                println!("\n{}", "==> Doctor check completed. All required baselines verified.".bold());
+            }
         }
         cli::Commands::Init(init_args) => {
             let project_path = init_args.path;
@@ -307,6 +321,7 @@ fn main() {
                     println!("{}", "==> Running Sanitization Gate & Sync Push...".bold());
 
                     // If TypeSafe AI API is configured, evaluate semantic drift on agent rules
+                    let mut allow_agent_rules = force;
                     let typesafe = semantic::TypeSafeClient::new();
                     if typesafe.is_available() {
                         println!("  {} TypeSafe System One (Jev) enabled for semantic drift auditing", "✓".green());
@@ -325,6 +340,7 @@ fn main() {
                                         std::process::exit(1);
                                     } else {
                                         println!("  {} TypeSafe Warning: [policy_shift] Overriding policy change due to --force flag.", "!".yellow());
+                                        allow_agent_rules = true;
                                     }
                                 }
                                 Ok(semantic::SemanticDriftVerdict::ProjectException) => {
@@ -332,6 +348,7 @@ fn main() {
                                 }
                                 Ok(semantic::SemanticDriftVerdict::BenignRephrase) => {
                                     println!("  {} TypeSafe Verdict: [benign_rephrase] Clear phrasing / stylistic refinement.", "✓".green());
+                                    allow_agent_rules = true;
                                 }
                                 Ok(semantic::SemanticDriftVerdict::Uncertain(u)) => {
                                     println!("  {} TypeSafe Notice: Semantic verdict: {}", "ℹ".blue(), u);
@@ -343,7 +360,13 @@ fn main() {
                         }
                     }
 
-                    match engine.push_updates(&local_project, &root_template_dir, &user_home, &xdg_config) {
+                    match engine.push_updates(
+                        &local_project,
+                        &root_template_dir,
+                        &user_home,
+                        &xdg_config,
+                        allow_agent_rules,
+                    ) {
                         sync::PushResult::Success { synced_files } => {
                             println!("  {} Sanitization gate passed: clean of secrets & parameters applied.", "✓".green());
                             println!("  {} Successfully synchronized {} file(s) into upstream template store.", "✓".green(), synced_files);
@@ -369,6 +392,10 @@ fn main() {
                         }
                         sync::PushResult::ConflictBlocked { path } => {
                             eprintln!("  {} Push rejected: {} conflicts with upstream.", "✗".red(), path.display());
+                            std::process::exit(1);
+                        }
+                        sync::PushResult::IoFailed { path, reason } => {
+                            eprintln!("  {} Push failed due to I/O error on {}: {}", "✗".red(), path.display(), reason);
                             std::process::exit(1);
                         }
                         sync::PushResult::GitRemoteFailed { reason } => {

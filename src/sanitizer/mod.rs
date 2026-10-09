@@ -1,5 +1,5 @@
 use regex::Regex;
-use std::path::Path;
+use std::path::{Component, Path};
 
 /// Result of a sanitization check
 #[derive(Debug, PartialEq, Eq)]
@@ -21,14 +21,36 @@ impl Default for Sanitizer {
 impl Sanitizer {
     pub fn new() -> Self {
         let patterns = vec![
-            // Private SSH keys
-            ("Private SSH Key", Regex::new(r"-----BEGIN [A-Z0-9_-]+ PRIVATE KEY-----").unwrap()),
-            // GitHub personal access tokens
-            ("GitHub Personal Access Token", Regex::new(r"gh[pousr]_[A-Za-z0-9_]{36,255}").unwrap()),
-            // Generic high-entropy API keys
-            ("Generic API Key", Regex::new(r#"(?i)(api[_-]?key|secret[_-]?key|bearer)\s*[:=]\s*['"][A-Za-z0-9_\-.]{20,}['"]"#).unwrap()),
+            // Private SSH, TLS, or PKCS keys (including PKCS8 headers)
+            (
+                "Private Key",
+                Regex::new(r"-----BEGIN (?:[A-Z0-9_-]+ )?PRIVATE KEY-----").unwrap(),
+            ),
+            // GitHub personal access tokens (classic ghp/gho/ghu/ghs/ghr and fine-grained github_pat)
+            (
+                "GitHub Personal Access Token",
+                Regex::new(r"\b(?:gh[pousr]_[A-Za-z0-9_]{36,255}|github_pat_[A-Za-z0-9_]{50,255})\b").unwrap(),
+            ),
+            // GitLab personal access tokens
+            (
+                "GitLab Personal Access Token",
+                Regex::new(r"\bglpat-[A-Za-z0-9_\-]{20,}\b").unwrap(),
+            ),
+            // HTTP Bearer tokens
+            (
+                "Bearer Token",
+                Regex::new(r"(?i)\bBearer\s+[A-Za-z0-9_\-\.]{20,}\b").unwrap(),
+            ),
+            // Generic high-entropy API keys / secrets (quoted and unquoted assignments)
+            (
+                "Generic API Key",
+                Regex::new(r#"(?i)\b(api[_-]?key|secret[_-]?key|access[_-]?token|auth[_-]?token)\s*[:=]\s*['"]?[A-Za-z0-9_\-\.]{20,}['"]?"#).unwrap(),
+            ),
             // AWS Access Key ID
-            ("AWS Access Key", Regex::new(r"(A3T[A-Z0-9]|AKIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA|ASIA)[A-Z0-9]{16}").unwrap()),
+            (
+                "AWS Access Key",
+                Regex::new(r"\b(A3T[A-Z0-9]|AKIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA|ASIA)[A-Z0-9]{16}\b").unwrap(),
+            ),
         ];
         Self {
             secret_patterns: patterns,
@@ -48,34 +70,68 @@ impl Sanitizer {
         SanitizationResult::Clean(content.to_string())
     }
 
-    /// Parameterizes hardcoded user home and config paths into portable tokens
+    /// Parameterizes hardcoded user home and config paths into portable tokens.
+    /// Strictly asserts on path boundaries so neighboring paths (e.g. /home/user2) are never corrupted.
     pub fn parameterize_paths(&self, content: &str, user_home: &str, xdg_config: &str) -> String {
         let mut result = content.to_string();
 
         if !xdg_config.is_empty() && xdg_config != user_home {
-            result = result.replace(xdg_config, "{{ xdg_config }}");
+            let pattern = format!(r#"{}([/\\"'\s:]|$)"#, regex::escape(xdg_config));
+            if let Ok(re) = Regex::new(&pattern) {
+                result = re.replace_all(&result, "{{ user.xdg_config }}$1").to_string();
+            }
         }
         if !user_home.is_empty() {
-            result = result.replace(user_home, "{{ user_home }}");
+            let pattern = format!(r#"{}([/\\"'\s:]|$)"#, regex::escape(user_home));
+            if let Ok(re) = Regex::new(&pattern) {
+                result = re.replace_all(&result, "{{ user.home }}$1").to_string();
+            }
         }
         result
     }
 
-    /// Asserts whether a path is safe to publish or belongs to the local-only contribution boundary
-    pub fn is_local_only_path(&self, path: &Path) -> bool {
-        let path_str = path.to_string_lossy();
-        let path_norm = path_str.trim_start_matches("./");
+    /// Asserts whether a path is safe to publish or belongs to the local-only contribution boundary.
+    /// When `allow_agent_rules` is true, canonical agent rule templates (e.g. `.agents/AGENTS.md`)
+    /// are permitted for central template updates.
+    pub fn is_local_only_path(&self, path: &Path, allow_agent_rules: bool) -> bool {
+        let mut normalized_parts: Vec<String> = Vec::new();
+        for component in path.components() {
+            match component {
+                Component::Normal(c) => normalized_parts.push(c.to_string_lossy().to_string()),
+                Component::CurDir => {}
+                Component::ParentDir => {
+                    normalized_parts.pop();
+                }
+                _ => {}
+            }
+        }
 
-        path_norm == ".agents"
-            || path_norm.starts_with(".agents/")
-            || path_norm == ".planning"
-            || path_norm.starts_with(".planning/")
-            || path_norm == "scratch"
-            || path_norm.starts_with("scratch/")
-            || path_norm == "mise.local.toml"
-            || path_norm.ends_with(".local.md")
-            || path_norm.ends_with(".local.toml")
-            || path_norm.ends_with(".local")
+        if normalized_parts.is_empty() {
+            return false;
+        }
+
+        let first = &normalized_parts[0];
+        let full_rel = normalized_parts.join("/");
+
+        if first == ".planning"
+            || first == "scratch"
+            || first == ".local"
+            || full_rel == "mise.local.toml"
+            || full_rel.ends_with(".local.md")
+            || full_rel.ends_with(".local.toml")
+            || full_rel.ends_with(".local")
+        {
+            return true;
+        }
+
+        if first == ".agents" {
+            if allow_agent_rules && full_rel == ".agents/AGENTS.md" {
+                return false;
+            }
+            return true;
+        }
+
+        false
     }
 }
 
@@ -86,7 +142,7 @@ mod tests {
     #[test]
     fn test_secret_detection_github_token() {
         let sanitizer = Sanitizer::new();
-        // Dynamically assembled fixture so git-commit secret scanners don't flag static unit test literals
+        // Dynamically assembled fixtures so host git pre-commit hooks (gitleaks) don't trigger on test source
         let token_prefix = "ghp_";
         let token_body = "111122223333444455556666777788889999";
         let dirty = format!("export GITHUB_TOKEN={token_prefix}{token_body}");
@@ -99,39 +155,128 @@ mod tests {
     }
 
     #[test]
-    fn test_secret_detection_ssh_private_key() {
+    fn test_secret_detection_fine_grained_pat() {
         let sanitizer = Sanitizer::new();
-        let dirty = "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAA...\n-----END OPENSSH PRIVATE KEY-----";
-        match sanitizer.check_secrets(dirty) {
+        let pfx = "github_pat_";
+        let part1 = "11AABBCCDDEEFF0011223344";
+        let part2 = "5566778899AABBCCDDEEFF00";
+        let part3 = "112233445566778899AABBCCDDEEFF00112233";
+        let dirty = format!("token = '{pfx}{part1}{part2}{part3}'");
+        match sanitizer.check_secrets(&dirty) {
             SanitizationResult::SecretDetected { pattern, .. } => {
-                assert_eq!(pattern, "Private SSH Key");
+                assert_eq!(pattern, "GitHub Personal Access Token");
             }
-            SanitizationResult::Clean(_) => panic!("Expected private key detection!"),
+            SanitizationResult::Clean(_) => panic!("Expected fine-grained GitHub PAT detection!"),
         }
     }
 
     #[test]
-    fn test_path_parameterization() {
+    fn test_secret_detection_gitlab_pat() {
         let sanitizer = Sanitizer::new();
-        let raw = "Config loaded from /home/denniyahh/.config/git/allowed_signers for /home/denniyahh";
-        let parameterized = sanitizer.parameterize_paths(
-            raw,
-            "/home/denniyahh",
-            "/home/denniyahh/.config",
-        );
+        let pfx = "glpat-";
+        let p1 = "0123456789";
+        let p2 = "abcdefghij";
+        let dirty = format!("GITLAB_TOKEN={pfx}{p1}{p2}");
+        match sanitizer.check_secrets(&dirty) {
+            SanitizationResult::SecretDetected { pattern, .. } => {
+                assert_eq!(pattern, "GitLab Personal Access Token");
+            }
+            SanitizationResult::Clean(_) => panic!("Expected GitLab PAT detection!"),
+        }
+    }
+
+    #[test]
+    fn test_secret_detection_pkcs8_private_key() {
+        let sanitizer = Sanitizer::new();
+        let b1 = "-----BEGIN";
+        let b2 = "PRIVATE KEY-----";
+        let e1 = "-----END";
+        let e2 = "PRIVATE KEY-----";
+        let dirty = format!("{b1} {b2}\nMIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQC6...\n{e1} {e2}");
+        match sanitizer.check_secrets(&dirty) {
+            SanitizationResult::SecretDetected { pattern, .. } => {
+                assert_eq!(pattern, "Private Key");
+            }
+            SanitizationResult::Clean(_) => panic!("Expected PKCS#8 private key detection!"),
+        }
+    }
+
+    #[test]
+    fn test_secret_detection_bearer_and_unquoted_key() {
+        let sanitizer = Sanitizer::new();
+        let b_hdr = "Bearer";
+        let b_jwt = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0";
+        let bearer_dirty = format!("Authorization: {b_hdr} {b_jwt}");
+        match sanitizer.check_secrets(&bearer_dirty) {
+            SanitizationResult::SecretDetected { pattern, .. } => {
+                assert_eq!(pattern, "Bearer Token");
+            }
+            SanitizationResult::Clean(_) => panic!("Expected Bearer token detection!"),
+        }
+
+        let k_name = "api_key";
+        let k_val_p1 = "sk-proj-";
+        let k_val_p2 = "1234567890abcdef1234";
+        let unquoted_dirty = format!("{k_name}={k_val_p1}{k_val_p2}");
+        match sanitizer.check_secrets(&unquoted_dirty) {
+            SanitizationResult::SecretDetected { pattern, .. } => {
+                assert_eq!(pattern, "Generic API Key");
+            }
+            SanitizationResult::Clean(_) => panic!("Expected unquoted API key detection!"),
+        }
+    }
+
+    #[test]
+    fn test_secret_detection_negative_control() {
+        let sanitizer = Sanitizer::new();
+        let benign = "export APP_ENV=production\nexport PORT=8080\n# Public documentation link: https://api.github.com";
+        match sanitizer.check_secrets(benign) {
+            SanitizationResult::Clean(content) => {
+                assert_eq!(content, benign);
+            }
+            SanitizationResult::SecretDetected { reason, .. } => {
+                panic!("False positive on benign content: {reason}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_path_parameterization_boundary_safety() {
+        let sanitizer = Sanitizer::new();
+        // Negative control: Neighboring path /home/alice2 must NOT be corrupted when home is /home/alice
+        let raw = "User home is /home/alice and neighboring user is /home/alice2/data";
+        let parameterized = sanitizer.parameterize_paths(raw, "/home/alice", "/home/alice/.config");
         assert_eq!(
             parameterized,
-            "Config loaded from {{ xdg_config }}/git/allowed_signers for {{ user_home }}"
+            "User home is {{ user.home }} and neighboring user is /home/alice2/data"
+        );
+
+        let config_raw = "Config in /home/alice/.config/app/conf.toml";
+        let config_param = sanitizer.parameterize_paths(config_raw, "/home/alice", "/home/alice/.config");
+        assert_eq!(
+            config_param,
+            "Config in {{ user.xdg_config }}/app/conf.toml"
         );
     }
 
     #[test]
     fn test_local_only_boundary() {
         let sanitizer = Sanitizer::new();
-        assert!(sanitizer.is_local_only_path(Path::new(".agents/AGENTS.md")));
-        assert!(sanitizer.is_local_only_path(Path::new("scratch/ci-mac.sh")));
-        assert!(sanitizer.is_local_only_path(Path::new("CLAUDE.local.md")));
-        assert!(!sanitizer.is_local_only_path(Path::new("src/main.rs")));
-        assert!(!sanitizer.is_local_only_path(Path::new("Cargo.toml")));
+        // By default without agent rules allowed:
+        assert!(sanitizer.is_local_only_path(Path::new(".agents/AGENTS.md"), false));
+        // With agent rules allowed for canonical template sync:
+        assert!(!sanitizer.is_local_only_path(Path::new(".agents/AGENTS.md"), true));
+
+        // Scratch and planning are always blocked
+        assert!(sanitizer.is_local_only_path(Path::new("scratch/ci-mac.sh"), true));
+        assert!(sanitizer.is_local_only_path(Path::new(".planning/STATE.md"), true));
+        assert!(sanitizer.is_local_only_path(Path::new("CLAUDE.local.md"), true));
+
+        // Path traversal attempts are blocked
+        assert!(sanitizer.is_local_only_path(Path::new("subdir/../scratch/leak.sh"), false));
+
+        // Generic repo files are publishable
+        assert!(!sanitizer.is_local_only_path(Path::new("src/main.rs"), false));
+        assert!(!sanitizer.is_local_only_path(Path::new("Cargo.toml"), false));
     }
 }
