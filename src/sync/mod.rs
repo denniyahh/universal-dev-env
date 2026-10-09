@@ -1,3 +1,6 @@
+pub mod state;
+pub use state::{FileStateRecord, ProjectState};
+
 use crate::sanitizer::{SanitizationResult, Sanitizer};
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -19,6 +22,7 @@ pub struct FileSyncState {
     pub status: SyncStatus,
     pub local_hash: Option<String>,
     pub upstream_hash: Option<String>,
+    pub ancestor_hash: Option<String>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -29,6 +33,13 @@ pub enum PushResult {
     BoundaryBlocked { path: PathBuf },
     IoFailed { path: PathBuf, reason: String },
     GitRemoteFailed { reason: String },
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum PullResult {
+    Success { applied_files: usize },
+    ConflictBlocked { path: PathBuf },
+    IoFailed { path: PathBuf, reason: String },
 }
 
 #[derive(Default)]
@@ -50,33 +61,80 @@ impl SyncEngine {
         format!("{:x}", hasher.finalize())
     }
 
-    /// Detects sync status between a local file and upstream content
-    pub fn compare(
-        local_content: Option<&str>,
-        upstream_content: Option<&str>,
+    /// Detects 3-way sync status using SHA-256 hashes of ancestor (O), local (A), and upstream (B).
+    pub fn compare_3way_hashes(
+        ancestor_hash: Option<&str>,
+        local_hash: Option<&str>,
+        upstream_hash: Option<&str>,
         has_local_override: bool,
     ) -> SyncStatus {
         if has_local_override {
             return SyncStatus::Overridden;
         }
 
-        match (local_content, upstream_content) {
-            (Some(local), Some(upstream)) => {
-                if local == upstream {
-                    SyncStatus::InSync
-                } else {
-                    SyncStatus::LocallyModified
+        // Clean identical match
+        if local_hash == upstream_hash {
+            return SyncStatus::InSync;
+        }
+
+        match ancestor_hash {
+            Some(o) => {
+                let local_matches_base = local_hash == Some(o);
+                let upstream_matches_base = upstream_hash == Some(o);
+
+                match (local_matches_base, upstream_matches_base) {
+                    (true, false) => SyncStatus::UpstreamModified,
+                    (false, true) => SyncStatus::LocallyModified,
+                    (false, false) => SyncStatus::Conflicted,
+                    (true, true) => SyncStatus::InSync,
                 }
             }
-            (Some(_), None) => SyncStatus::LocallyModified,
-            (None, Some(_)) => SyncStatus::UpstreamModified,
-            (None, None) => SyncStatus::InSync,
+            None => match (local_hash, upstream_hash) {
+                (Some(_), None) => SyncStatus::LocallyModified,
+                (None, Some(_)) => SyncStatus::UpstreamModified,
+                (Some(_), Some(_)) => SyncStatus::Conflicted,
+                (None, None) => SyncStatus::InSync,
+            },
         }
     }
 
-    /// Compares a local directory against an upstream template directory
-    pub fn scan_project(&self, local_root: &Path, upstream_root: &Path) -> Vec<FileSyncState> {
+    /// Detects 3-way sync status between ancestor (base), local, and upstream content string slices.
+    pub fn compare_3way(
+        ancestor_content: Option<&str>,
+        local_content: Option<&str>,
+        upstream_content: Option<&str>,
+        has_local_override: bool,
+    ) -> SyncStatus {
+        let a_hash = ancestor_content.map(|c| Self::compute_hash(c.as_bytes()));
+        let l_hash = local_content.map(|c| Self::compute_hash(c.as_bytes()));
+        let u_hash = upstream_content.map(|c| Self::compute_hash(c.as_bytes()));
+        Self::compare_3way_hashes(
+            a_hash.as_deref(),
+            l_hash.as_deref(),
+            u_hash.as_deref(),
+            has_local_override,
+        )
+    }
+
+    /// Detects sync status between a local file and upstream content (delegates to 3-way comparison with no ancestor).
+    pub fn compare(
+        local_content: Option<&str>,
+        upstream_content: Option<&str>,
+        has_local_override: bool,
+    ) -> SyncStatus {
+        Self::compare_3way(None, local_content, upstream_content, has_local_override)
+    }
+
+    /// Compares a local directory against an upstream template directory using 3-way ancestor state.
+    pub fn scan_project(
+        &self,
+        local_root: &Path,
+        upstream_root: &Path,
+        ctx: Option<&crate::template::TemplateContext>,
+    ) -> Vec<FileSyncState> {
         let mut states = Vec::new();
+        let project_state = ProjectState::load_from_dir(local_root);
+        let renderer = crate::template::TemplateRenderer::new();
 
         // Inspect known managed files
         let managed_files = vec![
@@ -98,27 +156,38 @@ impl SyncEngine {
             let upstream_path = map_to_upstream(upstream_root, &rel);
 
             let local_content = fs::read_to_string(&local_path).ok();
-            let upstream_content = upstream_path
-                .as_ref()
-                .and_then(|p| fs::read_to_string(p).ok());
+            let upstream_content = upstream_path.as_ref().and_then(|p| {
+                fs::read_to_string(p).ok().and_then(|raw| {
+                    if p.extension().and_then(|e| e.to_str()) == Some("jinja") {
+                        if let Some(c) = ctx {
+                            renderer.render_str(&raw, c).ok()
+                        } else {
+                            Some(raw)
+                        }
+                    } else {
+                        Some(raw)
+                    }
+                })
+            });
 
             let has_local_override = check_for_override(local_root, &rel);
+            let ancestor_hash = project_state.get_ancestor_hash(&rel).map(String::from);
+            let local_hash = local_content.as_ref().map(|c| Self::compute_hash(c.as_bytes()));
+            let upstream_hash = upstream_content.as_ref().map(|c| Self::compute_hash(c.as_bytes()));
 
-            let status = Self::compare(
-                local_content.as_deref(),
-                upstream_content.as_deref(),
+            let status = Self::compare_3way_hashes(
+                ancestor_hash.as_deref(),
+                local_hash.as_deref(),
+                upstream_hash.as_deref(),
                 has_local_override,
             );
-
-            let local_hash = local_content.as_ref().map(|c| Self::compute_hash(c.as_bytes()));
-            let upstream_hash =
-                upstream_content.as_ref().map(|c| Self::compute_hash(c.as_bytes()));
 
             states.push(FileSyncState {
                 relative_path: rel,
                 status,
                 local_hash,
                 upstream_hash,
+                ancestor_hash,
             });
         }
 
@@ -182,6 +251,126 @@ impl SyncEngine {
         }
     }
 
+    /// Pulls upstream updates into the local project directory.
+    /// Operates with strict safety:
+    /// 1. Rejects pull completely if any managed file is Conflicted (conflict gate).
+    /// 2. For every UpstreamModified file, materializes the rendered/copied content.
+    /// 3. Preserves Unix execute permissions on scripts and hooks.
+    /// 4. Updates ancestor checksums in `.ude/state.json`.
+    pub fn pull_updates(
+        &self,
+        local_root: &Path,
+        upstream_root: &Path,
+        ctx: &crate::template::TemplateContext,
+    ) -> PullResult {
+        let states = self.scan_project(local_root, upstream_root, Some(ctx));
+        let renderer = crate::template::TemplateRenderer::new();
+
+        // Gate 1: Check for conflicts across the entire project
+        for s in &states {
+            if s.status == SyncStatus::Conflicted {
+                return PullResult::ConflictBlocked {
+                    path: s.relative_path.clone(),
+                };
+            }
+        }
+
+        let mut candidates_to_write = Vec::new();
+
+        // Pass 1: Resolve all upstream content
+        for s in states {
+            if s.status == SyncStatus::UpstreamModified {
+                let upstream_path = match map_to_upstream(upstream_root, &s.relative_path) {
+                    Some(p) => p,
+                    None => {
+                        return PullResult::IoFailed {
+                            path: s.relative_path.clone(),
+                            reason: "No upstream mapping found for file".to_string(),
+                        };
+                    }
+                };
+
+                let raw = match fs::read_to_string(&upstream_path) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        return PullResult::IoFailed {
+                            path: s.relative_path.clone(),
+                            reason: format!("Failed to read upstream file {}: {e}", upstream_path.display()),
+                        };
+                    }
+                };
+
+                let content = if upstream_path.extension().and_then(|e| e.to_str()) == Some("jinja") {
+                    match renderer.render_str(&raw, ctx) {
+                        Ok(rendered) => rendered,
+                        Err(e) => {
+                            return PullResult::IoFailed {
+                                path: s.relative_path.clone(),
+                                reason: format!("Failed to render template {}: {e}", upstream_path.display()),
+                            };
+                        }
+                    }
+                } else {
+                    raw
+                };
+
+                let target_path = local_root.join(&s.relative_path);
+                let new_hash = Self::compute_hash(content.as_bytes());
+                candidates_to_write.push((s.relative_path, target_path, content, new_hash));
+            }
+        }
+
+        if candidates_to_write.is_empty() {
+            return PullResult::Success { applied_files: 0 };
+        }
+
+        // Pass 2: Write files and update ancestor state
+        let mut project_state = ProjectState::load_from_dir(local_root);
+        let mut applied = 0;
+
+        for (rel, target, content, new_hash) in candidates_to_write {
+            if let Some(parent) = target.parent()
+                && let Err(e) = fs::create_dir_all(parent)
+            {
+                return PullResult::IoFailed {
+                    path: rel,
+                    reason: format!("Failed to create parent directory: {e}"),
+                };
+            }
+
+            if let Err(e) = fs::write(&target, &content) {
+                return PullResult::IoFailed {
+                    path: rel,
+                    reason: format!("Failed to write local file: {e}"),
+                };
+            }
+
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let rel_str = rel.to_string_lossy();
+                if rel_str.starts_with("scripts/hooks/")
+                    || rel_str.starts_with("scratch/")
+                    || rel_str == "scripts/check-in-container.sh"
+                {
+                    let _ = fs::set_permissions(&target, fs::Permissions::from_mode(0o755));
+                }
+            }
+
+            project_state.record_file(&rel, new_hash);
+            applied += 1;
+        }
+
+        if let Err(e) = project_state.save_to_dir(local_root) {
+            return PullResult::IoFailed {
+                path: PathBuf::from(".ude/state.json"),
+                reason: format!("Failed to persist state: {e}"),
+            };
+        }
+
+        PullResult::Success { applied_files: applied }
+    }
+
     /// Pre-validates and pushes locally modified files to upstream template directory.
     /// Operates atomically: verifies that ALL candidate files pass publish boundary,
     /// read integrity, and secret scanning before performing any upstream modifications.
@@ -193,11 +382,23 @@ impl SyncEngine {
         xdg_config: &str,
         allow_agent_rules: bool,
     ) -> PushResult {
-        let states = self.scan_project(local_root, upstream_root);
+        let dummy_ctx = crate::template::TemplateContext::detect_for_project(
+            local_root,
+            "project",
+            "generic",
+        );
+        let states = self.scan_project(local_root, upstream_root, Some(&dummy_ctx));
         let mut candidates_to_write = Vec::new();
 
         // Pass 1: Strict atomic pre-validation across ALL modified candidates
-        for state in states {
+        for state in &states {
+            // Conflict gate: Abort push if any file is conflicted
+            if state.status == SyncStatus::Conflicted {
+                return PushResult::ConflictBlocked {
+                    path: state.relative_path.clone(),
+                };
+            }
+
             // Overridden files are never pushed upstream (Option B)
             if state.status == SyncStatus::Overridden {
                 continue;
@@ -212,7 +413,7 @@ impl SyncEngine {
                     .is_local_only_path(&state.relative_path, allow_agent_rules)
                 {
                     return PushResult::BoundaryBlocked {
-                        path: state.relative_path,
+                        path: state.relative_path.clone(),
                     };
                 }
 
@@ -220,7 +421,7 @@ impl SyncEngine {
                     Ok(c) => c,
                     Err(err) => {
                         return PushResult::IoFailed {
-                            path: state.relative_path,
+                            path: state.relative_path.clone(),
                             reason: format!("Failed to read local file: {err}"),
                         };
                     }
@@ -230,7 +431,7 @@ impl SyncEngine {
                 match self.sanitizer.check_secrets(&content) {
                     SanitizationResult::SecretDetected { reason, .. } => {
                         return PushResult::SecretBlocked {
-                            path: state.relative_path,
+                            path: state.relative_path.clone(),
                             reason,
                         };
                     }
@@ -244,14 +445,15 @@ impl SyncEngine {
 
                 // Stage into candidates list
                 if let Some(target_upstream) = map_to_upstream(upstream_root, &state.relative_path) {
-                    candidates_to_write.push((state.relative_path, target_upstream, parameterized));
+                    candidates_to_write.push((state.relative_path.clone(), target_upstream, parameterized, content));
                 }
             }
         }
 
         // Pass 2: Transactional materialization of validated files
         let mut synced = 0;
-        for (rel_path, target_upstream, parameterized) in candidates_to_write {
+        let mut project_state = ProjectState::load_from_dir(local_root);
+        for (rel_path, target_upstream, parameterized, raw_local_content) in candidates_to_write {
             if let Some(parent) = target_upstream.parent()
                 && let Err(err) = fs::create_dir_all(parent)
             {
@@ -266,8 +468,13 @@ impl SyncEngine {
                     reason: format!("Failed to write upstream template: {err}"),
                 };
             }
+
+            let local_hash = Self::compute_hash(raw_local_content.as_bytes());
+            project_state.record_file(&rel_path, local_hash);
             synced += 1;
         }
+
+        let _ = project_state.save_to_dir(local_root);
 
         PushResult::Success {
             synced_files: synced,
@@ -461,17 +668,272 @@ mod tests {
     #[test]
     fn test_sync_status_locally_modified() {
         assert_eq!(
-            SyncEngine::compare(Some("local change"), Some("upstream original"), false),
+            SyncEngine::compare_3way(
+                Some("base version"),
+                Some("local change"),
+                Some("base version"),
+                false,
+            ),
             SyncStatus::LocallyModified
+        );
+    }
+
+    #[test]
+    fn test_sync_status_upstream_modified() {
+        assert_eq!(
+            SyncEngine::compare_3way(
+                Some("base version"),
+                Some("base version"),
+                Some("upstream change"),
+                false,
+            ),
+            SyncStatus::UpstreamModified
+        );
+    }
+
+    #[test]
+    fn test_sync_status_conflicted() {
+        assert_eq!(
+            SyncEngine::compare_3way(
+                Some("base version"),
+                Some("local edit"),
+                Some("upstream edit"),
+                false,
+            ),
+            SyncStatus::Conflicted
+        );
+    }
+
+    #[test]
+    fn test_sync_status_no_ancestor_divergent() {
+        assert_eq!(
+            SyncEngine::compare_3way(
+                None,
+                Some("local edit"),
+                Some("upstream edit"),
+                false,
+            ),
+            SyncStatus::Conflicted
+        );
+    }
+
+    #[test]
+    fn test_sync_status_identical_additions() {
+        assert_eq!(
+            SyncEngine::compare_3way(
+                None,
+                Some("identical addition"),
+                Some("identical addition"),
+                false,
+            ),
+            SyncStatus::InSync
+        );
+    }
+
+    #[test]
+    fn test_sync_status_deletions() {
+        // Local deleted, upstream untouched
+        assert_eq!(
+            SyncEngine::compare_3way(
+                Some("base version"),
+                None,
+                Some("base version"),
+                false,
+            ),
+            SyncStatus::LocallyModified
+        );
+
+        // Upstream deleted, local untouched
+        assert_eq!(
+            SyncEngine::compare_3way(
+                Some("base version"),
+                Some("base version"),
+                None,
+                false,
+            ),
+            SyncStatus::UpstreamModified
+        );
+
+        // Conflicting deletion: local deleted, upstream modified
+        assert_eq!(
+            SyncEngine::compare_3way(
+                Some("base version"),
+                None,
+                Some("upstream modified"),
+                false,
+            ),
+            SyncStatus::Conflicted
         );
     }
 
     #[test]
     fn test_sync_status_overridden() {
         assert_eq!(
-            SyncEngine::compare(Some("local change"), Some("upstream original"), true),
+            SyncEngine::compare_3way(
+                Some("base version"),
+                Some("local change"),
+                Some("upstream original"),
+                true,
+            ),
             SyncStatus::Overridden
         );
+    }
+
+    #[test]
+    fn test_pull_updates_materializes_files_and_updates_state() {
+        let engine = SyncEngine::new();
+        let local_dir = tempdir().unwrap();
+        let upstream_dir = tempdir().unwrap();
+
+        // Setup upstream files: static and jinja
+        let up_gitconfig = upstream_dir.path().join("projects/generic/gitconfig.repo");
+        fs::create_dir_all(up_gitconfig.parent().unwrap()).unwrap();
+        fs::write(&up_gitconfig, "[core]\n  autocrlf = input\n").unwrap();
+
+        let up_hook = upstream_dir.path().join("projects/generic/hooks/pre-commit");
+        fs::create_dir_all(up_hook.parent().unwrap()).unwrap();
+        fs::write(&up_hook, "#!/bin/sh\nexit 0\n").unwrap();
+
+        let up_mise = upstream_dir.path().join("projects/agents/mise.toml.jinja");
+        fs::create_dir_all(up_mise.parent().unwrap()).unwrap();
+        fs::write(&up_mise, "[tools]\nrust = \"1.85.0\"\nhome = \"{{ user.home }}\"\n").unwrap();
+
+        let ctx = crate::template::TemplateContext::detect_for_project(
+            local_dir.path(),
+            "test-proj",
+            "rust",
+        );
+
+        let pull_res = engine.pull_updates(local_dir.path(), upstream_dir.path(), &ctx);
+        assert_eq!(pull_res, PullResult::Success { applied_files: 3 });
+
+        // Verify files materialized locally
+        let loc_gitconfig = local_dir.path().join(".gitconfig");
+        assert!(loc_gitconfig.exists());
+        assert_eq!(fs::read_to_string(&loc_gitconfig).unwrap(), "[core]\n  autocrlf = input\n");
+
+        let loc_hook = local_dir.path().join("scripts/hooks/pre-commit");
+        assert!(loc_hook.exists());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let meta = fs::metadata(&loc_hook).unwrap();
+            assert_eq!(meta.permissions().mode() & 0o111, 0o111, "Hook must be executable");
+        }
+
+        let loc_mise = local_dir.path().join("mise.toml");
+        assert!(loc_mise.exists());
+        let mise_content = fs::read_to_string(&loc_mise).unwrap();
+        assert!(mise_content.contains(&ctx.user.home));
+
+        // Verify state persistence
+        let state = ProjectState::load_from_dir(local_dir.path());
+        assert!(state.get_ancestor_hash(Path::new(".gitconfig")).is_some());
+        assert!(state.get_ancestor_hash(Path::new("scripts/hooks/pre-commit")).is_some());
+        assert!(state.get_ancestor_hash(Path::new("mise.toml")).is_some());
+
+        // Negative control: Re-scanning now must report InSync for all 3 files
+        let states = engine.scan_project(local_dir.path(), upstream_dir.path(), Some(&ctx));
+        for s in states {
+            if s.relative_path == Path::new(".gitconfig")
+                || s.relative_path == Path::new("scripts/hooks/pre-commit")
+                || s.relative_path == Path::new("mise.toml")
+            {
+                assert_eq!(s.status, SyncStatus::InSync, "File {:?} must be InSync after pull", s.relative_path);
+            }
+        }
+    }
+
+    #[test]
+    fn test_pull_updates_conflict_blocked_no_partial_writes() {
+        let engine = SyncEngine::new();
+        let local_dir = tempdir().unwrap();
+        let upstream_dir = tempdir().unwrap();
+
+        let ctx = crate::template::TemplateContext::detect_for_project(
+            local_dir.path(),
+            "test-proj",
+            "rust",
+        );
+
+        // Record ancestor for .gitconfig
+        let mut state = ProjectState::default();
+        let base_content = "[core]\n  autocrlf = false\n";
+        let base_hash = SyncEngine::compute_hash(base_content.as_bytes());
+        state.record_file(Path::new(".gitconfig"), base_hash);
+        state.save_to_dir(local_dir.path()).unwrap();
+
+        // Local has modified .gitconfig
+        let loc_gitconfig = local_dir.path().join(".gitconfig");
+        fs::write(&loc_gitconfig, "[core]\n  autocrlf = local_divergence\n").unwrap();
+
+        // Upstream has ALSO modified .gitconfig
+        let up_gitconfig = upstream_dir.path().join("projects/generic/gitconfig.repo");
+        fs::create_dir_all(up_gitconfig.parent().unwrap()).unwrap();
+        fs::write(&up_gitconfig, "[core]\n  autocrlf = upstream_divergence\n").unwrap();
+
+        // Upstream also has a clean file that should NOT be written due to the conflict
+        let up_hook = upstream_dir.path().join("projects/generic/hooks/pre-commit");
+        fs::create_dir_all(up_hook.parent().unwrap()).unwrap();
+        fs::write(&up_hook, "#!/bin/sh\nexit 0\n").unwrap();
+
+        let res = engine.pull_updates(local_dir.path(), upstream_dir.path(), &ctx);
+        match res {
+            PullResult::ConflictBlocked { path } => {
+                assert_eq!(path, PathBuf::from(".gitconfig"));
+            }
+            _ => panic!("Expected ConflictBlocked, got {:?}", res),
+        }
+
+        // Negative control: Verify hook was NOT written to disk
+        assert!(
+            !local_dir.path().join("scripts/hooks/pre-commit").exists(),
+            "Atomicity violation: clean file was materialized despite conflict block!"
+        );
+        // Verify local gitconfig was NOT overwritten
+        assert_eq!(
+            fs::read_to_string(&loc_gitconfig).unwrap(),
+            "[core]\n  autocrlf = local_divergence\n"
+        );
+    }
+
+    #[test]
+    fn test_push_updates_blocked_on_conflict() {
+        let engine = SyncEngine::new();
+        let local_dir = tempdir().unwrap();
+        let upstream_dir = tempdir().unwrap();
+
+        // Record ancestor for .gitconfig
+        let mut state = ProjectState::default();
+        let base_content = "[core]\n  autocrlf = false\n";
+        let base_hash = SyncEngine::compute_hash(base_content.as_bytes());
+        state.record_file(Path::new(".gitconfig"), base_hash);
+        state.save_to_dir(local_dir.path()).unwrap();
+
+        // Local edit
+        let loc_gitconfig = local_dir.path().join(".gitconfig");
+        fs::write(&loc_gitconfig, "[core]\n  autocrlf = local_edit\n").unwrap();
+
+        // Upstream edit
+        let up_gitconfig = upstream_dir.path().join("projects/generic/gitconfig.repo");
+        fs::create_dir_all(up_gitconfig.parent().unwrap()).unwrap();
+        fs::write(&up_gitconfig, "[core]\n  autocrlf = upstream_edit\n").unwrap();
+
+        let res = engine.push_updates(
+            local_dir.path(),
+            upstream_dir.path(),
+            "/home/alice",
+            "/home/alice/.config",
+            false,
+        );
+
+        match res {
+            PushResult::ConflictBlocked { path } => {
+                assert_eq!(path, PathBuf::from(".gitconfig"));
+            }
+            _ => panic!("Expected ConflictBlocked on push, got {:?}", res),
+        }
     }
 
     #[test]

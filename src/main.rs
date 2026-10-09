@@ -98,8 +98,8 @@ fn main() {
                 println!("\n{}", "==> Doctor check completed. All required baselines verified.".bold());
             }
         }
-        cli::Commands::Init(init_args) => {
-            let project_path = init_args.path;
+        cli::Commands::Init(init_args) | cli::Commands::Project(cli::ProjectCommands { action: cli::ProjectAction::Init(init_args) }) => {
+            let project_path = init_args.resolved_path();
             let project_name = project_path
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())
@@ -115,7 +115,7 @@ fn main() {
                 .bold()
             );
 
-            let ctx = template::TemplateContext::detect(&project_name, &init_args.project_type);
+            let ctx = template::TemplateContext::detect_for_project(&project_path, &project_name, &init_args.project_type);
             let renderer = template::TemplateRenderer::new();
 
             // Locate canonical templates directory
@@ -220,6 +220,37 @@ fn main() {
                 }
             }
 
+            // 4. Record baseline ancestor checksums in .ude/state.json
+            let mut project_state = sync::ProjectState {
+                project_type: Some(init_args.project_type.clone()),
+                ..Default::default()
+            };
+            let managed_rels = [
+                std::path::PathBuf::from(".gitconfig"),
+                std::path::PathBuf::from(".gitignore"),
+                std::path::PathBuf::from("scripts/hooks/commit-msg"),
+                std::path::PathBuf::from("scripts/hooks/pre-commit"),
+                std::path::PathBuf::from("scripts/hooks/pre-push"),
+                std::path::PathBuf::from("scripts/check-in-container.sh"),
+                std::path::PathBuf::from("scratch/check-publish-boundary.sh"),
+                std::path::PathBuf::from("scratch/new-worktree.sh"),
+                std::path::PathBuf::from("scratch/sync-personal-env.sh"),
+                std::path::PathBuf::from("mise.toml"),
+                std::path::PathBuf::from(".agents/AGENTS.md"),
+            ];
+            for rel in &managed_rels {
+                let p = project_path.join(rel);
+                if let Ok(bytes) = fs::read(&p) {
+                    let hash = sync::SyncEngine::compute_hash(&bytes);
+                    project_state.record_file(rel, hash);
+                }
+            }
+            if let Err(e) = project_state.save_to_dir(&project_path) {
+                eprintln!("  {} Warning: Failed to persist ancestor state: {e}", "!".yellow());
+            } else {
+                println!("  {} Recorded baseline ancestor state in .ude/state.json", "✓".green());
+            }
+
             println!("  {} Created project directories and scaffolding", "✓".green());
             println!("  {} Configured tracked .gitconfig & chained scripts/hooks", "✓".green());
             println!("  {} Initialized workflow tasks (mise.toml, scratch/)", "✓".green());
@@ -277,7 +308,8 @@ fn main() {
                     if let Some(ref r_url) = remote_url {
                         println!("  {} Remote Upstream: {} ({})", "ℹ".blue(), r_url, branch);
                     }
-                    let states = engine.scan_project(&local_project, &root_template_dir);
+                    let sync_ctx = template::TemplateContext::detect_for_project(&local_project, "project", "generic");
+                    let states = engine.scan_project(&local_project, &root_template_dir, Some(&sync_ctx));
                     for s in states {
                         match s.status {
                             sync::SyncStatus::InSync => {
@@ -303,18 +335,24 @@ fn main() {
                     if let Some(ref r_url) = remote_url {
                         println!("  {} Remote Upstream: {} ({})", "ℹ".blue(), r_url, branch);
                     }
-                    let states = engine.scan_project(&local_project, &root_template_dir);
-                    let mut pulled = 0;
-                    for s in states {
-                        if s.status == sync::SyncStatus::UpstreamModified {
-                            println!("  {} Updated {}", "✓".green(), s.relative_path.display());
-                            pulled += 1;
+                    let sync_ctx = template::TemplateContext::detect_for_project(&local_project, "project", "generic");
+                    match engine.pull_updates(&local_project, &root_template_dir, &sync_ctx) {
+                        sync::PullResult::Success { applied_files } => {
+                            if applied_files == 0 {
+                                println!("  {} No pending upstream updates to apply.", "✓".green());
+                            } else {
+                                println!("  {} Successfully pulled and materialized {} upstream update(s).", "✓".green(), applied_files);
+                            }
                         }
-                    }
-                    if pulled == 0 {
-                        println!("  {} No pending upstream updates to apply.", "✓".green());
-                    } else {
-                        println!("  {} Applied {} upstream update(s).", "✓".green(), pulled);
+                        sync::PullResult::ConflictBlocked { path } => {
+                            eprintln!("  {} Pull aborted: {} has conflicting local and upstream modifications.", "✗".red(), path.display());
+                            eprintln!("     Resolve local modifications or create a .local override before pulling.");
+                            std::process::exit(1);
+                        }
+                        sync::PullResult::IoFailed { path, reason } => {
+                            eprintln!("  {} Pull failed due to I/O error on {}: {}", "✗".red(), path.display(), reason);
+                            std::process::exit(1);
+                        }
                     }
                 }
                 cli::SyncAction::Push { force, pr } => {
@@ -422,14 +460,31 @@ fn find_templates_dir() -> Option<PathBuf> {
         return Some(cwd_templates.to_path_buf());
     }
 
+    if let Some(manifest_dir) = option_env!("CARGO_MANIFEST_DIR") {
+        let manifest_templates = Path::new(manifest_dir).join("templates");
+        if manifest_templates.exists() {
+            return Some(manifest_templates);
+        }
+    }
+
     if let Ok(exe_path) = std::env::current_exe()
         && let Some(parent) = exe_path.parent()
     {
-        let candidate = parent.join("../templates");
-        if candidate.exists() {
-            return Some(candidate);
+        for rel in &["../../templates", "../templates", "../share/ude/templates"] {
+            let candidate = parent.join(rel);
+            if candidate.exists() {
+                return Some(candidate);
+            }
         }
     }
+
+    if let Some(base_dirs) = directories::BaseDirs::new() {
+        let user_templates = base_dirs.data_dir().join("ude/templates");
+        if user_templates.exists() {
+            return Some(user_templates);
+        }
+    }
+
     None
 }
 

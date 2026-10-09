@@ -31,8 +31,8 @@ pub struct TemplateContext {
 }
 
 impl TemplateContext {
-    /// Detects host defaults from system environment and git config
-    pub fn detect(project_name: &str, project_type: &str) -> Self {
+    /// Detects host defaults from system environment and git config for a specific project directory
+    pub fn detect_for_project(project_dir: &std::path::Path, project_name: &str, default_project_type: &str) -> Self {
         let base_dirs = BaseDirs::new();
         let user_home = base_dirs
             .as_ref()
@@ -54,6 +54,7 @@ impl TemplateContext {
             .unwrap_or_else(|| format!("{}/.local/share", user_home));
 
         let git_user_name = std::process::Command::new("git")
+            .current_dir(project_dir)
             .args(["config", "--get", "user.name"])
             .output()
             .ok()
@@ -67,6 +68,7 @@ impl TemplateContext {
             .unwrap_or_else(|| "Developer".to_string());
 
         let git_email = std::process::Command::new("git")
+            .current_dir(project_dir)
             .args(["config", "--get", "user.email"])
             .output()
             .ok()
@@ -85,6 +87,21 @@ impl TemplateContext {
             xdg_data: xdg_data.clone(),
         };
 
+        let effective_project_type = if default_project_type != "generic" && !default_project_type.is_empty() {
+            default_project_type.to_string()
+        } else if let Ok(state_str) = std::fs::read_to_string(project_dir.join(".ude/state.json"))
+            && let Ok(state_json) = serde_json::from_str::<serde_json::Value>(&state_str)
+            && let Some(pt) = state_json.get("project_type").and_then(|v| v.as_str())
+        {
+            pt.to_string()
+        } else if project_dir.join("Cargo.toml").exists() {
+            "rust".to_string()
+        } else if project_dir.join("package.json").exists() {
+            "node".to_string()
+        } else {
+            default_project_type.to_string()
+        };
+
         Self {
             user,
             user_home,
@@ -93,11 +110,16 @@ impl TemplateContext {
             git_user_name,
             git_email,
             project_name: project_name.to_string(),
-            project_type: project_type.to_string(),
+            project_type: effective_project_type,
             maintainer_ssh_pubkey: None,
             agent_ssh_pubkey: None,
             extra: HashMap::new(),
         }
+    }
+
+    /// Detects host defaults from system environment and git config in the current working directory
+    pub fn detect(project_name: &str, project_type: &str) -> Self {
+        Self::detect_for_project(std::path::Path::new("."), project_name, project_type)
     }
 }
 

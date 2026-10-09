@@ -127,9 +127,13 @@ impl TypeSafeClient {
         let req_json = serde_json::to_string(&request)
             .map_err(|e| format!("Failed to serialize request: {e}"))?;
 
-        let output = Command::new("curl")
+        let mut child = Command::new("curl")
             .args([
                 "-s",
+                "--connect-timeout",
+                "5",
+                "--max-time",
+                "15",
                 "-X",
                 "POST",
                 "https://api.typesafe.ai/v1/systemone",
@@ -137,14 +141,26 @@ impl TypeSafeClient {
                 &format!("Authorization: Bearer {api_key}"),
                 "-H",
                 "Content-Type: application/json",
-                "-d",
-                &req_json,
+                "--data-binary",
+                "@-",
             ])
-            .output()
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("Failed to spawn curl: {e}"))?;
+
+        if let Some(mut stdin) = child.stdin.take() {
+            use std::io::Write;
+            let _ = stdin.write_all(req_json.as_bytes());
+        }
+
+        let output = child
+            .wait_with_output()
             .map_err(|e| format!("curl execution failed: {e}"))?;
 
         if !output.status.success() {
-            return Err("HTTP request failed".to_string());
+            return Err("HTTP request failed or timed out".to_string());
         }
 
         let resp_str = String::from_utf8_lossy(&output.stdout);
