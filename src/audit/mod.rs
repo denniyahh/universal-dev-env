@@ -93,14 +93,35 @@ impl Auditor {
 
         // 2. SSH allowed_signers
         let allowed_signers = self.xdg_config.join("git/allowed_signers");
+        let signers_status = if !allowed_signers.exists() {
+            CheckStatus::Critical(format!("Missing {}", allowed_signers.display()))
+        } else {
+            match std::fs::read_to_string(&allowed_signers) {
+                Ok(content) => {
+                    let has_valid_key = content.lines().any(|line| {
+                        let trimmed = line.trim();
+                        !trimmed.starts_with('#')
+                            && !trimmed.is_empty()
+                            && (trimmed.contains("ssh-ed25519")
+                                || trimmed.contains("ssh-rsa")
+                                || trimmed.contains("ecdsa-sha2-"))
+                    });
+                    if has_valid_key {
+                        CheckStatus::Pass
+                    } else {
+                        CheckStatus::Critical(format!(
+                            "Allowed signers file '{}' contains no authorized key fingerprints",
+                            allowed_signers.display()
+                        ))
+                    }
+                }
+                Err(e) => CheckStatus::Critical(format!("Failed to read {}: {e}", allowed_signers.display())),
+            }
+        };
         reports.push(AuditReport {
             category: "Git & SSH Security".to_string(),
             name: "Allowed SSH Signers file".to_string(),
-            status: if allowed_signers.exists() {
-                CheckStatus::Pass
-            } else {
-                CheckStatus::Critical(format!("Missing {}", allowed_signers.display()))
-            },
+            status: signers_status,
         });
 
         // 3. Global git config GPG format
@@ -169,28 +190,107 @@ impl Auditor {
 
         // 1. Check tracked .gitconfig include
         let gitconfig = repo_path.join(".gitconfig");
+        let gitconfig_status = if !gitconfig.exists() {
+            CheckStatus::Warning("Missing root .gitconfig template".to_string())
+        } else if std::fs::metadata(&gitconfig).map(|m| m.len()).unwrap_or(0) == 0 {
+            CheckStatus::Warning("Root .gitconfig template is empty (0 bytes)".to_string())
+        } else {
+            // Verify repository-local .git/config includes the root .gitconfig
+            let include_out = std::process::Command::new("git")
+                .current_dir(repo_path)
+                .args(["config", "--local", "--get-all", "include.path"])
+                .output()
+                .ok()
+                .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+                .unwrap_or_default();
+            let has_include = include_out
+                .lines()
+                .any(|l| l.trim() == "../.gitconfig" || l.trim() == ".gitconfig");
+            if has_include {
+                CheckStatus::Pass
+            } else {
+                CheckStatus::Warning(
+                    "Repository .git/config does not include root .gitconfig (missing 'include.path = ../.gitconfig')".to_string(),
+                )
+            }
+        };
         reports.push(AuditReport {
             category: "Repository Baseline".to_string(),
             name: "Tracked .gitconfig Include".to_string(),
-            status: if gitconfig.exists() {
+            status: gitconfig_status,
+        });
+
+        // 2. Check core.hooksPath configuration
+        let hooks_path_out = std::process::Command::new("git")
+            .current_dir(repo_path)
+            .args(["config", "--get", "core.hooksPath"])
+            .output()
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default();
+        reports.push(AuditReport {
+            category: "Git Hooks".to_string(),
+            name: "Repository core.hooksPath".to_string(),
+            status: if hooks_path_out == "scripts/hooks" {
                 CheckStatus::Pass
+            } else if hooks_path_out.is_empty() {
+                CheckStatus::Warning("Repository core.hooksPath is unset (should be 'scripts/hooks')".to_string())
             } else {
-                CheckStatus::Warning("Missing root .gitconfig template".to_string())
+                CheckStatus::Warning(format!(
+                    "Repository core.hooksPath is set to '{hooks_path_out}', expected 'scripts/hooks'"
+                ))
             },
         });
 
-        // 2. Check hooks suite
+        // 3. Check hooks suite & index execution modes
         let hooks_dir = repo_path.join("scripts/hooks");
         for hook in &["commit-msg", "pre-commit", "pre-push"] {
             let hook_file = hooks_dir.join(hook);
+            let status = if !hook_file.exists() {
+                CheckStatus::Warning(format!("Missing hook: scripts/hooks/{hook}"))
+            } else if std::fs::metadata(&hook_file).map(|m| m.len()).unwrap_or(0) == 0 {
+                CheckStatus::Warning(format!("Hook 'scripts/hooks/{hook}' is empty (0 bytes)"))
+            } else {
+                // Verify tracked executable mode 100755 in git index
+                let ls_stage = std::process::Command::new("git")
+                    .current_dir(repo_path)
+                    .args(["ls-files", "--stage", &format!("scripts/hooks/{hook}")])
+                    .output()
+                    .ok()
+                    .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+                    .unwrap_or_default();
+                let first_word = ls_stage.split_whitespace().next().unwrap_or("");
+                if first_word == "100755" {
+                    CheckStatus::Pass
+                } else if first_word == "100644" {
+                    CheckStatus::Warning(format!(
+                        "Hook 'scripts/hooks/{hook}' is tracked with non-executable mode 100644 in git index (run 'git update-index --chmod=+x scripts/hooks/{hook}')"
+                    ))
+                } else if ls_stage.is_empty() {
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        let perms = std::fs::metadata(&hook_file).map(|m| m.permissions().mode()).unwrap_or(0);
+                        if perms & 0o111 != 0 {
+                            CheckStatus::Pass
+                        } else {
+                            CheckStatus::Warning(format!(
+                                "Hook 'scripts/hooks/{hook}' is untracked and non-executable on disk"
+                            ))
+                        }
+                    }
+                    #[cfg(not(unix))]
+                    CheckStatus::Pass
+                } else {
+                    CheckStatus::Warning(format!(
+                        "Hook 'scripts/hooks/{hook}' has unrecognized git index mode '{first_word}'"
+                    ))
+                }
+            };
             reports.push(AuditReport {
                 category: "Git Hooks".to_string(),
                 name: format!("Hook: {hook}"),
-                status: if hook_file.exists() {
-                    CheckStatus::Pass
-                } else {
-                    CheckStatus::Warning(format!("Missing hook: scripts/hooks/{hook}"))
-                },
+                status,
             });
         }
 

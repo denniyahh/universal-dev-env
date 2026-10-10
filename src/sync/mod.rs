@@ -26,6 +26,7 @@ pub struct FileSyncState {
     pub upstream_hash: Option<String>,
     pub ancestor_hash: Option<String>,
     pub merged_content: Option<String>,
+    pub upstream_content: Option<String>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -276,6 +277,7 @@ impl SyncEngine {
                 upstream_hash,
                 ancestor_hash,
                 merged_content,
+                upstream_content,
             });
         }
 
@@ -292,9 +294,10 @@ impl SyncEngine {
         fs::create_dir_all(cache_dir)
             .map_err(|e| format!("Failed to create cache dir {}: {e}", cache_dir.display()))?;
 
-        // Hash remote URL to isolate checkouts
-        let repo_hash = &Self::compute_hash(remote_url.as_bytes())[..12];
-        let target_checkout = cache_dir.join(format!("remote-{repo_hash}"));
+        // Hash remote URL and branch to isolate checkouts and prevent refspec collisions
+        let key = format!("{remote_url}#{branch}");
+        let repo_hash = &Self::compute_hash(key.as_bytes())[..12];
+        let target_checkout = cache_dir.join(format!("remote-{repo_hash}-{branch}"));
 
         if !target_checkout.join(".git").exists() {
             println!("  Cloning remote repository into cache: {}...", remote_url);
@@ -406,7 +409,13 @@ impl SyncEngine {
 
                 let target_path = local_root.join(&s.relative_path);
                 let new_hash = Self::compute_hash(content.as_bytes());
-                candidates_to_write.push((s.relative_path, target_path, content, new_hash));
+                candidates_to_write.push((
+                    s.relative_path,
+                    target_path,
+                    content.clone(),
+                    new_hash,
+                    Some(content),
+                ));
             } else if s.status == SyncStatus::Merged {
                 let content = match s.merged_content {
                     Some(m) => m,
@@ -418,8 +427,18 @@ impl SyncEngine {
                     }
                 };
                 let target_path = local_root.join(&s.relative_path);
-                let new_hash = Self::compute_hash(content.as_bytes());
-                candidates_to_write.push((s.relative_path, target_path, content, new_hash));
+                // For merged files, record the incoming upstream content as the ancestor state
+                // so that the local changes remain properly classified as LocallyModified on
+                // subsequent scans, preventing a second pull from erasing the local edit!
+                let up_hash = s.upstream_hash.clone().unwrap_or_else(|| Self::compute_hash(content.as_bytes()));
+                let up_content = s.upstream_content.clone().or_else(|| Some(content.clone()));
+                candidates_to_write.push((
+                    s.relative_path,
+                    target_path,
+                    content,
+                    up_hash,
+                    up_content,
+                ));
             }
         }
 
@@ -431,7 +450,7 @@ impl SyncEngine {
         let mut project_state = ProjectState::load_from_dir(local_root);
         let mut applied = 0;
 
-        for (rel, target, content, new_hash) in candidates_to_write {
+        for (rel, target, content, ancestor_hash, ancestor_content) in candidates_to_write {
             if let Some(parent) = target.parent()
                 && let Err(e) = fs::create_dir_all(parent)
             {
@@ -460,7 +479,7 @@ impl SyncEngine {
                 }
             }
 
-            project_state.record_file(&rel, new_hash, Some(content));
+            project_state.record_file(&rel, ancestor_hash, ancestor_content);
             applied += 1;
         }
 
@@ -664,14 +683,27 @@ impl SyncEngine {
                 ));
             }
 
-            // Defense in depth: Check staged file bytes for secrets
-            let staged_full_path = remote_checkout.join(&p);
-            if let Ok(content) = fs::read_to_string(&staged_full_path)
-                && let SanitizationResult::SecretDetected { reason, .. } = self.sanitizer.check_secrets(&content)
-            {
+            // Defense in depth: Check staged git index blob bytes for secrets
+            let show_arg = format!(":{}", p.to_string_lossy());
+            let blob_res = Command::new("git")
+                .current_dir(remote_checkout)
+                .args(["show", &show_arg])
+                .output()
+                .map_err(|e| format!("Failed to read staged git blob for {}: {e}", p.display()))?;
+
+            if !blob_res.status.success() {
                 let _ = Command::new("git").current_dir(remote_checkout).args(["reset", "HEAD", "--"]).status();
                 return Err(format!(
-                    "Publication gate violation: secret detected in staged file {}: {reason}",
+                    "Publication gate violation: failed to inspect staged git blob for {}",
+                    p.display()
+                ));
+            }
+
+            let blob_content = String::from_utf8_lossy(&blob_res.stdout);
+            if let SanitizationResult::SecretDetected { reason, .. } = self.sanitizer.check_secrets(&blob_content) {
+                let _ = Command::new("git").current_dir(remote_checkout).args(["reset", "HEAD", "--"]).status();
+                return Err(format!(
+                    "Publication gate violation: secret detected in staged index blob {}: {reason}",
                     p.display()
                 ));
             }
@@ -1295,6 +1327,36 @@ mod tests {
 
         assert!(resolved.exists());
         assert!(resolved.join("test.txt").exists());
+
+        // Test branch switching isolation: create develop branch with distinct file
+        let _ = Command::new("git")
+            .current_dir(fake_remote.path())
+            .args(["checkout", "-b", "develop"])
+            .status();
+        fs::write(fake_templates.join("develop.txt"), "develop branch template").unwrap();
+        let _ = Command::new("git").current_dir(fake_remote.path()).args(["add", "-A"]).status();
+        let _ = Command::new("git").current_dir(fake_remote.path()).args([
+            "-c", "user.name=Tester",
+            "-c", "user.email=tester@example.com",
+            "-c", "commit.gpgsign=false",
+            "commit",
+            "--no-gpg-sign",
+            "-m", "develop commit",
+        ]).status();
+        let _ = Command::new("git").current_dir(fake_remote.path()).args(["checkout", "main"]).status();
+
+        let resolved_develop = engine
+            .ensure_remote_repo(&remote_url, "develop", cache_dir.path())
+            .expect("remote cache resolution on develop branch");
+        assert!(resolved_develop.exists());
+        assert!(resolved_develop.join("develop.txt").exists());
+
+        // Switching back to main must still work
+        let resolved_main = engine
+            .ensure_remote_repo(&remote_url, "main", cache_dir.path())
+            .expect("remote cache resolution on main branch");
+        assert!(resolved_main.exists());
+        assert!(resolved_main.join("test.txt").exists());
     }
 
     #[test]
@@ -1402,11 +1464,21 @@ mod tests {
             .unwrap();
         let status_out = String::from_utf8_lossy(&status.stdout);
 
-        // The dirty file must be untracked ('??'), never staged in the index!
+        // The dirty file must be strictly untracked ('??') and never committed into HEAD
         assert!(
-            status_out.contains("?? templates/unvalidated-secret.txt")
-                || !status_out.contains("templates/unvalidated-secret.txt"),
-            "Dirty secret file must never be staged! Status: {status_out}"
+            status_out.contains("?? templates/unvalidated-secret.txt"),
+            "Dirty secret file must remain strictly untracked! Status: {status_out}"
+        );
+
+        let ls_tree = Command::new("git")
+            .current_dir(remote_repo.path())
+            .args(["ls-tree", "-r", "--name-only", "HEAD"])
+            .output()
+            .unwrap();
+        let ls_tree_out = String::from_utf8_lossy(&ls_tree.stdout);
+        assert!(
+            !ls_tree_out.contains("unvalidated-secret.txt"),
+            "Dirty secret file was committed into HEAD tree! Trees:\n{ls_tree_out}"
         );
     }
 
@@ -1497,5 +1569,137 @@ mod tests {
         assert_eq!(pull_res, PullResult::Success { applied_files: 1 });
         assert_eq!(fs::read_to_string(&loc_mise).unwrap(), updated_upstream);
         assert_eq!(fs::read_to_string(&loc_override).unwrap(), "[tools]\nrust = \"nightly\"\n");
+    }
+
+    #[test]
+    fn test_publication_gate_scans_staged_blob_rejecting_clean_filter_secrets() {
+        let engine = SyncEngine::new();
+        let remote_repo = tempdir().unwrap();
+
+        // Initialize fake remote repository
+        let _ = Command::new("git").current_dir(remote_repo.path()).args(["init", "-b", "main"]).status();
+        let templates_dir = remote_repo.path().join("templates/projects/generic");
+        fs::create_dir_all(&templates_dir).unwrap();
+        let valid_file = templates_dir.join("gitconfig.repo");
+        fs::write(&valid_file, "[core]\n  autocrlf = true\n").unwrap();
+
+        let _ = Command::new("git").current_dir(remote_repo.path()).args(["add", "-A"]).status();
+        let _ = Command::new("git").current_dir(remote_repo.path()).args([
+            "-c", "user.name=Tester",
+            "-c", "user.email=tester@example.com",
+            "-c", "commit.gpgsign=false",
+            "commit",
+            "--no-gpg-sign",
+            "-m", "base commit",
+        ]).status();
+
+        // Now modify valid_file on disk with clean content
+        fs::write(&valid_file, "[core]\n  autocrlf = false\n").unwrap();
+
+        // Simulate a Git clean filter injecting a secret into the staged index blob during git add:
+        let prefix = "ghp_";
+        let body = "999988887777666655554444333322221111";
+        let script = remote_repo.path().join("inject_secret.sh");
+        fs::write(&script, format!("#!/bin/sh\ncat\necho \"secret = {prefix}{body}\"\n")).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let _ = Command::new("git")
+            .current_dir(remote_repo.path())
+            .args(["config", "filter.injectsecret.clean", &format!("{}", script.display())])
+            .status();
+
+        let info_dir = remote_repo.path().join(".git/info");
+        fs::create_dir_all(&info_dir).unwrap();
+        fs::write(
+            info_dir.join("attributes"),
+            "templates/projects/generic/gitconfig.repo filter=injectsecret\n",
+        )
+        .unwrap();
+
+        // Working tree file has benign content, but staged index blob will have secret via clean filter!
+        let staged_allowlist = vec![valid_file.clone()];
+        let res = engine.push_to_remote(remote_repo.path(), "main", false, &staged_allowlist);
+
+        // Publication gate must detect secret in the staged blob and reject!
+        assert!(res.is_err(), "Publication gate must fail when staged blob contains secret!");
+        let err_msg = res.unwrap_err();
+        assert!(
+            err_msg.contains("Publication gate violation: secret detected in staged index blob"),
+            "Error was: {err_msg}"
+        );
+
+        // Verify negative control: git reset HEAD was performed, staging index must be empty
+        let diff_cached = Command::new("git")
+            .current_dir(remote_repo.path())
+            .args(["diff", "--cached", "--name-only"])
+            .output()
+            .unwrap();
+        assert!(
+            diff_cached.stdout.is_empty(),
+            "Staging area must be reset clean after secret detection violation!"
+        );
+    }
+
+    #[test]
+    fn test_multi_pull_merge_idempotence() {
+        let engine = SyncEngine::new();
+        let local_dir = tempdir().unwrap();
+        let upstream_dir = tempdir().unwrap();
+
+        // 1. Base ancestor setup: a=1, b=1
+        let base_content = "a=1\nb=1\n";
+        let base_hash = SyncEngine::compute_hash(base_content.as_bytes());
+        let mut state = ProjectState::default();
+        state.record_file(Path::new("mise.toml"), base_hash, Some(base_content.to_string()));
+        state.save_to_dir(local_dir.path()).unwrap();
+
+        // 2. Local has line 1 edited: a=2, b=1
+        let loc_mise = local_dir.path().join("mise.toml");
+        fs::write(&loc_mise, "a=2\nb=1\n").unwrap();
+
+        // 3. Upstream has line 2 edited: a=1, b=2
+        let up_mise = upstream_dir.path().join("projects/agents/mise.toml.jinja");
+        fs::create_dir_all(up_mise.parent().unwrap()).unwrap();
+        fs::write(&up_mise, "a=1\nb=2\n").unwrap();
+
+        let ctx = crate::template::TemplateContext::detect_for_project(
+            local_dir.path(),
+            "test-proj",
+            "rust",
+        );
+
+        // 4. First pull: orthogonal merge produces a=2, b=2
+        let pull1 = engine.pull_updates(local_dir.path(), upstream_dir.path(), &ctx);
+        assert_eq!(pull1, PullResult::Success { applied_files: 1 });
+        assert_eq!(
+            fs::read_to_string(&loc_mise).unwrap(),
+            "a=2\nb=2\n",
+            "First pull must merge orthogonal changes cleanly"
+        );
+
+        // 5. Second pull: with upstream UNCHANGED, local edit must NOT be erased!
+        let pull2 = engine.pull_updates(local_dir.path(), upstream_dir.path(), &ctx);
+        assert_eq!(pull2, PullResult::Success { applied_files: 0 });
+        assert_eq!(
+            fs::read_to_string(&loc_mise).unwrap(),
+            "a=2\nb=2\n",
+            "Second pull must preserve local edit and remain idempotent!"
+        );
+
+        // 6. Upstream now updates line 2 again to b=3
+        fs::write(&up_mise, "a=1\nb=3\n").unwrap();
+
+        // 7. Third pull: merges new upstream change with preserved local edit to produce a=2, b=3
+        let pull3 = engine.pull_updates(local_dir.path(), upstream_dir.path(), &ctx);
+        assert_eq!(pull3, PullResult::Success { applied_files: 1 });
+        assert_eq!(
+            fs::read_to_string(&loc_mise).unwrap(),
+            "a=2\nb=3\n",
+            "Subsequent pull must merge future upstream updates with preserved local edit!"
+        );
     }
 }

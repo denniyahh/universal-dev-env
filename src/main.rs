@@ -512,12 +512,20 @@ fn main() {
                                 match engine.push_to_remote(remote_checkout, &branch, pr, &staged_files) {
                                     Ok(msg) => {
                                         println!("  {} {msg}", "✓".green());
-                                        let mut project_state = sync::ProjectState::load_from_dir(&local_project);
-                                        for (rel, hash, content) in updated_records {
-                                            project_state.record_file(&rel, hash, content);
-                                        }
-                                        if let Err(e) = project_state.save_to_dir(&local_project) {
-                                            eprintln!("  {} Warning: Failed to save updated ancestor state: {e}", "!".yellow());
+                                        if !pr {
+                                            let mut project_state = sync::ProjectState::load_from_dir(&local_project);
+                                            for (rel, hash, content) in updated_records {
+                                                project_state.record_file(&rel, hash, content);
+                                            }
+                                            if let Err(e) = project_state.save_to_dir(&local_project) {
+                                                eprintln!("  {} Warning: Failed to save updated ancestor state: {e}", "!".yellow());
+                                            }
+                                        } else {
+                                            println!(
+                                                "  {} Proposed changes pushed to branch. Canonical ancestor state preserves tracking '{}' until PR is merged.",
+                                                "ℹ".cyan(),
+                                                branch
+                                            );
                                         }
                                     }
                                     Err(err) => {
