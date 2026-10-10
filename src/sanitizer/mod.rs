@@ -79,13 +79,25 @@ impl Sanitizer {
         if !xdg_config.is_empty() && xdg_config != user_home {
             let pattern = format!(r#"(^|[^A-Za-z0-9_.\-]){}([/\\"'\s:]|$)"#, regex::escape(xdg_config));
             if let Ok(re) = Regex::new(&pattern) {
-                result = re.replace_all(&result, "${1}{{ user.xdg_config }}$2").to_string();
+                loop {
+                    let next = re.replace_all(&result, "${1}{{ user.xdg_config }}$2").to_string();
+                    if next == result {
+                        break;
+                    }
+                    result = next;
+                }
             }
         }
         if !user_home.is_empty() {
             let pattern = format!(r#"(^|[^A-Za-z0-9_.\-]){}([/\\"'\s:]|$)"#, regex::escape(user_home));
             if let Ok(re) = Regex::new(&pattern) {
-                result = re.replace_all(&result, "${1}{{ user.home }}$2").to_string();
+                loop {
+                    let next = re.replace_all(&result, "${1}{{ user.home }}$2").to_string();
+                    if next == result {
+                        break;
+                    }
+                    result = next;
+                }
             }
         }
         result
@@ -281,6 +293,20 @@ mod tests {
             config_param,
             "Config in {{ user.xdg_config }}/app/conf.toml"
         );
+    }
+
+    #[test]
+    fn test_path_parameterization_repeated_adjacent_paths() {
+        let sanitizer = Sanitizer::new();
+        // Space separated adjacent occurrences
+        let space_separated = "/home/alice /home/alice";
+        let param_space = sanitizer.parameterize_paths(space_separated, "/home/alice", "/home/alice/.config");
+        assert_eq!(param_space, "{{ user.home }} {{ user.home }}");
+
+        // Colon separated adjacent occurrences (e.g. in PATH or env vars)
+        let colon_separated = "/home/alice:/home/alice";
+        let param_colon = sanitizer.parameterize_paths(colon_separated, "/home/alice", "/home/alice/.config");
+        assert_eq!(param_colon, "{{ user.home }}:{{ user.home }}");
     }
 
     #[test]

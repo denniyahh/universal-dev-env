@@ -135,9 +135,9 @@ impl Default for TemplateRenderer {
 
 impl TemplateRenderer {
     pub fn new() -> Self {
-        Self {
-            env: Environment::new(),
-        }
+        let mut env = Environment::new();
+        env.set_keep_trailing_newline(true);
+        Self { env }
     }
 
     /// Renders a template string given a context

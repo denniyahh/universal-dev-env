@@ -1,3 +1,4 @@
+pub mod merge;
 pub mod state;
 pub use state::{FileStateRecord, ProjectState};
 
@@ -12,6 +13,7 @@ pub enum SyncStatus {
     InSync,
     LocallyModified,
     UpstreamModified,
+    Merged,
     Conflicted,
     Overridden,
 }
@@ -23,11 +25,16 @@ pub struct FileSyncState {
     pub local_hash: Option<String>,
     pub upstream_hash: Option<String>,
     pub ancestor_hash: Option<String>,
+    pub merged_content: Option<String>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum PushResult {
-    Success { synced_files: usize },
+    Success {
+        synced_files: usize,
+        staged_files: Vec<PathBuf>,
+        updated_records: Vec<(PathBuf, String, Option<String>)>,
+    },
     SecretBlocked { path: PathBuf, reason: String },
     ConflictBlocked { path: PathBuf },
     BoundaryBlocked { path: PathBuf },
@@ -68,13 +75,13 @@ impl SyncEngine {
         upstream_hash: Option<&str>,
         has_local_override: bool,
     ) -> SyncStatus {
-        if has_local_override {
-            return SyncStatus::Overridden;
-        }
-
         // Clean identical match
-        if local_hash == upstream_hash {
-            return SyncStatus::InSync;
+        if local_hash == upstream_hash && local_hash.is_some() {
+            return if has_local_override {
+                SyncStatus::Overridden
+            } else {
+                SyncStatus::InSync
+            };
         }
 
         match ancestor_hash {
@@ -84,17 +91,102 @@ impl SyncEngine {
 
                 match (local_matches_base, upstream_matches_base) {
                     (true, false) => SyncStatus::UpstreamModified,
-                    (false, true) => SyncStatus::LocallyModified,
+                    (false, true) => {
+                        if has_local_override {
+                            SyncStatus::Overridden
+                        } else {
+                            SyncStatus::LocallyModified
+                        }
+                    }
                     (false, false) => SyncStatus::Conflicted,
-                    (true, true) => SyncStatus::InSync,
+                    (true, true) => {
+                        if has_local_override {
+                            SyncStatus::Overridden
+                        } else {
+                            SyncStatus::InSync
+                        }
+                    }
                 }
             }
             None => match (local_hash, upstream_hash) {
-                (Some(_), None) => SyncStatus::LocallyModified,
+                (Some(_), None) => {
+                    if has_local_override {
+                        SyncStatus::Overridden
+                    } else {
+                        SyncStatus::LocallyModified
+                    }
+                }
                 (None, Some(_)) => SyncStatus::UpstreamModified,
                 (Some(_), Some(_)) => SyncStatus::Conflicted,
-                (None, None) => SyncStatus::InSync,
+                (None, None) => {
+                    if has_local_override {
+                        SyncStatus::Overridden
+                    } else {
+                        SyncStatus::InSync
+                    }
+                }
             },
+        }
+    }
+
+    /// Detects 3-way sync status and attempts orthogonal text merge when both sides diverge from ancestor.
+    pub fn compare_3way_with_merge(
+        ancestor_content: Option<&str>,
+        local_content: Option<&str>,
+        upstream_content: Option<&str>,
+        has_local_override: bool,
+    ) -> (SyncStatus, Option<String>) {
+        if local_content == upstream_content && local_content.is_some() {
+            return if has_local_override {
+                (SyncStatus::Overridden, None)
+            } else {
+                (SyncStatus::InSync, None)
+            };
+        }
+
+        match ancestor_content {
+            Some(o) => {
+                let local_matches_base = local_content == Some(o);
+                let upstream_matches_base = upstream_content == Some(o);
+
+                match (local_matches_base, upstream_matches_base) {
+                    (true, false) => (SyncStatus::UpstreamModified, None),
+                    (false, true) => {
+                        if has_local_override {
+                            (SyncStatus::Overridden, None)
+                        } else {
+                            (SyncStatus::LocallyModified, None)
+                        }
+                    }
+                    (false, false) => {
+                        let local_str = local_content.unwrap_or("");
+                        let upstream_str = upstream_content.unwrap_or("");
+                        match merge::merge_3way_text(o, local_str, upstream_str) {
+                            merge::MergeResult::Clean(merged) => (SyncStatus::Merged, Some(merged)),
+                            merge::MergeResult::Conflict => (SyncStatus::Conflicted, None),
+                        }
+                    }
+                    (true, true) => {
+                        if has_local_override {
+                            (SyncStatus::Overridden, None)
+                        } else {
+                            (SyncStatus::InSync, None)
+                        }
+                    }
+                }
+            }
+            None => {
+                let a_hash = None;
+                let l_hash = local_content.map(|c| Self::compute_hash(c.as_bytes()));
+                let u_hash = upstream_content.map(|c| Self::compute_hash(c.as_bytes()));
+                let status = Self::compare_3way_hashes(
+                    a_hash,
+                    l_hash.as_deref(),
+                    u_hash.as_deref(),
+                    has_local_override,
+                );
+                (status, None)
+            }
         }
     }
 
@@ -105,15 +197,7 @@ impl SyncEngine {
         upstream_content: Option<&str>,
         has_local_override: bool,
     ) -> SyncStatus {
-        let a_hash = ancestor_content.map(|c| Self::compute_hash(c.as_bytes()));
-        let l_hash = local_content.map(|c| Self::compute_hash(c.as_bytes()));
-        let u_hash = upstream_content.map(|c| Self::compute_hash(c.as_bytes()));
-        Self::compare_3way_hashes(
-            a_hash.as_deref(),
-            l_hash.as_deref(),
-            u_hash.as_deref(),
-            has_local_override,
-        )
+        Self::compare_3way_with_merge(ancestor_content, local_content, upstream_content, has_local_override).0
     }
 
     /// Detects sync status between a local file and upstream content (delegates to 3-way comparison with no ancestor).
@@ -158,9 +242,11 @@ impl SyncEngine {
             let local_content = fs::read_to_string(&local_path).ok();
             let upstream_content = upstream_path.as_ref().and_then(|p| {
                 fs::read_to_string(p).ok().and_then(|raw| {
-                    if p.extension().and_then(|e| e.to_str()) == Some("jinja") {
+                    let should_render = p.extension().and_then(|e| e.to_str()) == Some("jinja")
+                        || raw.contains("{{");
+                    if should_render {
                         if let Some(c) = ctx {
-                            renderer.render_str(&raw, c).ok()
+                            renderer.render_str(&raw, c).ok().or(Some(raw))
                         } else {
                             Some(raw)
                         }
@@ -172,13 +258,14 @@ impl SyncEngine {
 
             let has_local_override = check_for_override(local_root, &rel);
             let ancestor_hash = project_state.get_ancestor_hash(&rel).map(String::from);
+            let ancestor_content = project_state.get_ancestor_content(&rel);
             let local_hash = local_content.as_ref().map(|c| Self::compute_hash(c.as_bytes()));
             let upstream_hash = upstream_content.as_ref().map(|c| Self::compute_hash(c.as_bytes()));
 
-            let status = Self::compare_3way_hashes(
-                ancestor_hash.as_deref(),
-                local_hash.as_deref(),
-                upstream_hash.as_deref(),
+            let (status, merged_content) = Self::compare_3way_with_merge(
+                ancestor_content,
+                local_content.as_deref(),
+                upstream_content.as_deref(),
                 has_local_override,
             );
 
@@ -188,6 +275,7 @@ impl SyncEngine {
                 local_hash,
                 upstream_hash,
                 ancestor_hash,
+                merged_content,
             });
         }
 
@@ -300,7 +388,9 @@ impl SyncEngine {
                     }
                 };
 
-                let content = if upstream_path.extension().and_then(|e| e.to_str()) == Some("jinja") {
+                let should_render = upstream_path.extension().and_then(|e| e.to_str()) == Some("jinja")
+                    || raw.contains("{{");
+                let content = if should_render {
                     match renderer.render_str(&raw, ctx) {
                         Ok(rendered) => rendered,
                         Err(e) => {
@@ -314,6 +404,19 @@ impl SyncEngine {
                     raw
                 };
 
+                let target_path = local_root.join(&s.relative_path);
+                let new_hash = Self::compute_hash(content.as_bytes());
+                candidates_to_write.push((s.relative_path, target_path, content, new_hash));
+            } else if s.status == SyncStatus::Merged {
+                let content = match s.merged_content {
+                    Some(m) => m,
+                    None => {
+                        return PullResult::IoFailed {
+                            path: s.relative_path.clone(),
+                            reason: "Missing merged content for clean 3-way merge".to_string(),
+                        };
+                    }
+                };
                 let target_path = local_root.join(&s.relative_path);
                 let new_hash = Self::compute_hash(content.as_bytes());
                 candidates_to_write.push((s.relative_path, target_path, content, new_hash));
@@ -357,7 +460,7 @@ impl SyncEngine {
                 }
             }
 
-            project_state.record_file(&rel, new_hash);
+            project_state.record_file(&rel, new_hash, Some(content));
             applied += 1;
         }
 
@@ -381,6 +484,7 @@ impl SyncEngine {
         user_home: &str,
         xdg_config: &str,
         allow_agent_rules: bool,
+        persist_ancestor_immediately: bool,
     ) -> PushResult {
         let dummy_ctx = crate::template::TemplateContext::detect_for_project(
             local_root,
@@ -452,7 +556,9 @@ impl SyncEngine {
 
         // Pass 2: Transactional materialization of validated files
         let mut synced = 0;
-        let mut project_state = ProjectState::load_from_dir(local_root);
+        let mut staged_files = Vec::new();
+        let mut updated_records = Vec::new();
+
         for (rel_path, target_upstream, parameterized, raw_local_content) in candidates_to_write {
             if let Some(parent) = target_upstream.parent()
                 && let Err(err) = fs::create_dir_all(parent)
@@ -462,7 +568,7 @@ impl SyncEngine {
                     reason: format!("Failed to create parent directory: {err}"),
                 };
             }
-            if let Err(err) = fs::write(&target_upstream, parameterized) {
+            if let Err(err) = fs::write(&target_upstream, &parameterized) {
                 return PushResult::IoFailed {
                     path: rel_path,
                     reason: format!("Failed to write upstream template: {err}"),
@@ -470,14 +576,23 @@ impl SyncEngine {
             }
 
             let local_hash = Self::compute_hash(raw_local_content.as_bytes());
-            project_state.record_file(&rel_path, local_hash);
+            staged_files.push(target_upstream.clone());
+            updated_records.push((rel_path, local_hash, Some(raw_local_content)));
             synced += 1;
         }
 
-        let _ = project_state.save_to_dir(local_root);
+        if persist_ancestor_immediately {
+            let mut project_state = ProjectState::load_from_dir(local_root);
+            for (rel, hash, content) in &updated_records {
+                project_state.record_file(rel, hash.clone(), content.clone());
+            }
+            let _ = project_state.save_to_dir(local_root);
+        }
 
         PushResult::Success {
             synced_files: synced,
+            staged_files,
+            updated_records,
         }
     }
 
@@ -487,6 +602,7 @@ impl SyncEngine {
         remote_checkout: &Path,
         branch: &str,
         open_pr: bool,
+        staged_files: &[PathBuf],
     ) -> Result<String, String> {
         let status = Command::new("git")
             .current_dir(remote_checkout)
@@ -498,18 +614,33 @@ impl SyncEngine {
             return Ok("No changes to push to remote repository.".to_string());
         }
 
-        // Stage only the validated templates directory to prevent accidental untracked file leaks
-        let add_status = Command::new("git")
-            .current_dir(remote_checkout)
-            .args(["add", "templates"])
-            .status()
-            .map_err(|e| format!("Failed to stage remote template changes: {e}"))?;
-
-        if !add_status.success() {
-            return Err("git add failed in remote checkout".to_string());
+        if staged_files.is_empty() {
+            return Ok("No changes to push to remote repository.".to_string());
         }
 
-        // Verify that only files under templates/ are staged
+        // Convert target paths to relative paths from remote checkout
+        let mut rel_staged_paths: Vec<PathBuf> = Vec::new();
+        for p in staged_files {
+            let rel = p.strip_prefix(remote_checkout).unwrap_or(p).to_path_buf();
+            rel_staged_paths.push(rel);
+        }
+
+        // Stage ONLY the explicit validated allowlist of files
+        for rel_p in &rel_staged_paths {
+            let add_status = Command::new("git")
+                .current_dir(remote_checkout)
+                .args(["add", "--"])
+                .arg(rel_p)
+                .status()
+                .map_err(|e| format!("Failed to stage {}: {e}", rel_p.display()))?;
+
+            if !add_status.success() {
+                let _ = Command::new("git").current_dir(remote_checkout).args(["reset", "HEAD", "--"]).status();
+                return Err(format!("git add failed in remote checkout for {}", rel_p.display()));
+            }
+        }
+
+        // Inspect staged index: assert that ONLY allowed files are staged
         let diff_cached = Command::new("git")
             .current_dir(remote_checkout)
             .args(["diff", "--cached", "--name-only"])
@@ -517,11 +648,31 @@ impl SyncEngine {
             .map_err(|e| format!("Failed to inspect staged diff in remote checkout: {e}"))?;
 
         let staged_output = String::from_utf8_lossy(&diff_cached.stdout);
+        let expected_set: std::collections::HashSet<PathBuf> = rel_staged_paths.into_iter().collect();
+
         for line in staged_output.lines() {
             let trimmed = line.trim();
-            if !trimmed.is_empty() && !trimmed.starts_with("templates/") {
+            if trimmed.is_empty() {
+                continue;
+            }
+            let p = PathBuf::from(trimmed);
+            if !expected_set.contains(&p) {
+                let _ = Command::new("git").current_dir(remote_checkout).args(["reset", "HEAD", "--"]).status();
                 return Err(format!(
-                    "Security boundary violation: staging detected file outside templates/: {trimmed}"
+                    "Publication gate violation: unvalidated file staged in remote checkout: {}",
+                    p.display()
+                ));
+            }
+
+            // Defense in depth: Check staged file bytes for secrets
+            let staged_full_path = remote_checkout.join(&p);
+            if let Ok(content) = fs::read_to_string(&staged_full_path)
+                && let SanitizationResult::SecretDetected { reason, .. } = self.sanitizer.check_secrets(&content)
+            {
+                let _ = Command::new("git").current_dir(remote_checkout).args(["reset", "HEAD", "--"]).status();
+                return Err(format!(
+                    "Publication gate violation: secret detected in staged file {}: {reason}",
+                    p.display()
                 ));
             }
         }
@@ -772,7 +923,7 @@ mod tests {
             SyncEngine::compare_3way(
                 Some("base version"),
                 Some("local change"),
-                Some("upstream original"),
+                Some("base version"),
                 true,
             ),
             SyncStatus::Overridden
@@ -861,7 +1012,7 @@ mod tests {
         let mut state = ProjectState::default();
         let base_content = "[core]\n  autocrlf = false\n";
         let base_hash = SyncEngine::compute_hash(base_content.as_bytes());
-        state.record_file(Path::new(".gitconfig"), base_hash);
+        state.record_file(Path::new(".gitconfig"), base_hash, Some(base_content.to_string()));
         state.save_to_dir(local_dir.path()).unwrap();
 
         // Local has modified .gitconfig
@@ -908,7 +1059,7 @@ mod tests {
         let mut state = ProjectState::default();
         let base_content = "[core]\n  autocrlf = false\n";
         let base_hash = SyncEngine::compute_hash(base_content.as_bytes());
-        state.record_file(Path::new(".gitconfig"), base_hash);
+        state.record_file(Path::new(".gitconfig"), base_hash, Some(base_content.to_string()));
         state.save_to_dir(local_dir.path()).unwrap();
 
         // Local edit
@@ -926,6 +1077,7 @@ mod tests {
             "/home/alice",
             "/home/alice/.config",
             false,
+            true,
         );
 
         match res {
@@ -955,9 +1107,13 @@ mod tests {
             "/home/denniyahh",
             "/home/denniyahh/.config",
             false,
+            true,
         );
 
-        assert_eq!(res, PushResult::Success { synced_files: 1 });
+        match res {
+            PushResult::Success { synced_files, .. } => assert_eq!(synced_files, 1),
+            _ => panic!("Expected Success on push, got {:?}", res),
+        }
 
         let written_upstream = upstream_dir
             .path()
@@ -988,6 +1144,7 @@ mod tests {
             "/home/denniyahh",
             "/home/denniyahh/.config",
             false,
+            true,
         );
 
         match res {
@@ -1020,6 +1177,7 @@ mod tests {
             "/home/alice",
             "/home/alice/.config",
             false,
+            true,
         );
 
         // Must reject on the dirty file
@@ -1054,6 +1212,7 @@ mod tests {
             "/home/denniyahh",
             "/home/denniyahh/.config",
             false,
+            true,
         );
 
         match res {
@@ -1084,9 +1243,13 @@ mod tests {
             "/home/denniyahh",
             "/home/denniyahh/.config",
             false,
+            true,
         );
 
-        assert_eq!(res, PushResult::Success { synced_files: 0 });
+        match res {
+            PushResult::Success { synced_files, .. } => assert_eq!(synced_files, 0),
+            _ => panic!("Expected Success with 0 synced files, got {:?}", res),
+        }
     }
 
     #[test]
@@ -1132,5 +1295,207 @@ mod tests {
 
         assert!(resolved.exists());
         assert!(resolved.join("test.txt").exists());
+    }
+
+    #[test]
+    fn test_defect1_failed_push_does_not_commit_ancestor_state() {
+        let engine = SyncEngine::new();
+        let local_dir = tempdir().unwrap();
+        let upstream_dir = tempdir().unwrap();
+
+        // 1. Initial base state
+        let mut state = ProjectState::default();
+        let base_content = "[core]\n  autocrlf = input\n";
+        let base_hash = SyncEngine::compute_hash(base_content.as_bytes());
+        state.record_file(Path::new(".gitconfig"), base_hash.clone(), Some(base_content.to_string()));
+        state.save_to_dir(local_dir.path()).unwrap();
+
+        // 2. Local edit
+        let loc_gitconfig = local_dir.path().join(".gitconfig");
+        let local_edit = "[core]\n  autocrlf = custom_local\n";
+        fs::write(&loc_gitconfig, local_edit).unwrap();
+
+        // 3. Upstream template initialized with base
+        let up_gitconfig = upstream_dir.path().join("projects/generic/gitconfig.repo");
+        fs::create_dir_all(up_gitconfig.parent().unwrap()).unwrap();
+        fs::write(&up_gitconfig, base_content).unwrap();
+
+        // 4. Perform push with persist_ancestor_immediately = false (as happens during remote git sync)
+        let push_res = engine.push_updates(
+            local_dir.path(),
+            upstream_dir.path(),
+            "/home/alice",
+            "/home/alice/.config",
+            false,
+            false, // Remote push in progress; do not commit ancestor yet!
+        );
+        assert!(matches!(push_res, PushResult::Success { .. }));
+
+        // Verify ancestor state in .ude/state.json is still the BASE hash, NOT the local edit hash
+        let current_state = ProjectState::load_from_dir(local_dir.path());
+        assert_eq!(
+            current_state.get_ancestor_hash(Path::new(".gitconfig")),
+            Some(base_hash.as_str()),
+            "Failed push must not commit ancestor state ahead of remote success!"
+        );
+
+        // 5. Simulate remote reject / rollback of upstream template store
+        fs::write(&up_gitconfig, base_content).unwrap();
+
+        // 6. Next pull must NOT overwrite local edit because local edit was not recorded as ancestor
+        let ctx = crate::template::TemplateContext::detect_for_project(
+            local_dir.path(),
+            "test-proj",
+            "rust",
+        );
+        let pull_res = engine.pull_updates(local_dir.path(), upstream_dir.path(), &ctx);
+        // It should NOT apply 1 update and wipe local edit; it has 0 pending upstream updates
+        assert_eq!(pull_res, PullResult::Success { applied_files: 0 });
+        assert_eq!(
+            fs::read_to_string(&loc_gitconfig).unwrap(),
+            local_edit,
+            "Local edit must not be erased after rejected push!"
+        );
+    }
+
+    #[test]
+    fn test_defect2_publication_gate_allowlist_staging_blocks_unvalidated_files() {
+        let engine = SyncEngine::new();
+        let remote_repo = tempdir().unwrap();
+
+        // Initialize fake remote repository
+        let _ = Command::new("git").current_dir(remote_repo.path()).args(["init", "-b", "main"]).status();
+        let templates_dir = remote_repo.path().join("templates/projects/generic");
+        fs::create_dir_all(&templates_dir).unwrap();
+        let valid_file = templates_dir.join("gitconfig.repo");
+        fs::write(&valid_file, "[core]\n  autocrlf = true\n").unwrap();
+
+        let _ = Command::new("git").current_dir(remote_repo.path()).args(["add", "-A"]).status();
+        let _ = Command::new("git").current_dir(remote_repo.path()).args([
+            "-c", "user.name=Tester",
+            "-c", "user.email=tester@example.com",
+            "-c", "commit.gpgsign=false",
+            "commit",
+            "--no-gpg-sign",
+            "-m", "base commit",
+        ]).status();
+
+        // Adversarial setup: Place an unvalidated dirty secret file in templates/
+        let dirty_secret_file = remote_repo.path().join("templates/unvalidated-secret.txt");
+        let prefix = "ghp_";
+        let body = "111122223333444455556666777788889999";
+        fs::write(&dirty_secret_file, format!("{prefix}{body}\n")).unwrap();
+
+        // Now modify the valid managed file
+        fs::write(&valid_file, "[core]\n  autocrlf = false\n").unwrap();
+
+        // Call push_to_remote staging ONLY the valid file
+        let staged_allowlist = vec![valid_file.clone()];
+        // Note: git push will fail because there is no remote server, but staging and commit will execute
+        let _ = engine.push_to_remote(remote_repo.path(), "main", false, &staged_allowlist);
+
+        // Verify git status: the dirty secret file must remain UNTRACKED / UNSTAGED!
+        let status = Command::new("git")
+            .current_dir(remote_repo.path())
+            .args(["status", "--porcelain"])
+            .output()
+            .unwrap();
+        let status_out = String::from_utf8_lossy(&status.stdout);
+
+        // The dirty file must be untracked ('??'), never staged in the index!
+        assert!(
+            status_out.contains("?? templates/unvalidated-secret.txt")
+                || !status_out.contains("templates/unvalidated-secret.txt"),
+            "Dirty secret file must never be staged! Status: {status_out}"
+        );
+    }
+
+    #[test]
+    fn test_defect3_path_parameterization_roundtrip_static_template() {
+        let engine = SyncEngine::new();
+        let local_dir = tempdir().unwrap();
+        let upstream_dir = tempdir().unwrap();
+
+        let user_home = "/home/fixture";
+        let local_gitconfig = local_dir.path().join(".gitconfig");
+        fs::write(
+            &local_gitconfig,
+            "[core]\n  excludesfile = /home/fixture/.gitignore\n",
+        )
+        .unwrap();
+
+        // 1. Push: parameterizes /home/fixture -> {{ user.home }}
+        let push_res = engine.push_updates(
+            local_dir.path(),
+            upstream_dir.path(),
+            user_home,
+            "/home/fixture/.config",
+            false,
+            true,
+        );
+        assert!(matches!(push_res, PushResult::Success { synced_files: 1, .. }));
+
+        // Verify upstream gitconfig.repo has {{ user.home }}
+        let up_gitconfig = upstream_dir.path().join("projects/generic/gitconfig.repo");
+        let up_content = fs::read_to_string(&up_gitconfig).unwrap();
+        assert_eq!(up_content, "[core]\n  excludesfile = {{ user.home }}/.gitignore\n");
+
+        // 2. Scan: must render {{ user.home }} back to /home/fixture even though extension is .repo, reporting InSync!
+        let mut ctx = crate::template::TemplateContext::detect_for_project(
+            local_dir.path(),
+            "test-proj",
+            "rust",
+        );
+        ctx.user.home = user_home.to_string();
+        let states = engine.scan_project(local_dir.path(), upstream_dir.path(), Some(&ctx));
+        let gitconfig_state = states.iter().find(|s| s.relative_path == Path::new(".gitconfig")).unwrap();
+        assert_eq!(gitconfig_state.status, SyncStatus::InSync, "Static template with {{ user.home }} must render to InSync");
+    }
+
+    #[test]
+    fn test_defect4_layered_override_allows_upstream_base_updates() {
+        let engine = SyncEngine::new();
+        let local_dir = tempdir().unwrap();
+        let upstream_dir = tempdir().unwrap();
+
+        // Base ancestor for mise.toml
+        let mut state = ProjectState::default();
+        let base_mise = "[tools]\nrust = \"1.85.0\"\n";
+        let base_hash = SyncEngine::compute_hash(base_mise.as_bytes());
+        state.record_file(Path::new("mise.toml"), base_hash, Some(base_mise.to_string()));
+        state.save_to_dir(local_dir.path()).unwrap();
+
+        // Local has base mise.toml AND a layered override mise.local.toml
+        let loc_mise = local_dir.path().join("mise.toml");
+        fs::write(&loc_mise, base_mise).unwrap();
+        let loc_override = local_dir.path().join("mise.local.toml");
+        fs::write(&loc_override, "[tools]\nrust = \"nightly\"\n").unwrap();
+
+        // Upstream updates mise.toml.jinja
+        let up_mise = upstream_dir.path().join("projects/agents/mise.toml.jinja");
+        fs::create_dir_all(up_mise.parent().unwrap()).unwrap();
+        let updated_upstream = "[tools]\nrust = \"1.86.0\"\n";
+        fs::write(&up_mise, updated_upstream).unwrap();
+
+        let ctx = crate::template::TemplateContext::detect_for_project(
+            local_dir.path(),
+            "test-proj",
+            "rust",
+        );
+
+        // Scan project: must report UpstreamModified, NOT frozen in Overridden!
+        let states = engine.scan_project(local_dir.path(), upstream_dir.path(), Some(&ctx));
+        let mise_state = states.iter().find(|s| s.relative_path == Path::new("mise.toml")).unwrap();
+        assert_eq!(
+            mise_state.status,
+            SyncStatus::UpstreamModified,
+            "Layered override must NOT block upstream updates to base template"
+        );
+
+        // Pull updates: must update mise.toml to 1.86.0 while preserving mise.local.toml
+        let pull_res = engine.pull_updates(local_dir.path(), upstream_dir.path(), &ctx);
+        assert_eq!(pull_res, PullResult::Success { applied_files: 1 });
+        assert_eq!(fs::read_to_string(&loc_mise).unwrap(), updated_upstream);
+        assert_eq!(fs::read_to_string(&loc_override).unwrap(), "[tools]\nrust = \"nightly\"\n");
     }
 }

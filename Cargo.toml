@@ -19,7 +19,7 @@ regex = "1.11"
 colored = "3.0"
 tempfile = "3.17"
 directories = "6.0"
+similar = "2.7"
 
 [dev-dependencies]
 proptest = "1.6"
-similar = "2.7"

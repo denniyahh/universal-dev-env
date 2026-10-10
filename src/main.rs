@@ -27,6 +27,12 @@ fn main() {
                 None
             };
 
+            let has_critical = host_reports.iter().any(|r| r.is_critical())
+                || repo_reports
+                    .as_ref()
+                    .map(|(_, reps)| reps.iter().any(|r| r.is_critical()))
+                    .unwrap_or(false);
+
             let has_failures = host_reports.iter().any(|r| r.is_fail())
                 || repo_reports
                     .as_ref()
@@ -47,7 +53,9 @@ fn main() {
                 };
 
                 println!("{}", serde_json::to_string_pretty(&json_data).unwrap());
-                if has_failures {
+                if has_critical {
+                    std::process::exit(2);
+                } else if has_failures {
                     std::process::exit(1);
                 }
                 return;
@@ -68,6 +76,9 @@ fn main() {
                     audit::CheckStatus::Fail(f) => {
                         println!("  {} [{}] {}: {}", "✗".red(), r.category, r.name, f);
                     }
+                    audit::CheckStatus::Critical(c) => {
+                        println!("  {} [{}] {}: {}", "CRITICAL".red().bold(), r.category, r.name, c);
+                    }
                 }
             }
 
@@ -87,11 +98,17 @@ fn main() {
                         audit::CheckStatus::Fail(f) => {
                             println!("  {} [{}] {}: {}", "✗".red(), r.category, r.name, f);
                         }
+                        audit::CheckStatus::Critical(c) => {
+                            println!("  {} [{}] {}: {}", "CRITICAL".red().bold(), r.category, r.name, c);
+                        }
                     }
                 }
             }
 
-            if has_failures {
+            if has_critical {
+                eprintln!("\n{}", "Doctor detected critical security invariant failure(s). Exit code 2.".red().bold());
+                std::process::exit(2);
+            } else if has_failures {
                 eprintln!("\n{}", "Doctor detected failing checks. Remediation required.".red().bold());
                 std::process::exit(1);
             } else {
@@ -100,6 +117,20 @@ fn main() {
         }
         cli::Commands::Init(init_args) | cli::Commands::Project(cli::ProjectCommands { action: cli::ProjectAction::Init(init_args) }) => {
             let project_path = init_args.resolved_path();
+            if project_path.is_file() {
+                eprintln!(
+                    "  {} Cannot initialize project: '{}' is an existing regular file, not a directory.",
+                    "✗".red(),
+                    project_path.display()
+                );
+                std::process::exit(1);
+            }
+
+            if let Err(e) = fs::create_dir_all(&project_path) {
+                eprintln!("  {} Failed to create project directory {}: {e}", "✗".red(), project_path.display());
+                std::process::exit(1);
+            }
+
             let project_name = project_path
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())
@@ -126,74 +157,124 @@ fn main() {
             let scratch_dir = project_path.join("scratch");
             let agents_dir = project_path.join(".agents");
             let container_dir = project_path.join("scripts");
-            let _ = fs::create_dir_all(&hooks_dir);
-            let _ = fs::create_dir_all(&scratch_dir);
-            let _ = fs::create_dir_all(&agents_dir);
-            let _ = fs::create_dir_all(&container_dir);
+            if let Err(e) = fs::create_dir_all(&hooks_dir) { eprintln!("  {} Initialization failed: {e}", "✗".red()); std::process::exit(1); }
+            if let Err(e) = fs::create_dir_all(&scratch_dir) { eprintln!("  {} Initialization failed: {e}", "✗".red()); std::process::exit(1); }
+            if let Err(e) = fs::create_dir_all(&agents_dir) { eprintln!("  {} Initialization failed: {e}", "✗".red()); std::process::exit(1); }
+            if let Err(e) = fs::create_dir_all(&container_dir) { eprintln!("  {} Initialization failed: {e}", "✗".red()); std::process::exit(1); }
 
             // 2. Materialize .gitconfig include & .gitignore
             if let Some(ref tdir) = root_template_dir {
-                copy_template_file(
+                if let Err(e) = copy_template_file(
                     &tdir.join("projects/generic/gitconfig.repo"),
                     &project_path.join(".gitconfig"),
-                );
-                copy_template_file(
-                    &tdir.join("projects/generic/gitignore.repo"),
-                    &project_path.join(".gitignore"),
-                );
+                ) {
+                    eprintln!("  {} Initialization failed: {e}", "✗".red());
+                    std::process::exit(1);
+                }
+
+                // Preserve existing customized .gitignore rules if already present
+                let target_gitignore = project_path.join(".gitignore");
+                let src_gitignore = tdir.join("projects/generic/gitignore.repo");
+                if target_gitignore.exists() {
+                    let existing = fs::read_to_string(&target_gitignore).unwrap_or_default();
+                    if !existing.contains("graphify-out/*") {
+                        let append_block = "\n# Generated knowledge graphs / reports (allowlist pattern)\ngraphify-out/*\n!graphify-out/graph.json\n!graphify-out/manifest.json\n";
+                        let mut updated = existing;
+                        if !updated.ends_with('\n') {
+                            updated.push('\n');
+                        }
+                        updated.push_str(append_block);
+                        if let Err(e) = fs::write(&target_gitignore, updated) {
+                            eprintln!("  {} Failed to update existing .gitignore: {e}", "✗".red());
+                            std::process::exit(1);
+                        }
+                    }
+                } else if src_gitignore.exists()
+                    && let Err(e) = copy_template_file(&src_gitignore, &target_gitignore)
+                {
+                    eprintln!("  {} Initialization failed: {e}", "✗".red());
+                    std::process::exit(1);
+                }
 
                 // Materialize hook suite
                 for hook in &["commit-msg", "pre-commit", "pre-push"] {
                     let src_hook = tdir.join(format!("projects/generic/hooks/{hook}"));
                     let dst_hook = hooks_dir.join(hook);
-                    copy_template_file(&src_hook, &dst_hook);
+                    if let Err(e) = copy_template_file(&src_hook, &dst_hook) {
+                        eprintln!("  {} Initialization failed: {e}", "✗".red());
+                        std::process::exit(1);
+                    }
                     set_executable(&dst_hook);
                 }
 
                 // Materialize container parity check
                 let src_cont = tdir.join("projects/generic/container/check-in-container.sh");
                 let dst_cont = container_dir.join("check-in-container.sh");
-                copy_template_file(&src_cont, &dst_cont);
+                if let Err(e) = copy_template_file(&src_cont, &dst_cont) {
+                    eprintln!("  {} Initialization failed: {e}", "✗".red());
+                    std::process::exit(1);
+                }
                 set_executable(&dst_cont);
 
                 // Materialize scratch scripts
                 for s in &["check-publish-boundary.sh", "new-worktree.sh", "sync-personal-env.sh"] {
                     let src_s = tdir.join(format!("projects/agents/scratch/{s}"));
                     let dst_s = scratch_dir.join(s);
-                    copy_template_file(&src_s, &dst_s);
+                    if let Err(e) = copy_template_file(&src_s, &dst_s) {
+                        eprintln!("  {} Initialization failed: {e}", "✗".red());
+                        std::process::exit(1);
+                    }
                     set_executable(&dst_s);
                 }
 
                 // Materialize rendered templates (mise.toml, agents.md, mempalace)
-                render_and_write(
+                if let Err(e) = render_and_write(
                     &renderer,
                     &tdir.join("projects/agents/mise.toml.jinja"),
                     &project_path.join("mise.toml"),
                     &ctx,
-                );
+                ) {
+                    eprintln!("  {} Initialization failed: {e}", "✗".red());
+                    std::process::exit(1);
+                }
 
-                render_and_write(
+                if let Err(e) = render_and_write(
                     &renderer,
                     &tdir.join("projects/agents/agents.md.jinja"),
                     &agents_dir.join("AGENTS.md"),
                     &ctx,
-                );
+                ) {
+                    eprintln!("  {} Initialization failed: {e}", "✗".red());
+                    std::process::exit(1);
+                }
 
                 if init_args.mempalace {
                     let stage_dir = project_path.join(".planning/.mempalace-stage");
-                    let _ = fs::create_dir_all(&stage_dir);
-                    render_and_write(
+                    if let Err(e) = fs::create_dir_all(&stage_dir) {
+                        eprintln!("  {} Initialization failed: {e}", "✗".red());
+                        std::process::exit(1);
+                    }
+                    if let Err(e) = render_and_write(
                         &renderer,
                         &tdir.join("projects/agents/mempalace.yaml.jinja"),
                         &stage_dir.join("mempalace.yaml"),
                         &ctx,
-                    );
+                    ) {
+                        eprintln!("  {} Initialization failed: {e}", "✗".red());
+                        std::process::exit(1);
+                    }
                 }
 
                 if init_args.graphify {
                     let graphify_dir = project_path.join("graphify-out");
-                    let _ = fs::create_dir_all(&graphify_dir);
-                    let _ = fs::write(graphify_dir.join(".graphify_root"), ".\n");
+                    if let Err(e) = fs::create_dir_all(&graphify_dir) {
+                        eprintln!("  {} Initialization failed: {e}", "✗".red());
+                        std::process::exit(1);
+                    }
+                    if let Err(e) = fs::write(graphify_dir.join(".graphify_root"), ".\n") {
+                        eprintln!("  {} Initialization failed: {e}", "✗".red());
+                        std::process::exit(1);
+                    }
                 }
             }
 
@@ -242,7 +323,8 @@ fn main() {
                 let p = project_path.join(rel);
                 if let Ok(bytes) = fs::read(&p) {
                     let hash = sync::SyncEngine::compute_hash(&bytes);
-                    project_state.record_file(rel, hash);
+                    let content = String::from_utf8(bytes).ok();
+                    project_state.record_file(rel, hash, content);
                 }
             }
             if let Err(e) = project_state.save_to_dir(&project_path) {
@@ -320,6 +402,9 @@ fn main() {
                             }
                             sync::SyncStatus::UpstreamModified => {
                                 println!("  {} {}: Upstream Updated (ready to pull)", "↓".cyan(), s.relative_path.display());
+                            }
+                            sync::SyncStatus::Merged => {
+                                println!("  {} {}: Merged Cleanly (3-way text merge ready to pull)", "⚡".magenta(), s.relative_path.display());
                             }
                             sync::SyncStatus::Conflicted => {
                                 println!("  {} {}: Conflicted (requires manual resolution)", "✗".red(), s.relative_path.display());
@@ -405,21 +490,36 @@ fn main() {
                         }
                     }
 
+                    let persist_immediately = remote_checkout_root.is_none();
                     match engine.push_updates(
                         &local_project,
                         &root_template_dir,
                         &user_home,
                         &xdg_config,
                         allow_agent_rules,
+                        persist_immediately,
                     ) {
-                        sync::PushResult::Success { synced_files } => {
+                        sync::PushResult::Success {
+                            synced_files,
+                            staged_files,
+                            updated_records,
+                        } => {
                             println!("  {} Sanitization gate passed: clean of secrets & parameters applied.", "✓".green());
                             println!("  {} Successfully synchronized {} file(s) into upstream template store.", "✓".green(), synced_files);
 
                             if let Some(ref remote_checkout) = remote_checkout_root {
                                 println!("  {} Pushing synchronized templates to remote repository...", "==>".cyan());
-                                match engine.push_to_remote(remote_checkout, &branch, pr) {
-                                    Ok(msg) => println!("  {} {msg}", "✓".green()),
+                                match engine.push_to_remote(remote_checkout, &branch, pr, &staged_files) {
+                                    Ok(msg) => {
+                                        println!("  {} {msg}", "✓".green());
+                                        let mut project_state = sync::ProjectState::load_from_dir(&local_project);
+                                        for (rel, hash, content) in updated_records {
+                                            project_state.record_file(&rel, hash, content);
+                                        }
+                                        if let Err(e) = project_state.save_to_dir(&local_project) {
+                                            eprintln!("  {} Warning: Failed to save updated ancestor state: {e}", "!".yellow());
+                                        }
+                                    }
                                     Err(err) => {
                                         eprintln!("  {} Failed to push to remote: {err}", "✗".red());
                                         std::process::exit(1);
@@ -488,10 +588,16 @@ fn find_templates_dir() -> Option<PathBuf> {
     None
 }
 
-fn copy_template_file(src: &Path, dst: &Path) {
+fn copy_template_file(src: &Path, dst: &Path) -> Result<(), String> {
     if src.exists() {
-        let _ = fs::copy(src, dst);
+        if let Some(parent) = dst.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create parent directory {}: {e}", parent.display()))?;
+        }
+        fs::copy(src, dst)
+            .map_err(|e| format!("Failed to copy {} to {}: {e}", src.display(), dst.display()))?;
     }
+    Ok(())
 }
 
 fn render_and_write(
@@ -499,12 +605,21 @@ fn render_and_write(
     src: &Path,
     dst: &Path,
     ctx: &template::TemplateContext,
-) {
-    if let Ok(content) = fs::read_to_string(src)
-        && let Ok(rendered) = renderer.render_str(&content, ctx)
-    {
-        let _ = fs::write(dst, rendered);
+) -> Result<(), String> {
+    if src.exists() {
+        let content = fs::read_to_string(src)
+            .map_err(|e| format!("Failed to read template {}: {e}", src.display()))?;
+        let rendered = renderer
+            .render_str(&content, ctx)
+            .map_err(|e| format!("Failed to render template {}: {e}", src.display()))?;
+        if let Some(parent) = dst.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create parent directory {}: {e}", parent.display()))?;
+        }
+        fs::write(dst, rendered)
+            .map_err(|e| format!("Failed to write {}: {e}", dst.display()))?;
     }
+    Ok(())
 }
 
 fn set_executable(path: &Path) {

@@ -9,6 +9,8 @@ use std::time::SystemTime;
 pub struct FileStateRecord {
     pub ancestor_hash: String,
     pub last_synced_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ancestor_content: Option<String>,
 }
 
 /// Project synchronization state persisted in `.ude/state.json`.
@@ -63,8 +65,14 @@ impl ProjectState {
         self.files.get(&key).map(|r| r.ancestor_hash.as_str())
     }
 
+    /// Retrieves the ancestor content for a given relative path if preserved.
+    pub fn get_ancestor_content(&self, rel_path: &Path) -> Option<&str> {
+        let key = rel_path.to_string_lossy().to_string();
+        self.files.get(&key).and_then(|r| r.ancestor_content.as_deref())
+    }
+
     /// Records or updates the ancestor state of a managed file.
-    pub fn record_file(&mut self, rel_path: &Path, ancestor_hash: String) {
+    pub fn record_file(&mut self, rel_path: &Path, ancestor_hash: String, ancestor_content: Option<String>) {
         let key = rel_path.to_string_lossy().to_string();
         let timestamp = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
@@ -76,6 +84,7 @@ impl ProjectState {
             FileStateRecord {
                 ancestor_hash,
                 last_synced_at: timestamp,
+                ancestor_content,
             },
         );
     }
@@ -96,15 +105,21 @@ mod tests {
     fn test_project_state_persistence_roundtrip() {
         let dir = tempdir().unwrap();
         let mut state = ProjectState::default();
-        state.record_file(Path::new(".gitconfig"), "abc123hash".to_string());
-        state.record_file(Path::new("mise.toml"), "def456hash".to_string());
+        state.record_file(
+            Path::new(".gitconfig"),
+            "abc123hash".to_string(),
+            Some("[core]\n".to_string()),
+        );
+        state.record_file(Path::new("mise.toml"), "def456hash".to_string(), None);
 
         state.save_to_dir(dir.path()).unwrap();
 
         let loaded = ProjectState::load_from_dir(dir.path());
         assert_eq!(loaded.version, 1);
         assert_eq!(loaded.get_ancestor_hash(Path::new(".gitconfig")), Some("abc123hash"));
+        assert_eq!(loaded.get_ancestor_content(Path::new(".gitconfig")), Some("[core]\n"));
         assert_eq!(loaded.get_ancestor_hash(Path::new("mise.toml")), Some("def456hash"));
+        assert_eq!(loaded.get_ancestor_content(Path::new("mise.toml")), None);
         assert_eq!(loaded.get_ancestor_hash(Path::new("nonexistent")), None);
     }
 

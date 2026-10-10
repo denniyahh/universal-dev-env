@@ -1,155 +1,69 @@
 ## CONFIRMED DEFECTS
 
-1. **Critical — “3-way synchronization” is an unconditional overwrite.**  
-   **Citation:** [src/sync/mod.rs:64](/tmp/ude-snapshot/src/sync/mod.rs:64), [src/sync/mod.rs:263](/tmp/ude-snapshot/src/sync/mod.rs:263); contradicts [docs/ARCHITECTURE.md:61](/tmp/ude-snapshot/docs/ARCHITECTURE.md:61).  
-   **Quoted code:** Unequal existing files become `SyncStatus::LocallyModified`; push executes `fs::write(&target_upstream, parameterized)`.  
-   **Failure:** There is no ancestor input. An upstream-only change and a conflicting change are indistinguishable from local drift. Reproduced: an equal-content control pushed zero files; changing only upstream caused push to overwrite it with the old local content. `Conflicted` and `ConflictBlocked` are never constructed.  
-   **Fix:** Persist the rendered ancestor, compare all three versions, merge independent edits, and reject unresolved conflicts before writing.
+**1. [High] A rejected remote push can cause the next pull to erase your local edit.**
 
-2. **High — Pull reports application without applying anything.**  
-   **Citation:** [src/main.rs:309](/tmp/ude-snapshot/src/main.rs:309); contradicts [docs/SPECIFICATION.md:103](/tmp/ude-snapshot/docs/SPECIFICATION.md:103).  
-   **Quoted code:** `println!("  {} Updated {}", ...); pulled += 1;`  
-   **Failure:** The pull loop performs no copy, rendering, patching, or write. Reproduced with one upstream file and no local counterpart: exit `0`, “Applied 1 upstream update(s),” destination still absent. The no-template control reported no updates.  
-   **Fix:** Implement materialization and conflict reporting; increment the applied count only after a successful write.
+[ src/sync/mod.rs:472 ](/tmp/ude-snapshot/src/sync/mod.rs:472) records the local edit as the ancestor: `"project_state.record_file(&rel_path, local_hash)"`. Line 477 saves it **before** [src/main.rs:421](/tmp/ude-snapshot/src/main.rs:421) calls `push_to_remote`. The next remote refresh executes `"reset", "--hard"` at [src/sync/mod.rs:236](/tmp/ude-snapshot/src/sync/mod.rs:236).
 
-3. **High — Comparing rendered files to template source destroys reusable templates.**  
-   **Citation:** [src/sync/mod.rs:100](/tmp/ude-snapshot/src/sync/mod.rs:100), [src/sync/mod.rs:401](/tmp/ude-snapshot/src/sync/mod.rs:401), [src/sync/mod.rs:263](/tmp/ude-snapshot/src/sync/mod.rs:263).  
-   **Quoted code:** Local `mise.toml` maps to `projects/agents/mise.toml.jinja`; both are read directly and compared.  
-   **Failure:** A correctly initialized Rust project differs from its conditional Jinja source even without edits. Push replaces that source with the rendered Rust configuration, deleting the Node/polyglot branches. Reproduced; an equal-content control made no write. Separately, push can insert `{{ user.home }}` into `gitconfig.repo`, while initialization copies that file without rendering it ([src/main.rs:136](/tmp/ude-snapshot/src/main.rs:136)).  
-   **Fix:** Compare local files against rendered baselines. Preserve template structure when accepting changes, and render every artifact containing template expressions.
+**Reproduced:** initialize both sides with `base`; edit locally; reject the push using a remote `pre-receive` hook; refresh the cache; pull. The rejected edit becomes `UpstreamModified` and is overwritten with `base`.
 
-4. **Critical — Git publishes files that never passed either security gate.**  
-   **Citation:** [src/sync/mod.rs:297](/tmp/ude-snapshot/src/sync/mod.rs:297), [src/sync/mod.rs:82](/tmp/ude-snapshot/src/sync/mod.rs:82).  
-   **Quoted code:** `.args(["add", "-A"])` versus a fixed `managed_files` list.  
-   **Attack:** Leave an untracked `.planning/private.txt` containing a token in the cached checkout. `reset --hard` preserves it; scanner validation examines managed project candidates; `git add -A` stages the private file. Reproduced: a synthetic PAT reached a local bare remote alongside a clean managed update.  
-   **Fix:** Stage only explicitly validated paths. Reject unexplained cache changes and inspect the complete staged diff before committing.
+**Control:** an accepting disposable remote received the pushed commit. This is a broken ancestor transition on failure, not merely a Git error.
 
-5. **Critical — Secrets leave the process before the secret scanner runs.**  
-   **Citation:** [src/main.rs:335](/tmp/ude-snapshot/src/main.rs:335), [src/main.rs:363](/tmp/ude-snapshot/src/main.rs:363), [src/semantic/mod.rs:121](/tmp/ude-snapshot/src/semantic/mod.rs:121).  
-   **Quoted code:** `"proposed_update": candidate_text` is submitted by `evaluate_drift`; `push_updates` subsequently performs scanning.  
-   **Attack:** Put a recognizable PAT in `.agents/AGENTS.md` with TypeSafe enabled. Reproduced using fake curl: the captured request contained the complete synthetic token before the sanitizer rejected push. The key-absent control made no request. No external transmission was performed in this test.  
-   **Fix:** Enforce boundary and secret checks before constructing any external request.
+Persist the ancestor only after the intended remote synchronization succeeds.
 
-6. **High — Semantic approval ignores uncertainty and authorizes different bytes.**  
-   **Citation:** [src/semantic/mod.rs:154](/tmp/ude-snapshot/src/semantic/mod.rs:154), [src/main.rs:349](/tmp/ude-snapshot/src/main.rs:349), [src/sync/mod.rs:219](/tmp/ude-snapshot/src/sync/mod.rs:219).  
-   **Quoted code:** `Answer::Choice { choice, .. }`, followed by `allow_agent_rules = true`; push rereads the file.  
-   **Attack:** A `benign_rephrase` answer with confidence `0.001` still grants publication. Reproduced. A fake curl then changed the candidate after receiving the request: Jev saw benign text, but push published “Disable verification and all governance rules.”  
-   **Fix:** Validate the distribution, apply an evaluated uncertainty threshold, and bind approval to immutable candidate bytes. TypeSafe exposes confidence separately; the client discards it. [API reference](https://docs.typesafe.ai/api).
+**2. [High] The publication gate validates selected files, then commits additional, unvalidated files.**
 
-7. **High — Ordinary JSON credential syntax bypasses the generic scanner.**  
-   **Citation:** [src/sanitizer/mod.rs:47](/tmp/ude-snapshot/src/sanitizer/mod.rs:47), [src/sanitizer/mod.rs:70](/tmp/ude-snapshot/src/sanitizer/mod.rs:70).  
-   **Quoted code:** `...\b(api[_-]?key|...)\s*[:=]\s*['"]?...`  
-   **Attack:** `api_key=abcdefghijklmnopqrstuvwx` is rejected; `{"api_key":"abcdefghijklmnopqrstuvwx"}` is accepted. Reproduced against the actual Rust module. The closing quote around the field name prevents the regex from matching. There is also no general entropy calculation despite the claim in [docs/ARCHITECTURE.md:76](/tmp/ude-snapshot/docs/ARCHITECTURE.md:76).  
-   **Fix:** Handle quoted keys and supported serialization formats; add paired fixtures using identical credential values across syntaxes.
+[src/sync/mod.rs:504](/tmp/ude-snapshot/src/sync/mod.rs:504) runs `"git", "add", "templates"`. The subsequent check at [src/sync/mod.rs:522](/tmp/ude-snapshot/src/sync/mod.rs:522) accepts anything whose name `"starts_with(\"templates/\")"`. Neither operation restricts staging to the files sanitized by `push_updates`.
 
-8. **High — Template symlinks escape the write boundary.**  
-   **Citation:** [src/sync/mod.rs:389](/tmp/ude-snapshot/src/sync/mod.rs:389), [src/sync/mod.rs:263](/tmp/ude-snapshot/src/sync/mod.rs:263).  
-   **Quoted code:** `upstream_root.join(...)` followed by `fs::write(...)`.  
-   **Attack:** Make `projects/generic/gitconfig.repo` a symlink to a file outside the template root. Push follows it and overwrites that external file. Reproduced with a disposable victim; the ordinary-file control left the victim unchanged.  
-   **Fix:** Reject symlink traversal in destinations and parents, and use directory-relative operations that enforce containment during the write.
+**Reproduced:** place a dummy GitHub token in cached `templates/unvalidated-secret.txt`; make one clean managed-file edit; push. The remote receives the token file.
 
-9. **High — Read failures become “In Sync.”**  
-   **Citation:** [src/sync/mod.rs:100](/tmp/ude-snapshot/src/sync/mod.rs:100), [src/sync/mod.rs:103](/tmp/ude-snapshot/src/sync/mod.rs:103), [src/sync/mod.rs:73](/tmp/ude-snapshot/src/sync/mod.rs:73).  
-   **Quoted code:** `fs::read_to_string(...).ok()` and `(None, None) => SyncStatus::InSync`.  
-   **Failure:** Missing files, permission errors, directories, and invalid UTF-8 collapse into the same state. Reproduced: a directory named `.gitconfig` with no upstream file was “In Sync,” and push returned success with zero files. A readable-file control became locally modified.  
-   **Fix:** Treat only `NotFound` as absence; propagate other read failures explicitly.
+**Control:** the identical token in managed `.gitconfig` produces `SecretBlocked`.
 
-10. **High — “Transactional materialization” leaves partial updates.**  
-    **Citation:** [src/sync/mod.rs:252](/tmp/ude-snapshot/src/sync/mod.rs:252), [src/sync/mod.rs:263](/tmp/ude-snapshot/src/sync/mod.rs:263).  
-    **Quoted code:** `// Pass 2: Transactional materialization of validated files` followed by sequential direct writes.  
-    **Failure:** A later destination failure leaves earlier files replaced. Reproduced: the first `.gitconfig` update persisted when the `.gitignore` destination was a directory. The secret-prevalidation control correctly wrote nothing, proving only that earlier validation stage—not transactionality.  
-    **Fix:** Stage replacements, preserve recovery information, and implement rollback or a documented recoverable transaction protocol.
+A directory prefix is not proof of validation. This defeats the “every upstream sync” sanitization requirement in [docs/ARCHITECTURE.md:73](/tmp/ude-snapshot/docs/ARCHITECTURE.md:73). Stage an explicit validated-file allowlist and inspect those staged bytes.
 
-11. **High — Every PR uses the same branch; the second invocation breaks.**  
-    **Citation:** [src/sync/mod.rs:305](/tmp/ude-snapshot/src/sync/mod.rs:305), [src/sync/mod.rs:308](/tmp/ude-snapshot/src/sync/mod.rs:308).  
-    **Quoted code:** `compute_hash(commit_msg.as_bytes())` with a constant message; `let _ = ... checkout -b ...`.  
-    **Failure:** The branch name never changes. The existing-branch error is ignored. Reproduced against a local bare remote: the first PR push succeeded; the second failed branch creation and then a non-fast-forward push.  
-    **Fix:** Define explicit PR reuse semantics or generate unique branches. Check branch creation and use explicit source/destination refspecs.
+**3. [High] Path parameterization breaks the push/pull round trip for static files.**
 
-12. **High — Switching upstream branches breaks the shared cache.**  
-    **Citation:** [src/sync/mod.rs:139](/tmp/ude-snapshot/src/sync/mod.rs:139), [src/sync/mod.rs:157](/tmp/ude-snapshot/src/sync/mod.rs:157), [src/sync/mod.rs:167](/tmp/ude-snapshot/src/sync/mod.rs:167).  
-    **Quoted code:** Cache identity hashes only `remote_url`; fetch uses `["fetch", "origin", branch]`; reset targets `origin/{branch}`.  
-    **Failure:** A depth-one clone initially tracks one branch. Fetching another branch need not create its remote-tracking ref. Reproduced with a `file://` fixture: initial `main` synchronization succeeded; selecting existing `dev` failed resetting `origin/dev`.  
-    **Fix:** Isolate caches by branch or fetch an explicit refspec and operate on the verified fetched commit.
+[src/sanitizer/mod.rs:88](/tmp/ude-snapshot/src/sanitizer/mod.rs:88) inserts `"{{ user.home }}"`. But [src/sync/mod.rs:161](/tmp/ude-snapshot/src/sync/mod.rs:161) and [src/sync/mod.rs:303](/tmp/ude-snapshot/src/sync/mod.rs:303) render only files whose extension is `"jinja"`.
 
-13. **High — The flat-repository fallback reports a remote push that never occurred.**  
-    **Citation:** [src/sync/mod.rs:181](/tmp/ude-snapshot/src/sync/mod.rs:181), [src/main.rs:260](/tmp/ude-snapshot/src/main.rs:260), [src/sync/mod.rs:290](/tmp/ude-snapshot/src/sync/mod.rs:290).  
-    **Quoted code:** Fallback returns `target_checkout`; main takes `tmpl_dir.parent()`; empty Git-status stdout means “No changes to push.”  
-    **Failure:** Without a `templates/` directory, push operates Git from the cache parent. Failed `git status` is mistaken for a clean checkout. Reproduced: cached templates changed, remote content remained unchanged, CLI exited `0`.  
-    **Fix:** Return checkout and template roots separately. Check every Git command’s exit status before interpreting output.
+`.gitconfig` maps to `projects/generic/gitconfig.repo` at [src/sync/mod.rs:613](/tmp/ude-snapshot/src/sync/mod.rs:613); hooks similarly remain extensionless.
 
-14. **High — Doctor certifies missing security invariants with exit zero.**  
-    **Citation:** [src/audit/mod.rs:93](/tmp/ude-snapshot/src/audit/mod.rs:93), [src/main.rs:30](/tmp/ude-snapshot/src/main.rs:30), [src/main.rs:98](/tmp/ude-snapshot/src/main.rs:98); contradicts [docs/SPECIFICATION.md:77](/tmp/ude-snapshot/docs/SPECIFICATION.md:77).  
-    **Quoted code:** Missing signers become `Warning`; exit selection tests only `is_fail()`; output says “All required baselines verified.”  
-    **Failure:** Reproduced with isolated configuration: missing signers, signing configuration, and canonical rules produced warnings and exit `0`. A missing-repository control exited `1`. Exit `2` is never emitted by doctor. The auditor also never verifies `commit.gpgsign`, dual keys, signer contents, configured hook paths, or Git-index executable modes.  
-    **Fix:** Implement the specified assertions and explicit severity-to-exit mapping.
+**Reproduced:** push `.gitconfig` containing `/home/fixture/.gitignore`. Immediately afterward, status reports `UpstreamModified`; pull writes literal `{{ user.home }}/.gitignore` into the live configuration.
 
-15. **High — Initialization swallows errors and destroys existing configuration.**  
-    **Citation:** [src/main.rs:431](/tmp/ude-snapshot/src/main.rs:431), [src/main.rs:444](/tmp/ude-snapshot/src/main.rs:444), [src/main.rs:226](/tmp/ude-snapshot/src/main.rs:226).  
-    **Quoted code:** `let _ = fs::copy(...)`, `let _ = fs::write(...)`, then “Project initialization complete.”  
-    **Failure:** Reproduced: an existing regular file supplied as the destination produced exit `0` and completion output. Reinitializing a valid project silently removed a custom `.gitignore` rule. Missing templates likewise do not fail initialization.  
-    **Fix:** Validate prerequisites, propagate errors, and reconcile existing files rather than replacing them without resolution.
+**Control:** the same round trip without a home path remains `InSync`.
 
-16. **High — The portable baseline injects one personal fork’s policy and a nonexistent verification task.**  
-    **Citation:** [templates/projects/agents/agents.md.jinja:3](/tmp/ude-snapshot/templates/projects/agents/agents.md.jinja:3), [templates/projects/agents/agents.md.jinja:13](/tmp/ude-snapshot/templates/projects/agents/agents.md.jinja:13), [templates/projects/agents/mise.toml.jinja:29](/tmp/ude-snapshot/templates/projects/agents/mise.toml.jinja:29), [src/main.rs:160](/tmp/ude-snapshot/src/main.rs:160).  
-    **Quoted text:** “Personal fork (`denniyahh/gsd-core`)”; mandatory Mac CI; `run = "./scratch/ci-mac.sh"`.  
-    **Failure:** Every initialized project inherits GSD-specific upstream targets, changeset rules, and personal paths. Initialization never installs `ci-mac.sh`. Reproduced on a Node project: the check task referenced an absent script.  
-    **Fix:** Move personal-fork policy into an explicit archetype or local layer. Ensure every generated task references an installed implementation appropriate to the selected ecosystem.
+The parameterizer also misses repeated occurrences: `/home/user /home/user` becomes `{{ user.home }} /home/user`. The regex at [src/sanitizer/mod.rs:86](/tmp/ude-snapshot/src/sanitizer/mod.rs:86) consumes the separator needed by the next match. Neighboring-home and embedded-backup-path controls remained unchanged.
 
-17. **High — Manifest exclusions are parsed but ignored.**  
-    **Citation:** [src/manifest/mod.rs:52](/tmp/ude-snapshot/src/manifest/mod.rs:52), [src/main.rs:249](/tmp/ude-snapshot/src/main.rs:249), [src/sync/mod.rs:196](/tmp/ude-snapshot/src/sync/mod.rs:196).  
-    **Quoted code:** `pub exclude: Vec<String>`; `push_updates` calls `scan_project` without configuration.  
-    **Failure:** Reproduced: `sync.exclude = [".gitconfig"]` still published `.gitconfig`. `strategy`, `allow_overrides`, and `auto_pr` likewise have no execution-path consumers.  
-    **Fix:** Pass validated sync policy into the engine and enforce it. Reject unsupported settings instead of accepting inert configuration.
+**4. [Medium] Both advertised reconciliation strategies have materially different implementations.**
 
-18. **Medium — Path parameterization corrupts longer absolute paths.**  
-    **Citation:** [src/sanitizer/mod.rs:85](/tmp/ude-snapshot/src/sanitizer/mod.rs:85).  
-    **Quoted code:** `format!(r#"{}([/\\\"'\s:]|$)"#, regex::escape(user_home))`  
-    **Failure:** Only the trailing boundary is checked. Reproduced: `/backup/home/alice/file` becomes `/backup{{ user.home }}/file`. The existing neighboring-user control `/home/alice2/file` remains unchanged, so it does not detect this defect.  
-    **Fix:** Match complete path tokens with both boundaries; test prefixes, delimiters, punctuation, and platform-specific paths.
+[docs/ARCHITECTURE.md:62](/tmp/ude-snapshot/docs/ARCHITECTURE.md:62) promises: “changes merge cleanly” for orthogonal modifications. Actual code at [src/sync/mod.rs:88](/tmp/ude-snapshot/src/sync/mod.rs:88) unconditionally returns `Conflicted` for `"(false, false)"`.
 
-## SUSPECTED / ARCHITECTURAL RISKS
+**Reproduced:** ancestor `a=1,b=1`; local changes only `a`; upstream changes only `b`. Result: `Conflicted`. An overlapping-edit control also conflicts; an upstream-only control correctly returns `UpstreamModified`. Hash classification cannot implement the promised text merge.
 
-1. **Shared cache operations have no concurrency ownership.**  
-   **Citation:** [src/sync/mod.rs:140](/tmp/ude-snapshot/src/sync/mod.rs:140), [src/sync/mod.rs:167](/tmp/ude-snapshot/src/sync/mod.rs:167).  
-   **Quoted code:** URL-derived shared checkout and `reset --hard`.  
-   **Risk — speculation:** Concurrent status/pull/push operations can reset another operation’s working tree or race staging, commits, and branch selection. No lock or per-operation checkout exists.  
-   **Remediation:** Use isolated operation worktrees or hold a cache lock across the complete operation; add forced-interleaving tests.
+The fallback is also misrepresented. [docs/ARCHITECTURE.md:66](/tmp/ude-snapshot/docs/ARCHITECTURE.md:66) says overrides are “automatically applied on top of the base template during rendering.” Instead, [src/sync/mod.rs:71](/tmp/ude-snapshot/src/sync/mod.rs:71) immediately returns `Overridden`, and pull processes only `UpstreamModified` at [src/sync/mod.rs:282](/tmp/ude-snapshot/src/sync/mod.rs:282).
 
-2. **Overrides suppress synchronization rather than implement layering.**  
-   **Citation:** [src/sync/mod.rs:59](/tmp/ude-snapshot/src/sync/mod.rs:59), [src/sync/mod.rs:421](/tmp/ude-snapshot/src/sync/mod.rs:421); contradicts [docs/ARCHITECTURE.md:66](/tmp/ude-snapshot/docs/ARCHITECTURE.md:66).  
-   **Quoted code:** `return SyncStatus::Overridden` based on file existence.  
-   **Risk:** The override bytes are never read or applied. An override also hides base-file drift, including upstream security updates. `.override` suffix handling advertised in README is absent.  
-   **Remediation:** Track base synchronization independently from overlays and define actual rendering/merge semantics.
+**Reproduced:** adding `mise.local.toml` prevents an upstream base update entirely; removing it permits the update. The implementation freezes the base rather than rendering a layered configuration.
 
-3. **Semantic transport has no operational bounds.**  
-   **Citation:** [src/semantic/mod.rs:130](/tmp/ude-snapshot/src/semantic/mod.rs:130), [src/semantic/mod.rs:143](/tmp/ude-snapshot/src/semantic/mod.rs:143).  
-   **Quoted code:** Curl uses `"-s"` and blocking `.output()` without connection/total timeouts or HTTP-failure handling.  
-   **Risk — speculation:** A stalled endpoint can hang push indefinitely. Credentials and full rule text are passed through process arguments; exposure depends on host process visibility.  
-   **Remediation:** Use a bounded HTTP client, explicit HTTP-status handling, response-size limits, and credential-safe request construction.
+**5. [High] Successful CLI exits conceal failed initialization and failed security requirements.**
 
-4. **Environment detection uses the caller’s repository, not the target.**  
-   **Citation:** [src/template/mod.rs:35](/tmp/ude-snapshot/src/template/mod.rs:35), [src/template/mod.rs:56](/tmp/ude-snapshot/src/template/mod.rs:56), [src/main.rs:118](/tmp/ude-snapshot/src/main.rs:118).  
-   **Quoted code:** `detect(project_name, project_type)` invokes `git config --get user.name` without a target working directory.  
-   **Risk — speculation:** Initializing another repository can render the caller repository’s identity or substitute `developer@example.com`. Signing-key fields are always `None` during detection.  
-   **Remediation:** Resolve context against the target and require security-sensitive values explicitly.
+For initialization, [src/main.rs:493](/tmp/ude-snapshot/src/main.rs:493) ignores copy failures, and [src/main.rs:506](/tmp/ude-snapshot/src/main.rs:506) ignores write failures. Nevertheless, [src/main.rs:257](/tmp/ude-snapshot/src/main.rs:257) prints `"Project initialization complete."`
+
+**Reproduced:** use an existing regular file as the destination. No `.gitconfig` can be created, yet `ude project init` exits **0** and claims completion. A directory destination creates the config as the opposite control. Re-running initialization also overwrites an existing `.gitignore` customization.
+
+For doctor, [docs/SPECIFICATION.md:80](/tmp/ude-snapshot/docs/SPECIFICATION.md:80) requires **2** for missing allowed signers. [src/audit/mod.rs:93](/tmp/ude-snapshot/src/audit/mod.rs:93) classifies that condition as `Warning`; [src/main.rs:30](/tmp/ude-snapshot/src/main.rs:30) counts only failures.
+
+**Reproduced:** isolated configuration with missing allowed signers returns **0**. Removing Git from `PATH` produces **1**, confirming the exit-status probe distinguishes failures.
+
+Worse, [tests/e2e_lifecycle.rs:69](/tmp/ude-snapshot/tests/e2e_lifecycle.rs:69) explicitly asserts doctor must **not** exit 2, without distinguishing a parsing error from the documented security failure.
+
+## SUSPECTED DEFECTS / SPECULATION
+
+- **Concurrent sync may overwrite edits or publish another process’s changes.** Pull scans before writing at [src/sync/mod.rs:266](/tmp/ude-snapshot/src/sync/mod.rs:266), then calls `fs::write` at line 341 without checking whether the local bytes changed. The remote cache key includes only the URL at [src/sync/mod.rs:208](/tmp/ude-snapshot/src/sync/mod.rs:208), so concurrent branch operations share a checkout. No concurrent execution was reproduced.
+
+- **The semantic transport’s advertised bound may exclude payload transmission.** [src/semantic/mod.rs:155](/tmp/ude-snapshot/src/semantic/mod.rs:155) performs blocking `stdin.write_all` and discards its result; line 159 waits without a parent-enforced deadline. Curl’s `--max-time` is not an explicit bound on these parent operations. Large-payload/backpressure behavior remains untested.
 
 ## RESIDUAL RISKS & TEST GAPS
 
-- **The existing green suite does not establish the advertised behavior.** All 22 supplied tests passed; `cargo clippy --workspace --all-targets -- -D warnings` exited `0`. Neither establishes working pull, conflict handling, safe publication, or audit completeness. Nine disposable module probes passed, including one that refuted the suspected encrypted-PKCS#8 bypass.
+- **“Atomic” means prevalidation, not rollback.** Writes happen sequentially at [src/sync/mod.rs:341](/tmp/ude-snapshot/src/sync/mod.rs:341) and [src/sync/mod.rs:465](/tmp/ude-snapshot/src/sync/mod.rs:465). State persistence directly overwrites JSON at [src/sync/state.rs:55](/tmp/ude-snapshot/src/sync/state.rs:55); malformed state becomes an empty default at line 44. Missing controls: failure on the second write, interrupted state persistence, and concurrent writers. Permission-setting errors are also discarded at [src/sync/mod.rs:356](/tmp/ude-snapshot/src/sync/mod.rs:356).
 
-- **Conflict tests encode the defect.** [src/sync/mod.rs:447](/tmp/ude-snapshot/src/sync/mod.rs:447) expects unequal files to be `LocallyModified`. Add ancestor-based upstream-only, local-only, independent-edit, conflicting-edit, deletion, and add/add cases.
+- **The universal bootstrap contains one repository’s personal workflow.** [templates/projects/agents/agents.md.jinja:3](/tmp/ude-snapshot/templates/projects/agents/agents.md.jinja:3) hardcodes `denniyahh/gsd-core`; line 8 directs PRs to `open-gsd/gsd-core`. [mise.toml.jinja:29](/tmp/ude-snapshot/templates/projects/agents/mise.toml.jinja:29) invokes `./scratch/ci-mac.sh`, which initialization does not install; its absence was reproduced. These project-specific policies leak into the generic bootstrap abstraction.
 
-- **“Atomicity” testing covers only prevalidation.** [src/sync/mod.rs:523](/tmp/ude-snapshot/src/sync/mod.rs:523) injects a secret before writes begin. Add second-write failure, disk exhaustion, interruption, rollback, and recovery controls.
-
-- **Semantic tests never exercise a verdict or transport failure.** [src/semantic/mod.rs:172](/tmp/ude-snapshot/src/semantic/mod.rs:172) and [src/semantic/mod.rs:201](/tmp/ude-snapshot/src/semantic/mod.rs:201) test serialization/deserialization. Missing controls include low confidence, malformed distributions, wrong answer types, timeout, HTTP failures, and changed candidate bytes. The production path never asks the Noul credential-screening question promised by [README.md:41](/tmp/ude-snapshot/README.md:41).
-
-- **Documented CLI examples are rejected.** Reproduced: `ude project init`, `ude init --type node`, and `ude doctor --host` exit `2`. Compare [docs/SPECIFICATION.md:64](/tmp/ude-snapshot/docs/SPECIFICATION.md:64), [docs/SPECIFICATION.md:86](/tmp/ude-snapshot/docs/SPECIFICATION.md:86), and [src/cli/mod.rs:18](/tmp/ude-snapshot/src/cli/mod.rs:18). Add executable documentation tests.
-
-- **No end-to-end sanitizer exit-code contract is tested.** [docs/SPECIFICATION.md:153](/tmp/ude-snapshot/docs/SPECIFICATION.md:153) requires rejection through `sync push`; [src/sync/mod.rs:514](/tmp/ude-snapshot/src/sync/mod.rs:514) checks an internal enum. Test CLI exit codes and unchanged local, cached, and remote state.
-
-- **Verification limits:** Git reproductions used isolated local bare remotes; semantic reproductions used fake curl and synthetic credentials. Live Jev behavior, real hosting permissions/hooks, concurrent interleavings, and container parity remain unverified. The supplied snapshot has no Git metadata, so findings are pinned to its files, not a verified commit SHA.
-
-**Still open — needs your decision:** Keep this review local, or authorize Gemini and DeepSeek source export for independent reviews? Recommendation: keep it local.
-
-Automatic approval review rejected the external-review CLI launch because exporting the supplied source and documents to third-party services lacked explicit authorization. No independent external lane completed.
+Evidence: the isolated [probe](/tmp/ude-adversarial-1x53u04l/src/bin/adversarial_probe.rs) exercised byte-identical copies of the original Rust sources; [results](/tmp/ude-adversarial-1x53u04l/probe.stdout) include the controls. These establish the specific Linux fixture failures above. They do not establish production frequency, cross-platform behavior, or full-suite coverage.

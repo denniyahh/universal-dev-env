@@ -8,6 +8,7 @@ pub enum CheckStatus {
     Pass,
     Warning(String),
     Fail(String),
+    Critical(String),
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -19,7 +20,15 @@ pub struct AuditReport {
 
 impl AuditReport {
     pub fn is_fail(&self) -> bool {
-        matches!(self.status, CheckStatus::Fail(_))
+        matches!(self.status, CheckStatus::Fail(_) | CheckStatus::Critical(_))
+    }
+
+    pub fn is_critical(&self) -> bool {
+        matches!(self.status, CheckStatus::Critical(_))
+    }
+
+    pub fn is_warning(&self) -> bool {
+        matches!(self.status, CheckStatus::Warning(_))
     }
 }
 
@@ -90,7 +99,7 @@ impl Auditor {
             status: if allowed_signers.exists() {
                 CheckStatus::Pass
             } else {
-                CheckStatus::Warning(format!("Missing {}", allowed_signers.display()))
+                CheckStatus::Critical(format!("Missing {}", allowed_signers.display()))
             },
         });
 
@@ -108,11 +117,29 @@ impl Auditor {
             status: if gpg_format == "ssh" {
                 CheckStatus::Pass
             } else {
-                CheckStatus::Warning("Global git gpg.format is not configured to 'ssh'".to_string())
+                CheckStatus::Critical("Global git gpg.format is not configured to 'ssh'".to_string())
             },
         });
 
-        // 4. Canonical agent rules mesh (~/.config/agents/AGENTS.md)
+        // 4. Global git commit signing
+        let gpg_sign = std::process::Command::new("git")
+            .args(["config", "--global", "--get", "commit.gpgsign"])
+            .output()
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default();
+
+        reports.push(AuditReport {
+            category: "Git & SSH Security".to_string(),
+            name: "Global Git Commit Signing".to_string(),
+            status: if gpg_sign == "true" {
+                CheckStatus::Pass
+            } else {
+                CheckStatus::Critical("Global git commit.gpgsign is not enabled ('true')".to_string())
+            },
+        });
+
+        // 5. Canonical agent rules mesh (~/.config/agents/AGENTS.md)
         let agents_md = self.xdg_config.join("agents/AGENTS.md");
         reports.push(AuditReport {
             category: "AI Agent Governance".to_string(),
@@ -168,5 +195,42 @@ impl Auditor {
         }
 
         reports
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_audit_critical_classification() {
+        let report = AuditReport {
+            category: "Git & SSH Security".to_string(),
+            name: "Allowed SSH Signers file".to_string(),
+            status: CheckStatus::Critical("Missing allowed_signers".to_string()),
+        };
+        assert!(report.is_fail());
+        assert!(report.is_critical());
+        assert!(!report.is_warning());
+    }
+
+    #[test]
+    fn test_audit_host_missing_allowed_signers_is_critical() {
+        let temp = tempdir().unwrap();
+        let auditor = Auditor {
+            user_home: temp.path().to_path_buf(),
+            xdg_config: temp.path().join(".config"),
+        };
+        let reports = auditor.audit_host();
+        let signers_report = reports
+            .iter()
+            .find(|r| r.name == "Allowed SSH Signers file")
+            .expect("must check allowed signers");
+
+        assert!(
+            signers_report.is_critical(),
+            "Missing allowed_signers must be classified as Critical (exit code 2)"
+        );
     }
 }
