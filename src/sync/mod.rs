@@ -50,6 +50,95 @@ pub enum PullResult {
     IoFailed { path: PathBuf, reason: String },
 }
 
+#[cfg(unix)]
+unsafe extern "C" {
+    fn flock(fd: std::os::raw::c_int, operation: std::os::raw::c_int) -> std::os::raw::c_int;
+}
+#[cfg(unix)]
+const LOCK_EX: std::os::raw::c_int = 2;
+#[cfg(unix)]
+const LOCK_NB: std::os::raw::c_int = 4;
+#[cfg(unix)]
+const LOCK_UN: std::os::raw::c_int = 8;
+
+#[derive(Debug)]
+pub struct RemoteLockGuard {
+    #[allow(dead_code)]
+    file: std::fs::File,
+    pub lock_path: PathBuf,
+}
+
+impl RemoteLockGuard {
+    pub fn acquire(lock_path: &Path, timeout_secs: u64) -> Result<Self, String> {
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(lock_path)
+            .map_err(|e| format!("Failed to open lockfile {}: {e}", lock_path.display()))?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::io::AsRawFd;
+            use std::time::{Duration, Instant};
+
+            let start = Instant::now();
+            let timeout = Duration::from_secs(timeout_secs);
+            let poll_interval = Duration::from_millis(50);
+
+            loop {
+                let res = unsafe { flock(file.as_raw_fd(), LOCK_EX | LOCK_NB) };
+                if res == 0 {
+                    return Ok(Self {
+                        file,
+                        lock_path: lock_path.to_path_buf(),
+                    });
+                }
+
+                let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+                if errno != 11 {
+                    return Err(format!(
+                        "flock error on {}: {}",
+                        lock_path.display(),
+                        std::io::Error::last_os_error()
+                    ));
+                }
+
+                if start.elapsed() >= timeout {
+                    return Err(format!(
+                        "Timed out after {}s waiting for remote cache lock on {}",
+                        timeout_secs,
+                        lock_path.display()
+                    ));
+                }
+
+                std::thread::sleep(poll_interval);
+            }
+        }
+
+        #[cfg(not(unix))]
+        {
+            Ok(Self {
+                file,
+                lock_path: lock_path.to_path_buf(),
+            })
+        }
+    }
+}
+
+impl Drop for RemoteLockGuard {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::io::AsRawFd;
+            unsafe {
+                flock(self.file.as_raw_fd(), LOCK_UN);
+            }
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct SyncEngine {
     sanitizer: Sanitizer,
@@ -284,19 +373,23 @@ impl SyncEngine {
         states
     }
 
-    /// Ensures a remote git repository is cached locally and updated
+    /// Ensures a remote git repository is cached locally and updated.
+    /// Serializes concurrent access via an advisory lockfile (`.lock`).
     pub fn ensure_remote_repo(
         &self,
         remote_url: &str,
         branch: &str,
         cache_dir: &Path,
-    ) -> Result<PathBuf, String> {
+    ) -> Result<(PathBuf, RemoteLockGuard), String> {
         fs::create_dir_all(cache_dir)
             .map_err(|e| format!("Failed to create cache dir {}: {e}", cache_dir.display()))?;
 
         // Hash remote URL and branch to isolate checkouts and prevent refspec collisions
         let key = format!("{remote_url}#{branch}");
         let repo_hash = &Self::compute_hash(key.as_bytes())[..12];
+        let lock_path = cache_dir.join(format!("remote-{repo_hash}-{branch}.lock"));
+        let lock_guard = RemoteLockGuard::acquire(&lock_path, 10)?;
+
         let target_checkout = cache_dir.join(format!("remote-{repo_hash}-{branch}"));
 
         if !target_checkout.join(".git").exists() {
@@ -333,12 +426,12 @@ impl SyncEngine {
             }
         }
 
-        // Return the templates directory inside the remote checkout
+        // Return the templates directory inside the remote checkout along with the held lock
         let templates_path = target_checkout.join("templates");
         if templates_path.exists() {
-            Ok(templates_path)
+            Ok((templates_path, lock_guard))
         } else {
-            Ok(target_checkout)
+            Ok((target_checkout, lock_guard))
         }
     }
 
@@ -1321,7 +1414,7 @@ mod tests {
         assert!(commit_status.success());
 
         let remote_url = fake_remote.path().to_string_lossy().to_string();
-        let resolved = engine
+        let (resolved, _lock1) = engine
             .ensure_remote_repo(&remote_url, "main", cache_dir.path())
             .expect("remote cache resolution");
 
@@ -1345,18 +1438,44 @@ mod tests {
         ]).status();
         let _ = Command::new("git").current_dir(fake_remote.path()).args(["checkout", "main"]).status();
 
-        let resolved_develop = engine
+        let (resolved_develop, _lock2) = engine
             .ensure_remote_repo(&remote_url, "develop", cache_dir.path())
             .expect("remote cache resolution on develop branch");
         assert!(resolved_develop.exists());
         assert!(resolved_develop.join("develop.txt").exists());
 
+        drop(_lock1);
         // Switching back to main must still work
-        let resolved_main = engine
+        let (resolved_main, _lock3) = engine
             .ensure_remote_repo(&remote_url, "main", cache_dir.path())
             .expect("remote cache resolution on main branch");
         assert!(resolved_main.exists());
         assert!(resolved_main.join("test.txt").exists());
+    }
+
+    #[test]
+    fn test_remote_lock_concurrency_serialization_and_timeout() {
+        let temp = tempdir().unwrap();
+        let lock_path = temp.path().join("concurrency.lock");
+
+        // 1. Initial lock acquisition
+        let guard1 = RemoteLockGuard::acquire(&lock_path, 1).expect("initial lock acquisition");
+
+        // 2. Contended lock acquisition with zero-second / fast timeout -> MUST fail with timeout!
+        let start = std::time::Instant::now();
+        let err2 = RemoteLockGuard::acquire(&lock_path, 0);
+        assert!(err2.is_err(), "Contended lock acquisition must fail when locked by another thread!");
+        let err_msg = err2.unwrap_err();
+        assert!(
+            err_msg.contains("Timed out") || err_msg.contains("waiting for remote cache lock"),
+            "Error was: {err_msg}"
+        );
+        assert!(start.elapsed() < std::time::Duration::from_millis(500));
+
+        // 3. Drop guard1, then acquire again -> MUST succeed
+        drop(guard1);
+        let guard3 = RemoteLockGuard::acquire(&lock_path, 1);
+        assert!(guard3.is_ok(), "Lock acquisition must succeed after prior guard is dropped!");
     }
 
     #[test]

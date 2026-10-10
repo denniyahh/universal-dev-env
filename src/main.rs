@@ -367,11 +367,15 @@ fn main() {
                 .branch
                 .unwrap_or_else(|| local_manifest.as_ref().map(|m| m.sync.branch.clone()).unwrap_or_else(|| "main".to_string()));
 
-            let (root_template_dir, remote_checkout_root) = if let Some(ref r_url) = remote_url {
+            let (root_template_dir, remote_checkout_root, _remote_lock): (
+                PathBuf,
+                Option<PathBuf>,
+                Option<sync::RemoteLockGuard>,
+            ) = if let Some(ref r_url) = remote_url {
                 match engine.ensure_remote_repo(r_url, &branch, &cache_dir) {
-                    Ok(tmpl_dir) => {
+                    Ok((tmpl_dir, lock_guard)) => {
                         let checkout_dir = tmpl_dir.parent().unwrap_or(&tmpl_dir).to_path_buf();
-                        (tmpl_dir, Some(checkout_dir))
+                        (tmpl_dir, Some(checkout_dir), Some(lock_guard))
                     }
                     Err(e) => {
                         eprintln!("  {} Failed to sync with remote {}: {}", "✗".red(), r_url, e);
@@ -379,7 +383,7 @@ fn main() {
                     }
                 }
             } else {
-                (find_templates_dir().unwrap_or_else(|| PathBuf::from("templates")), None)
+                (find_templates_dir().unwrap_or_else(|| PathBuf::from("templates")), None, None)
             };
 
             let local_project = PathBuf::from(".");

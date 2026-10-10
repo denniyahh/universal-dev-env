@@ -248,16 +248,17 @@ fn test_sync_push_pr_does_not_advance_ancestor_state() {
     let state_before: serde_json::Value = serde_json::from_str(&fs::read_to_string(&state_file).unwrap()).unwrap();
     let mise_hash_before = state_before["files"]["mise.toml"]["ancestor_hash"].as_str().unwrap().to_string();
 
-    // 3. Edit local mise.toml
+    // 3. Capture baseline content and edit local mise.toml
     let loc_mise = local_proj.join("mise.toml");
-    fs::write(&loc_mise, "# Custom edit\n[tools]\nrust = 'nightly'\n").unwrap();
+    let init_content = fs::read_to_string(&loc_mise).unwrap();
+    fs::write(&loc_mise, format!("{init_content}\n# Custom edit\n")).unwrap();
 
-    // 4. Setup a fake remote repo with a templates directory
+    // 4. Setup a fake remote repo with a templates directory containing baseline
     let remote_dir = temp.path().join("remote_dir");
     let _ = Command::new("git").current_dir(temp.path()).args(["init", "-b", "main", "remote_dir"]).status();
     let tdir = remote_dir.join("templates/projects/agents");
     fs::create_dir_all(&tdir).unwrap();
-    fs::write(tdir.join("mise.toml.jinja"), "[tools]\nrust = '1.85.0'\n").unwrap();
+    fs::write(tdir.join("mise.toml.jinja"), &init_content).unwrap();
     let _ = Command::new("git").current_dir(&remote_dir).args(["add", "-A"]).status();
     let _ = Command::new("git").current_dir(&remote_dir).args([
         "-c", "user.name=Tester",
@@ -268,12 +269,35 @@ fn test_sync_push_pr_does_not_advance_ancestor_state() {
         "-m", "base commit",
     ]).status();
 
-    // 5. Run `ude sync push --repo <remote_dir> --pr`
-    let _push_pr_out = Command::new(bin)
+    // 5. Run `ude sync push --remote <remote_dir> --pr` in hermetic environment
+    let fake_home = temp.path().join("fake_home");
+    fs::create_dir_all(&fake_home).unwrap();
+    let fake_config = fake_home.join(".config");
+    fs::create_dir_all(fake_config.join("git")).unwrap();
+    let gitconfig = fake_config.join("git/config");
+    fs::write(
+        &gitconfig,
+        "[user]\n  name = UDE Tester\n  email = tester@example.com\n[commit]\n  gpgsign = false\n",
+    )
+    .unwrap();
+    let cache_dir = temp.path().join("cache");
+    fs::create_dir_all(&cache_dir).unwrap();
+
+    let push_pr_out = Command::new(bin)
         .current_dir(&local_proj)
-        .args(["sync", "push", "--repo", &remote_dir.to_string_lossy(), "--pr"])
+        .args(["sync", "push", "--remote", &remote_dir.to_string_lossy(), "--pr"])
+        .env("HOME", &fake_home)
+        .env("XDG_CONFIG_HOME", &fake_config)
+        .env("GIT_CONFIG_GLOBAL", &gitconfig)
+        .env("XDG_CACHE_HOME", &cache_dir)
         .output()
         .expect("ude sync push --pr execution");
+    assert!(
+        push_pr_out.status.success(),
+        "ude sync push --pr must exit 0! Out: {}\nErr: {}",
+        String::from_utf8_lossy(&push_pr_out.stdout),
+        String::from_utf8_lossy(&push_pr_out.stderr)
+    );
 
     // 6. Verify: Canonical ancestor state in .ude/state.json must NOT advance to local edit!
     let state_after: serde_json::Value = serde_json::from_str(&fs::read_to_string(&state_file).unwrap()).unwrap();
@@ -282,5 +306,170 @@ fn test_sync_push_pr_does_not_advance_ancestor_state() {
         mise_hash_after,
         mise_hash_before,
         "PR push must NOT advance canonical ancestor state before PR merge!"
+    );
+}
+
+#[test]
+fn test_sync_push_remote_failure_does_not_advance_ancestor_state() {
+    let bin = env!("CARGO_BIN_EXE_ude");
+    let temp = tempdir().unwrap();
+    let local_proj = temp.path().join("local_proj");
+    fs::create_dir_all(&local_proj).unwrap();
+
+    // 1. Initialize project
+    let init_status = Command::new(bin)
+        .args(["init", "--path", &local_proj.to_string_lossy(), "--type", "rust"])
+        .status()
+        .expect("ude init execution");
+    assert!(init_status.success());
+
+    // 2. Read baseline ancestor hash of mise.toml
+    let state_file = local_proj.join(".ude/state.json");
+    let state_before: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&state_file).unwrap()).unwrap();
+    let mise_hash_before = state_before["files"]["mise.toml"]["ancestor_hash"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // 3. Capture baseline content and edit local mise.toml
+    let loc_mise = local_proj.join("mise.toml");
+    let init_content = fs::read_to_string(&loc_mise).unwrap();
+    fs::write(&loc_mise, format!("{init_content}\n# Custom edit\n")).unwrap();
+
+    // 4. Setup a bare remote git repo with an active pre-receive rejection hook
+    let bare_remote = temp.path().join("bare_remote.git");
+    let _ = Command::new("git")
+        .args(["init", "--bare", "-b", "main", &bare_remote.to_string_lossy()])
+        .status();
+
+    // Seed the bare remote with an initial main branch containing baseline template
+    let seed_dir = temp.path().join("seed_repo");
+    let _ = Command::new("git")
+        .args(["init", "-b", "main", &seed_dir.to_string_lossy()])
+        .status();
+    let tdir = seed_dir.join("templates/projects/agents");
+    fs::create_dir_all(&tdir).unwrap();
+    fs::write(tdir.join("mise.toml.jinja"), &init_content).unwrap();
+    let _ = Command::new("git").current_dir(&seed_dir).args(["add", "-A"]).status();
+    let _ = Command::new("git").current_dir(&seed_dir).args([
+        "-c", "user.name=Tester",
+        "-c", "user.email=tester@example.com",
+        "-c", "commit.gpgsign=false",
+        "commit",
+        "--no-gpg-sign",
+        "-m", "seed commit",
+    ]).status();
+    let _ = Command::new("git")
+        .current_dir(&seed_dir)
+        .args(["remote", "add", "origin", &bare_remote.to_string_lossy()])
+        .status();
+    let _ = Command::new("git")
+        .current_dir(&seed_dir)
+        .args(["push", "origin", "main"])
+        .status();
+
+    // Install a rejecting pre-receive hook in the bare remote to simulate remote reject / network policy drop
+    let hooks_dir = bare_remote.join("hooks");
+    fs::create_dir_all(&hooks_dir).unwrap();
+    let reject_hook = hooks_dir.join("pre-receive");
+    fs::write(
+        &reject_hook,
+        "#!/bin/sh\necho 'REJECTED: simulated network push policy error' >&2\nexit 1\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&reject_hook, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let fake_home = temp.path().join("fake_home");
+    fs::create_dir_all(&fake_home).unwrap();
+    let fake_config = fake_home.join(".config");
+    fs::create_dir_all(fake_config.join("git")).unwrap();
+    let gitconfig = fake_config.join("git/config");
+    fs::write(
+        &gitconfig,
+        "[user]\n  name = UDE Tester\n  email = tester@example.com\n[commit]\n  gpgsign = false\n",
+    )
+    .unwrap();
+    let cache_dir = temp.path().join("cache");
+    fs::create_dir_all(&cache_dir).unwrap();
+
+    // 5. Run `ude sync push --remote <bare_remote>`
+    // Remote git push will fail because of the rejecting pre-receive hook
+    let push_fail = Command::new(bin)
+        .current_dir(&local_proj)
+        .args(["sync", "push", "--remote", &bare_remote.to_string_lossy()])
+        .env("HOME", &fake_home)
+        .env("XDG_CONFIG_HOME", &fake_config)
+        .env("GIT_CONFIG_GLOBAL", &gitconfig)
+        .env("XDG_CACHE_HOME", &cache_dir)
+        .output()
+        .expect("ude sync push execution");
+
+    // Must exit non-zero
+    assert!(
+        !push_fail.status.success(),
+        "ude sync push must fail when remote git push is rejected!"
+    );
+    let stderr = String::from_utf8_lossy(&push_fail.stderr);
+    let stdout = String::from_utf8_lossy(&push_fail.stdout);
+    assert!(
+        stderr.contains("Failed to push to remote") || stdout.contains("Failed to push to remote"),
+        "CLI must report remote push failure! Out: {stdout}\nErr: {stderr}"
+    );
+
+    // 6. Verify ancestor state in .ude/state.json did NOT advance!
+    let state_after: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&state_file).unwrap()).unwrap();
+    let mise_hash_after = state_after["files"]["mise.toml"]["ancestor_hash"].as_str().unwrap();
+    assert_eq!(
+        mise_hash_after,
+        mise_hash_before,
+        "Failed remote push must NOT advance canonical ancestor state!"
+    );
+
+    // 7. Verify status still reports file as Locally Modified (ready to push)
+    let status_out = Command::new(bin)
+        .current_dir(&local_proj)
+        .args(["sync", "status", "--remote", &bare_remote.to_string_lossy()])
+        .env("HOME", &fake_home)
+        .env("XDG_CONFIG_HOME", &fake_config)
+        .env("GIT_CONFIG_GLOBAL", &gitconfig)
+        .env("XDG_CACHE_HOME", &cache_dir)
+        .output()
+        .expect("ude sync status execution");
+    let status_stdout = String::from_utf8_lossy(&status_out.stdout);
+    assert!(
+        status_stdout.contains("Locally Modified (ready to push)"),
+        "Status must still report Locally Modified after failed push! Output: {status_stdout}"
+    );
+
+    // 8. Negative Control: Remove the rejecting hook and push again
+    fs::remove_file(&reject_hook).unwrap();
+    let push_success = Command::new(bin)
+        .current_dir(&local_proj)
+        .args(["sync", "push", "--remote", &bare_remote.to_string_lossy()])
+        .env("HOME", &fake_home)
+        .env("XDG_CONFIG_HOME", &fake_config)
+        .env("GIT_CONFIG_GLOBAL", &gitconfig)
+        .env("XDG_CACHE_HOME", &cache_dir)
+        .output()
+        .expect("ude sync push execution");
+    assert!(
+        push_success.status.success(),
+        "ude sync push must succeed once remote rejection is cleared! Stderr: {}",
+        String::from_utf8_lossy(&push_success.stderr)
+    );
+
+    let state_final: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&state_file).unwrap()).unwrap();
+    let mise_hash_final = state_final["files"]["mise.toml"]["ancestor_hash"].as_str().unwrap();
+    assert_ne!(
+        mise_hash_final,
+        mise_hash_before,
+        "Successful push MUST advance ancestor state to the newly synchronized hash!"
     );
 }
