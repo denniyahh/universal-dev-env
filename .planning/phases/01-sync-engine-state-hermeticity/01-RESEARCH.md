@@ -624,13 +624,13 @@ Verbatim `src/sync/mod.rs:314-326`: `.gitconfig`, `.gitignore`, `scripts/hooks/c
 
 ## Open Questions
 
-1. **Should a conflict that converges by itself (upstream later equals local) auto-clear?**
+1. **Should a conflict that converges by itself (upstream later equals local) auto-clear?** (RESOLVED: yes, operator approved 2026-10-17, recorded as the D-09 amendment in 01-CONTEXT.md; implemented in plan 01-09 Task 2.)
    - What we know: D-09 says only `resolve` resolves, and deleting the sidecar by hand does not.
    - What's unclear: if local and upstream become identical, the conflict record keeps that file out of push until `resolve` runs, even though there is nothing left to choose.
    - Recommendation: pull clears the record and removes the sidecar when local fp == upstream fp, and reports it as "conflict resolved by convergence". It needs a one-line confirmation because it narrows D-09.
-2. **Mode for newly created non-script files: fixed 0o644, or 0o666 & umask?**
+2. **Mode for newly created non-script files: fixed 0o644, or 0o666 & umask?** (RESOLVED: fixed 0o644, existing files keep their mode, scripts 0o755; planner decision under Claude's discretion, implemented in plan 01-06 Task 2.)
    - Recommendation: 0o644. It matches typical umask 022 and avoids an `unsafe` libc umask call.
-3. **Windows `JobObject` branch cannot be compiled here** (only `x86_64-unknown-linux-gnu` is installed).
+3. **Windows `JobObject` branch cannot be compiled here** (only `x86_64-unknown-linux-gnu` is installed). (RESOLVED: the Windows path is labelled untested on this host and covered by a manual-only human-check in plan 01-01 Task 2, recorded in the phase UAT.)
    - Recommendation: optional `rustup target add x86_64-pc-windows-gnu && cargo check --target x86_64-pc-windows-gnu`. This is user-space and fine on an immutable OS. Otherwise label the Windows path as untested.
 
 ## Environment Availability

@@ -14,6 +14,7 @@ Systematic execution of the 4-track remediation plan derived from external adver
 ## Phase Details
 
 ### Phase 1: Sync Engine & State Hermeticity
+
 **Goal**: Ensure bidirectional synchronization is hermetic, crash-resilient, and atomic without phantom drift or zombie file resurrections.
 **Depends on**: Nothing (first phase)
 **Requirements**: SYNC-01, SYNC-02, SYNC-03, SYNC-04, SYNC-05, SYNC-06
@@ -24,15 +25,43 @@ Systematic execution of the 4-track remediation plan derived from external adver
   4. SHA-256 ancestor fingerprints normalize CRLF line endings, preventing false drift reports across POSIX and Windows environments.
   5. Divergent concurrent modifications generate structured `.conflict` files with Myers conflict markers while preserving local developer changes.
   6. Outbound push verifies branch continuity and rejects divergent push candidates safely.
-**Plans**: 4 plans
+
+**Plans**: 11 plans
 
 Plans:
-- [ ] 01-01: Implement state ledger tombstone tracking and CRLF line-ending normalization for ancestor hashing (`src/sync/state.rs`, `src/sync/mod.rs`).
-- [ ] 01-02: Implement two-phase transactional shadow staging and anti-symlink path verification for atomic workspace materialization (`src/sync/mod.rs`).
-- [ ] 01-03: Wrap Git and GitHub child process invocations with bounded timeouts and active subprocess cancellation (`src/sync/mod.rs`).
-- [ ] 01-04: Implement 3-way Myers diff conflict generation producing structured `.conflict` files on divergent ancestors (`src/sync/merge.rs`).
+**Wave 1**
+- [ ] 01-01: Bounded process-group runner (`src/process.rs`) and the 10 git calls outside `src/sync/` (SYNC-03).
+- [ ] 01-02: `GitFixture` helper making test git commands hermetic in sync unit and e2e tests (SYNC-03).
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [ ] 01-03: Sync's 31 git/gh calls on the runner, test-only env/timeout injection, std file lock (D-04), inherited-`GIT_DIR` e2e test, hermeticity check (SYNC-03).
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [ ] 01-04: Corrupt or newer `state.json` fails loudly (D-06, forward-version guard), atomic staged state save, exit codes 1/2 (SYNC-02).
+
+**Wave 4** *(blocked on Wave 3 completion)*
+- [ ] 01-05: CRLF-insensitive fingerprints, classification by hash, state schema v2 migration (D-07), line-ending-preserving writes (SYNC-04).
+
+**Wave 5** *(blocked on Wave 4 completion)*
+- [ ] 01-06: Stage-validate-commit for pull/push writes, explicit file modes, `state.json` written last (D-05) (SYNC-02).
+
+**Wave 6** *(blocked on Wave 5 completion)*
+- [ ] 01-07: Deletion statuses, tombstones, pull/push deletions, publication gate that accepts deletions (D-12–D-16) (SYNC-01).
+
+**Wave 7** *(blocked on Wave 6 completion)*
+- [ ] 01-08: diffy 3-way merge (D-02), LOCAL/ANCESTOR/UPSTREAM markers, sidecar renderer; `similar` removed (SYNC-05).
+
+**Wave 8** *(blocked on Wave 7 completion)*
+- [ ] 01-09: Pull applies clean files plus `.conflict` sidecars, conflict records, convergence auto-clear, `*.conflict` gitignore rule (D-08, D-11) (SYNC-05).
+
+**Wave 9** *(blocked on Wave 8 completion)*
+- [ ] 01-10: `ude sync resolve <file>` (D-09); push skips conflicted and merged files and exits 1 (D-10, D-17) (SYNC-05, SYNC-06).
+
+**Wave 10** *(blocked on Wave 9 completion)*
+- [ ] 01-11: Fetched-head continuity check, `--porcelain` race detection, rollback and exit 1, never force-push (D-18) (SYNC-06).
 
 ### Phase 2: Sanitizer, Boundaries & Security Hardening
+
 **Goal**: Screen and redact all confidential tokens, raw credentials, and user-specific paths before any remote git staging or push.
 **Depends on**: Phase 1
 **Requirements**: SEC-01, SEC-02, SEC-03, SEC-04
@@ -41,6 +70,7 @@ Plans:
   2. Outbound commit inspection catches all Gitleaks secret categories across committed blobs and auto-rolls back commits on detection.
   3. Path parameterization matches only full word and punctuation boundaries (`\b`, path delimiters), preventing corruption of partial substring tokens.
   4. Sanitizer round-tripping verifies that templated tokens substitute back cleanly to local machine environments on initialization.
+
 **Plans**: 3 plans
 
 Plans:
@@ -49,6 +79,7 @@ Plans:
 - [ ] 02-03: Enforce word and delimiter boundaries for path parameterization and add reversible substitution unit tests (`src/sanitizer/mod.rs`).
 
 ### Phase 3: Doctor & CLI Hardening
+
 **Goal**: Make host and repository health diagnostics foolproof with strict parsing, dual permission audits, and standard POSIX exit codes.
 **Depends on**: Phase 2
 **Requirements**: CLI-01, CLI-02, CLI-03, CLI-04
@@ -57,6 +88,7 @@ Plans:
   2. Repository doctor audits both filesystem executable bits (`0o755`) and Git index mode flags (`100755` vs `100644`) for all hook templates.
   3. Include directives in `.gitconfig.repo` are resolved canonically relative to the Git repository root (`.git/`), preventing false failures in subdirectories.
   4. All CLI invocations return POSIX exit code `0` on clean success, `1` on non-critical warning/drift, and `2` on critical security/system failures.
+
 **Plans**: 3 plans
 
 Plans:
@@ -65,6 +97,7 @@ Plans:
 - [ ] 03-03: Implement canonical repository-relative path resolution for git includes and enforce exit code contracts (`src/audit/mod.rs`, `src/main.rs`).
 
 ### Phase 4: Templates, Archetypes & Manifest Decoupling
+
 **Goal**: Parameterize and decouple all personal configurations into clean manifests with safe re-initialization protections.
 **Depends on**: Phase 3
 **Requirements**: TMPL-01, TMPL-02, TMPL-03, TMPL-04
@@ -73,6 +106,7 @@ Plans:
   2. Re-running `ude init` on an existing workspace detects modified files and creates timestamped `.bak` files before applying updates.
   3. Minijinja rendering fails fast with descriptive diagnostics whenever an undefined template variable is encountered.
   4. `.ude.toml` is parsed and establishes deterministic precedence over global machine defaults.
+
 **Plans**: 3 plans
 
 Plans:
@@ -87,7 +121,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Sync Engine & State Hermeticity | 0/4 | Not started | - |
+| 1. Sync Engine & State Hermeticity | 0/11 | Planned | - |
 | 2. Sanitizer, Boundaries & Security Hardening | 0/3 | Not started | - |
 | 3. Doctor & CLI Hardening | 0/3 | Not started | - |
 | 4. Templates, Archetypes & Manifest Decoupling | 0/3 | Not started | - |

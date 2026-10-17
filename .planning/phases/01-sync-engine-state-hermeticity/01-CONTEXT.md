@@ -35,12 +35,15 @@ Scale context: 18 template files, single user, on-demand CLI (no daemon).
 - **D-05:** Single-file atomic writes use `tempfile::NamedTempFile` in the target's own directory, then `persist`. Multi-file pull follows the remediation plan's pattern: stage and validate every temp file first, abort before touching any target if any step fails, then rename. `state.json` is written last, the same way. No fsync and no on-disk journal (D-01).
 - **D-06:** `ProjectState::load_from_dir` must return an error on unreadable or corrupt `state.json` instead of silently falling back to empty state (`src/sync/state.rs:38-47`).
 - **D-07:** Bump the state-file `version` when the hash semantics change (CRLF normalization) or the schema changes (deletion/conflict records). On first load of an old version, migrate: re-hash, and treat an entry as in sync where the old raw hash matches. — **Reversibility:** one-way — existing `.ude/state.json` files on every machine get migrated; older `ude` binaries can't read the new version (they must fail loudly per D-06, not reset).
+  - **Amended 2026-10-17 (operator, during plan-phase):** binaries already built cannot be made to fail loudly. No other machine runs an older `ude`, so: add a forward-version guard (a state file newer than the binary supports is an error, never a reset) and keep the v2 schema additive. "Fail loudly" applies to binaries built from this phase onward; this is an accepted limitation.
 
 ### Pull with conflicts
 - **D-08:** When some files are clean and some conflicted, pull applies the clean files. Each conflicted file is left untouched, with `<file>.conflict` written beside it. Pull lists all conflicted files (not just the first) and exits 1.
   - This replaces the current all-or-nothing behavior. The test `test_pull_updates_conflict_blocked_no_partial_writes` (`src/sync/mod.rs:1423`) must be rewritten to match.
   - Clean files are still applied atomically as one group (D-05).
 - **D-09:** Conflicts are resolved with a new explicit command, `ude sync resolve <file>`. It marks the current local content as resolved against the upstream version recorded when the conflict was detected, and removes the `.conflict` file. Deleting the `.conflict` by hand does **not** count as resolving. — **Reversibility:** costly — new CLI surface, and agents/scripts will start calling it.
+  - **Clarified 2026-10-17 (operator, during plan-phase):** `resolve` takes no `--keep`/`--delete` flags. The local file's current state is the resolution: present → kept as current content (for D-13, kept as an unmanaged file); absent → resolved as a deletion.
+  - **Amended 2026-10-17 (operator, during plan-phase):** pull also clears a conflict by itself when the local file has become identical to upstream ("conflict resolved by convergence"), removing the record and the sidecar. Hand-deleting the `.conflict` file still never resolves.
 - **D-10:** While a file has an unresolved conflict, `ude sync push` skips that file only, publishes the rest, lists the unresolved files, and exits 1.
 - **D-11:** Add `*.conflict` to the managed gitignore template (`templates/projects/generic/gitignore.repo`) so sidecars are never committed by accident.
 
@@ -54,6 +57,7 @@ Scale context: 18 template files, single user, on-demand CLI (no daemon).
 ### Push of merged files
 - **D-17:** A file whose local and upstream edits merge cleanly is **not** published by push. Push publishes the other files, lists this one with "run `ude sync pull` first", and exits 1. Push never rewrites local working-tree files. This replaces today's silent "0 files synced" success.
 - **D-18:** If upstream moved between UDE's fetch and its push, abort cleanly: publish nothing, undo the local cache commit (existing `rollback_commit`), exit 1 with "upstream changed, run `ude sync pull`". Never force-push.
+  - **Scope 2026-10-17 (operator delegated to Claude during plan-phase):** applies to direct push only. `push --pr` pushes to a fresh `ude-sync-*` branch, cannot overwrite a moved base, and a stale base surfaces as a PR conflict.
 
 ### Claude's Discretion
 - **Timeouts (SYNC-03):** tiered, within the requirement's 30–60 s range: about 30 s for local git queries and 60 s for network ops and `gh`. A single bounded-run helper replaces every `Command::new("git"/"gh")` call site. Every spawn sets `GIT_TERMINAL_PROMPT=0`, stdin to null, and scrubs inherited `GIT_DIR` / `GIT_WORK_TREE` / `GIT_INDEX_FILE` / `GIT_CONFIG` (remediation plan 1.5). Stdout and stderr are drained concurrently so a full pipe can't deadlock. A timeout reports which command timed out and after how long. Overriding the limits is not required.

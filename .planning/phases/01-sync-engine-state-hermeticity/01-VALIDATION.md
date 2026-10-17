@@ -40,30 +40,30 @@ created: "2026-10-16"
 
 ## Per-Task Verification Map
 
-Seeded at requirement level from RESEARCH.md; the planner binds each row to task IDs. Every row carries a negative control (NC) that must produce the opposite result.
+Seeded at requirement level from RESEARCH.md; task IDs bound from the planner's mapping (2026-10-17). Test names/commands here are the research seed — each PLAN task's `<automated>` command is authoritative where they differ. Every row carries a negative control (NC) that must produce the opposite result.
 
 | Task ID | Plan | Wave | Requirement | Threat Ref | Secure Behavior | Test Type | Automated Command | File Exists | Status |
 |---------|------|------|-------------|------------|-----------------|-----------|-------------------|-------------|--------|
-| TBD | TBD | TBD | SYNC-01 | — | Upstream delete + unchanged local → removed + tombstone. NC: local edit → Conflicted, bytes unchanged | unit | `cargo test --bin ude sync::tests::test_pull_upstream_deletion` | ❌ W0 | ⬜ pending |
-| TBD | TBD | TBD | SYNC-01 | — | Tombstone blocks republish. NC: fresh state → LocallyModified | unit | `cargo test --bin ude sync::tests::test_tombstone_prevents_republish` | ❌ W0 | ⬜ pending |
-| TBD | TBD | TBD | SYNC-01 | — | Publication gate accepts `D` entries, still scans blobs. NC: secret-gate tests stay green | unit | `cargo test --bin ude sync::tests::test_push_to_remote_deletion` | ❌ W0 | ⬜ pending |
-| TBD | TBD | TBD | SYNC-02 | — | Staging failure → targets + state.json byte-identical, no `.tmp*`. NC: no collision → all applied | unit | `cargo test --bin ude sync::tests::test_pull_staging_failure_no_partial_writes` | ❌ W0 | ⬜ pending |
-| TBD | TBD | TBD | SYNC-02 | — | Corrupt/future-version state.json → Err. NC: missing file → Ok(default) | unit | `cargo test --bin ude sync::state::tests::test_load_` | ❌ W0 | ⬜ pending |
-| TBD | TBD | TBD | SYNC-02 | — | Staged writes keep modes (0755 hooks, 0644 existing). NC: not 0600 | unit (unix) | `cargo test --bin ude sync::tests::test_staged_write_modes` | ❌ W0 | ⬜ pending |
-| TBD | TBD | TBD | SYNC-02 | — | Symlinked target/sidecar refused. NC: regular path succeeds | unit | `cargo test --bin ude sync::tests::test_pull_updates_refuses_to_write_through_symlink` | ✅ / ❌ | ⬜ pending |
-| TBD | TBD | TBD | SYNC-03 | — | Timeout kills process group < 2s. NC: `echo ok` → Ok | unit | `cargo test --bin ude process::tests::test_timeout_kills_group` | ❌ W0 | ⬜ pending |
-| TBD | TBD | TBD | SYNC-03 | — | No pipe deadlock on 1 MiB stdout+stderr. NC: 0-byte case | unit | `cargo test --bin ude process::tests::test_drains_large_output` | ❌ W0 | ⬜ pending |
-| TBD | TBD | TBD | SYNC-03 | — | Git env scrubbed, `GIT_TERMINAL_PROMPT=0`. NC: raw Command lacks entries | unit | `cargo test --bin ude process::tests::test_env_scrub` | ❌ W0 | ⬜ pending |
-| TBD | TBD | TBD | SYNC-03 | — | Hanging pre-receive hook → timeout, ref unchanged. NC: hook exit 0 → success | unit | `cargo test --bin ude sync::tests::test_push_timeout_hanging_hook` | ❌ W0 | ⬜ pending |
-| TBD | TBD | TBD | SYNC-03 | — | Inherited GIT_DIR ignored by `ude`. NC: plain git resolves to decoy | e2e | `cargo test --test e2e_lifecycle test_sync_ignores_inherited_git_dir` | ❌ W0 | ⬜ pending |
-| TBD | TBD | TBD | SYNC-04 | — | Fingerprint CRLF == LF. NC: different text differs; invalid UTF-8 untouched | unit | `cargo test --bin ude sync::tests::test_fingerprint` | ❌ W0 | ⬜ pending |
-| TBD | TBD | TBD | SYNC-04 | — | CRLF-only difference → InSync. NC: real edit → LocallyModified | unit | `cargo test --bin ude sync::tests::test_scan_crlf_only_difference_in_sync` | ❌ W0 | ⬜ pending |
-| TBD | TBD | TBD | SYNC-04 | — | v1 → v2 migration. NC: mismatched old hash stays modified | unit | `cargo test --bin ude sync::state::tests::test_migrate_v1` | ❌ W0 | ⬜ pending |
-| TBD | TBD | TBD | SYNC-05 | — | Multiple conflicts → LOCAL/ANCESTOR/UPSTREAM sidecars, clean file applied. NC: clean pull → zero `*.conflict` | unit | `cargo test --bin ude sync::tests::test_pull_multiple_conflicts_sidecars` | ❌ W0 | ⬜ pending |
-| TBD | TBD | TBD | SYNC-05 | — | Adjacent edits conflict. NC: one-line separation merges | unit | `cargo test --bin ude sync::merge::tests::test_adjacent_edits_conflict` | ❌ W0 | ⬜ pending |
-| TBD | TBD | TBD | SYNC-05 | — | `resolve` clears conflict. NC: hand-deleted sidecar → push still skips | unit | `cargo test --bin ude sync::tests::test_resolve` | ❌ W0 | ⬜ pending |
-| TBD | TBD | TBD | SYNC-06 | — | Upstream moved → UpstreamMoved, remote unchanged. NC: no race → success | unit | `cargo test --bin ude sync::tests::test_direct_push_aborts_when_upstream_moved` | ❌ W0 | ⬜ pending |
-| TBD | TBD | TBD | SYNC-06 | — | `--force` does not bypass upstream-moved abort. NC: no race → succeeds | e2e | `cargo test --test e2e_lifecycle test_force_does_not_bypass_upstream_moved` | ❌ W0 | ⬜ pending |
+| 01-07-T1 | 07 | 6 | SYNC-01 | — | Upstream delete + unchanged local → removed + tombstone. NC: local edit → Conflicted, bytes unchanged | unit | `cargo test --bin ude sync::tests::test_pull_upstream_deletion` | ❌ W0 | ⬜ pending |
+| 01-07-T3 | 07 | 6 | SYNC-01 | — | Tombstone blocks republish. NC: fresh state → LocallyModified | unit | `cargo test --bin ude sync::tests::test_tombstone_prevents_republish` | ❌ W0 | ⬜ pending |
+| 01-07-T3 | 07 | 6 | SYNC-01 | — | Publication gate accepts `D` entries, still scans blobs. NC: secret-gate tests stay green | unit | `cargo test --bin ude sync::tests::test_push_to_remote_deletion` | ❌ W0 | ⬜ pending |
+| 01-06-T1 | 06 | 5 | SYNC-02 | — | Staging failure → targets + state.json byte-identical, no `.tmp*`. NC: no collision → all applied | unit | `cargo test --bin ude sync::tests::test_pull_staging_failure_no_partial_writes` | ❌ W0 | ⬜ pending |
+| 01-04-T1 | 04 | 3 | SYNC-02 | — | Corrupt/future-version state.json → Err. NC: missing file → Ok(default) | unit | `cargo test --bin ude sync::state::tests::test_load_` | ❌ W0 | ⬜ pending |
+| 01-06-T2 | 06 | 5 | SYNC-02 | — | Staged writes keep modes (0755 hooks, 0644 existing). NC: not 0600 | unit (unix) | `cargo test --bin ude sync::tests::test_staged_write_modes` | ❌ W0 | ⬜ pending |
+| 01-06-T2 (+01-09-T2 sidecar) | 06, 09 | 5, 8 | SYNC-02 | — | Symlinked target/sidecar refused. NC: regular path succeeds | unit | `cargo test --bin ude sync::tests::test_pull_updates_refuses_to_write_through_symlink` | ✅ / ❌ | ⬜ pending |
+| 01-01-T1 | 01 | 1 | SYNC-03 | — | Timeout kills process group < 2s. NC: `echo ok` → Ok | unit | `cargo test --bin ude process::tests::test_timeout_kills_group` | ❌ W0 | ⬜ pending |
+| 01-01-T1 | 01 | 1 | SYNC-03 | — | No pipe deadlock on 1 MiB stdout+stderr. NC: 0-byte case | unit | `cargo test --bin ude process::tests::test_drains_large_output` | ❌ W0 | ⬜ pending |
+| 01-01-T1 | 01 | 1 | SYNC-03 | — | Git env scrubbed, `GIT_TERMINAL_PROMPT=0`. NC: raw Command lacks entries | unit | `cargo test --bin ude process::tests::test_env_scrub` | ❌ W0 | ⬜ pending |
+| 01-03-T2 | 03 | 2 | SYNC-03 | — | Hanging pre-receive hook → timeout, ref unchanged. NC: hook exit 0 → success | unit | `cargo test --bin ude sync::tests::test_push_timeout_hanging_hook` | ❌ W0 | ⬜ pending |
+| 01-03-T1/T2 | 03 | 2 | SYNC-03 | — | Inherited GIT_DIR ignored by `ude`. NC: plain git resolves to decoy | e2e | `cargo test --test e2e_lifecycle test_sync_ignores_inherited_git_dir` | ❌ W0 | ⬜ pending |
+| 01-05-T1 | 05 | 4 | SYNC-04 | — | Fingerprint CRLF == LF. NC: different text differs; invalid UTF-8 untouched | unit | `cargo test --bin ude sync::tests::test_fingerprint` | ❌ W0 | ⬜ pending |
+| 01-05-T1 | 05 | 4 | SYNC-04 | — | CRLF-only difference → InSync. NC: real edit → LocallyModified | unit | `cargo test --bin ude sync::tests::test_scan_crlf_only_difference_in_sync` | ❌ W0 | ⬜ pending |
+| 01-05-T2 | 05 | 4 | SYNC-04 | — | v1 → v2 migration. NC: mismatched old hash stays modified | unit | `cargo test --bin ude sync::state::tests::test_migrate_v1` | ❌ W0 | ⬜ pending |
+| 01-09-T1 | 09 | 8 | SYNC-05 | — | Multiple conflicts → LOCAL/ANCESTOR/UPSTREAM sidecars, clean file applied. NC: clean pull → zero `*.conflict` | unit | `cargo test --bin ude sync::tests::test_pull_multiple_conflicts_sidecars` | ❌ W0 | ⬜ pending |
+| 01-08-T2 | 08 | 7 | SYNC-05 | — | Adjacent edits conflict. NC: one-line separation merges | unit | `cargo test --bin ude sync::merge::tests::test_adjacent_edits_conflict` | ❌ W0 | ⬜ pending |
+| 01-10-T3 | 10 | 9 | SYNC-05 | — | `resolve` clears conflict. NC: hand-deleted sidecar → push still skips | unit | `cargo test --bin ude sync::tests::test_resolve` | ❌ W0 | ⬜ pending |
+| 01-11-T1 | 11 | 10 | SYNC-06 | — | Upstream moved → UpstreamMoved, remote unchanged. NC: no race → success | unit | `cargo test --bin ude sync::tests::test_direct_push_aborts_when_upstream_moved` | ❌ W0 | ⬜ pending |
+| 01-11-T3 | 11 | 10 | SYNC-06 | — | `--force` does not bypass upstream-moved abort. NC: no race → succeeds | e2e | `cargo test --test e2e_lifecycle test_force_does_not_bypass_upstream_moved` | ❌ W0 | ⬜ pending |
 
 *Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
 
@@ -83,7 +83,7 @@ Seeded at requirement level from RESEARCH.md; the planner binds each row to task
 
 | Behavior | Requirement | Why Manual | Test Instructions |
 |----------|-------------|------------|-------------------|
-| Windows `JobObject` kill branch | SYNC-03 | Windows target not installed on this host; branch cannot be compiled here | Cross-compile/check on a Windows target or CI runner |
+| Windows `JobObject` kill branch (01-01-T2) | SYNC-03 | Windows target not installed on this host; branch cannot be compiled here | Cross-compile/check on a Windows target or CI runner |
 
 ---
 
