@@ -50,7 +50,9 @@ impl Auditor {
         let user_home = base_dirs
             .as_ref()
             .map(|b| b.home_dir().to_path_buf())
-            .unwrap_or_else(|| PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".to_string())));
+            .unwrap_or_else(|| {
+                PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".to_string()))
+            });
         let xdg_config = base_dirs
             .as_ref()
             .map(|b| b.config_dir().to_path_buf())
@@ -115,7 +117,10 @@ impl Auditor {
                         ))
                     }
                 }
-                Err(e) => CheckStatus::Critical(format!("Failed to read {}: {e}", allowed_signers.display())),
+                Err(e) => CheckStatus::Critical(format!(
+                    "Failed to read {}: {e}",
+                    allowed_signers.display()
+                )),
             }
         };
         reports.push(AuditReport {
@@ -142,7 +147,9 @@ impl Auditor {
             status: if gpg_format == "ssh" {
                 CheckStatus::Pass
             } else {
-                CheckStatus::Critical("Global git gpg.format is not configured to 'ssh'".to_string())
+                CheckStatus::Critical(
+                    "Global git gpg.format is not configured to 'ssh'".to_string(),
+                )
             },
         });
 
@@ -164,7 +171,9 @@ impl Auditor {
             status: if gpg_sign == "true" {
                 CheckStatus::Pass
             } else {
-                CheckStatus::Critical("Global git commit.gpgsign is not enabled ('true')".to_string())
+                CheckStatus::Critical(
+                    "Global git commit.gpgsign is not enabled ('true')".to_string(),
+                )
             },
         });
 
@@ -191,7 +200,10 @@ impl Auditor {
             reports.push(AuditReport {
                 category: "Repository Baseline".to_string(),
                 name: "Git Repository".to_string(),
-                status: CheckStatus::Fail(format!("{} is not a git repository", repo_path.display())),
+                status: CheckStatus::Fail(format!(
+                    "{} is not a git repository",
+                    repo_path.display()
+                )),
             });
             return reports;
         }
@@ -298,7 +310,9 @@ impl Auditor {
                     #[cfg(unix)]
                     {
                         use std::os::unix::fs::PermissionsExt;
-                        let perms = std::fs::metadata(&hook_file).map(|m| m.permissions().mode()).unwrap_or(0);
+                        let perms = std::fs::metadata(&hook_file)
+                            .map(|m| m.permissions().mode())
+                            .unwrap_or(0);
                         if perms & 0o111 != 0 {
                             CheckStatus::Pass
                         } else {

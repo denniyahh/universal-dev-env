@@ -77,10 +77,15 @@ impl Sanitizer {
         let mut result = content.to_string();
 
         if !xdg_config.is_empty() && xdg_config != user_home {
-            let pattern = format!(r#"(^|[^A-Za-z0-9_.\-]){}([/\\"'\s:]|$)"#, regex::escape(xdg_config));
+            let pattern = format!(
+                r#"(^|[^A-Za-z0-9_.\-]){}([/\\"'\s:]|$)"#,
+                regex::escape(xdg_config)
+            );
             if let Ok(re) = Regex::new(&pattern) {
                 loop {
-                    let next = re.replace_all(&result, "${1}{{ user.xdg_config }}$2").to_string();
+                    let next = re
+                        .replace_all(&result, "${1}{{ user.xdg_config }}$2")
+                        .to_string();
                     if next == result {
                         break;
                     }
@@ -89,7 +94,10 @@ impl Sanitizer {
             }
         }
         if !user_home.is_empty() {
-            let pattern = format!(r#"(^|[^A-Za-z0-9_.\-]){}([/\\"'\s:]|$)"#, regex::escape(user_home));
+            let pattern = format!(
+                r#"(^|[^A-Za-z0-9_.\-]){}([/\\"'\s:]|$)"#,
+                regex::escape(user_home)
+            );
             if let Ok(re) = Regex::new(&pattern) {
                 loop {
                     let next = re.replace_all(&result, "${1}{{ user.home }}$2").to_string();
@@ -205,7 +213,9 @@ mod tests {
         let b2 = "PRIVATE KEY-----";
         let e1 = "-----END";
         let e2 = "PRIVATE KEY-----";
-        let dirty = format!("{b1} {b2}\nMIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQC6...\n{e1} {e2}");
+        let dirty = format!(
+            "{b1} {b2}\nMIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQC6...\n{e1} {e2}"
+        );
         match sanitizer.check_secrets(&dirty) {
             SanitizationResult::SecretDetected { pattern, .. } => {
                 assert_eq!(pattern, "Private Key");
@@ -281,14 +291,13 @@ mod tests {
 
         // Negative control: Preceding path /backup/home/alice must NOT be corrupted when home is /home/alice
         let backup_raw = "Archive is at /backup/home/alice/data.tar";
-        let backup_param = sanitizer.parameterize_paths(backup_raw, "/home/alice", "/home/alice/.config");
-        assert_eq!(
-            backup_param,
-            "Archive is at /backup/home/alice/data.tar"
-        );
+        let backup_param =
+            sanitizer.parameterize_paths(backup_raw, "/home/alice", "/home/alice/.config");
+        assert_eq!(backup_param, "Archive is at /backup/home/alice/data.tar");
 
         let config_raw = "Config in /home/alice/.config/app/conf.toml";
-        let config_param = sanitizer.parameterize_paths(config_raw, "/home/alice", "/home/alice/.config");
+        let config_param =
+            sanitizer.parameterize_paths(config_raw, "/home/alice", "/home/alice/.config");
         assert_eq!(
             config_param,
             "Config in {{ user.xdg_config }}/app/conf.toml"
@@ -300,12 +309,14 @@ mod tests {
         let sanitizer = Sanitizer::new();
         // Space separated adjacent occurrences
         let space_separated = "/home/alice /home/alice";
-        let param_space = sanitizer.parameterize_paths(space_separated, "/home/alice", "/home/alice/.config");
+        let param_space =
+            sanitizer.parameterize_paths(space_separated, "/home/alice", "/home/alice/.config");
         assert_eq!(param_space, "{{ user.home }} {{ user.home }}");
 
         // Colon separated adjacent occurrences (e.g. in PATH or env vars)
         let colon_separated = "/home/alice:/home/alice";
-        let param_colon = sanitizer.parameterize_paths(colon_separated, "/home/alice", "/home/alice/.config");
+        let param_colon =
+            sanitizer.parameterize_paths(colon_separated, "/home/alice", "/home/alice/.config");
         assert_eq!(param_colon, "{{ user.home }}:{{ user.home }}");
     }
 

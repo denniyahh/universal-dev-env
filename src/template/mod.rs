@@ -32,7 +32,11 @@ pub struct TemplateContext {
 
 impl TemplateContext {
     /// Detects host defaults from system environment and git config for a specific project directory
-    pub fn detect_for_project(project_dir: &std::path::Path, project_name: &str, default_project_type: &str) -> Self {
+    pub fn detect_for_project(
+        project_dir: &std::path::Path,
+        project_name: &str,
+        default_project_type: &str,
+    ) -> Self {
         let base_dirs = BaseDirs::new();
         let user_home = base_dirs
             .as_ref()
@@ -97,7 +101,9 @@ impl TemplateContext {
             xdg_data: xdg_data.clone(),
         };
 
-        let effective_project_type = if default_project_type != "generic" && !default_project_type.is_empty() {
+        let effective_project_type = if default_project_type != "generic"
+            && !default_project_type.is_empty()
+        {
             default_project_type.to_string()
         } else if let Ok(state_str) = std::fs::read_to_string(project_dir.join(".ude/state.json"))
             && let Ok(state_json) = serde_json::from_str::<serde_json::Value>(&state_str)

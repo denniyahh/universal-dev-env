@@ -92,7 +92,9 @@ impl TypeSafeClient {
         let mut criteria = HashMap::new();
         criteria.insert(
             "benign_rephrase".to_string(),
-            serde_json::json!("Typo fixes, grammar, styling, or clearer phrasing with identical governance intent"),
+            serde_json::json!(
+                "Typo fixes, grammar, styling, or clearer phrasing with identical governance intent"
+            ),
         );
         criteria.insert(
             "project_exception".to_string(),
@@ -187,7 +189,10 @@ mod tests {
     #[test]
     fn test_typesafe_request_serialization() {
         let mut criteria = HashMap::new();
-        criteria.insert("true".to_string(), serde_json::json!("High risk of credential leak"));
+        criteria.insert(
+            "true".to_string(),
+            serde_json::json!("High risk of credential leak"),
+        );
         criteria.insert("false".to_string(), serde_json::json!("Benign text"));
 
         let mut questions = HashMap::new();
@@ -229,7 +234,10 @@ mod tests {
 
         let resp: SystemOneResponse = serde_json::from_str(json).expect("deserialize");
         assert_eq!(resp.model, "jev-1.13.0");
-        if let Some(Answer::Choice { choice, confidence, .. }) = resp.answers.get("drift_classification") {
+        if let Some(Answer::Choice {
+            choice, confidence, ..
+        }) = resp.answers.get("drift_classification")
+        {
             assert_eq!(choice, "benign_rephrase");
             assert!(*confidence > 0.8);
         } else {
