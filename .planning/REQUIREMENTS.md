@@ -10,7 +10,7 @@ Requirements for initial release, mapping directly to remediation tracks from [`
 ### Sync Engine & State Hermeticity (Track 1)
 
 - [ ] **SYNC-01**: `pull_updates` tracks deletion tombstones in `.ude/state.json` to propagate upstream deletions cleanly without resurrecting deleted files.
-- [ ] **SYNC-02**: Synchronization materialization uses a two-phase transactional staging directory before atomically updating project working trees.
+- [x] **SYNC-02**: Synchronization materialization uses a two-phase transactional staging directory before atomically updating project working trees.
 - [x] **SYNC-03**: All subprocess executions (`git`, `gh`) enforce bounded timeouts (30s-60s) with active process cancellation to prevent hangs.
 - [x] **SYNC-04**: Cryptographic SHA-256 ancestor hash calculation normalizes CRLF line endings to prevent false drift detection across platforms.
 - [ ] **SYNC-05**: Divergent 3-way conflicts generate structured `.conflict` files with standard Myers conflict markers while preserving user modifications.
@@ -68,7 +68,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | Requirement | Phase | Status |
 |-------------|-------|--------|
 | SYNC-01 | Phase 1 | Pending |
-| SYNC-02 | Phase 1 | Pending |
+| SYNC-02 | Phase 1 | Complete |
 | SYNC-03 | Phase 1 | Complete |
 | SYNC-04 | Phase 1 | Complete |
 | SYNC-05 | Phase 1 | Pending |
