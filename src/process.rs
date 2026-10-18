@@ -1,9 +1,10 @@
 //! Bounded subprocess runner for every `git` / `gh` spawn in UDE (SYNC-03).
-// RED stub: the runner has no production callers until the GREEN commit wires them.
-#![allow(dead_code)]
 
-use std::process::{Command, ExitStatus};
-use std::time::Duration;
+use process_wrap::std::{ChildWrapper, CommandWrap};
+use std::io::Read;
+use std::process::{Command, ExitStatus, Stdio};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 /// Time limit for local git queries (config reads, index updates, ls-files).
 pub const LOCAL_TIMEOUT: Duration = Duration::from_secs(30);
@@ -49,22 +50,147 @@ pub struct RunOutput {
     pub stderr: Vec<u8>,
 }
 
-/// RED stub: reproduces today's behaviour (no scrub, no non-interactive env).
-pub fn prepare_command(_cmd: &mut Command) {}
+/// Makes `cmd` hermetic and non-interactive: removes every [`GIT_LOCAL_ENV_VARS`]
+/// entry, sets `GIT_TERMINAL_PROMPT=0`, `GH_PROMPT_DISABLED=1` and
+/// `GH_NO_UPDATE_NOTIFIER=1`, binds stdin to the null device and pipes stdout and
+/// stderr. Global git config overrides, `HOME` and the XDG variables pass through
+/// unchanged, so callers (and the e2e fixtures) can still point git at a config file.
+pub fn prepare_command(cmd: &mut Command) {
+    for var in GIT_LOCAL_ENV_VARS {
+        cmd.env_remove(var);
+    }
+    cmd.env("GIT_TERMINAL_PROMPT", "0")
+        .env("GH_PROMPT_DISABLED", "1")
+        .env("GH_NO_UPDATE_NOTIFIER", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+}
 
-/// RED stub: reproduces today's behaviour (plain std output, no deadline, no label).
-pub fn run_bounded(
-    mut cmd: Command,
-    _label: &str,
-    _timeout: Duration,
+/// Runs `cmd` to completion within `timeout`, capturing stdout and stderr.
+///
+/// The child is prepared with [`prepare_command`] and spawned as the leader of a
+/// new process group (Unix) or inside a Job Object (Windows). Both output streams
+/// are drained on their own threads, so a full pipe cannot deadlock the child.
+/// When the deadline passes the whole group is killed, not just the leader.
+/// Reader threads are only joined once they have finished; after a group kill they
+/// get [`KILL_GRACE`] to reach EOF and are then detached, so a descendant that left
+/// the group cannot hold the call open. Worst case the call returns after
+/// `timeout + KILL_GRACE` plus the time to reap the killed group.
+///
+/// `label` is a redacted description such as `git fetch`. Error messages name only
+/// the label, never the argv, which may carry a token-bearing remote URL.
+pub fn run_bounded(cmd: Command, label: &str, timeout: Duration) -> Result<RunOutput, String> {
+    let mut cmd = cmd;
+    prepare_command(&mut cmd);
+    let mut wrapped = CommandWrap::from(cmd);
+    #[cfg(unix)]
+    wrapped.wrap(process_wrap::std::ProcessGroup::leader());
+    #[cfg(windows)]
+    wrapped.wrap(process_wrap::std::JobObject);
+    let mut child = wrapped
+        .spawn()
+        .map_err(|e| format!("Failed to spawn {label}: {e}"))?;
+    let readers = Readers {
+        stdout: spawn_reader(child.stdout().take()),
+        stderr: spawn_reader(child.stderr().take()),
+    };
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return finish_after_exit(child, readers, status, label, deadline),
+            Ok(None) if Instant::now() >= deadline => {
+                terminate(child.as_mut(), readers);
+                return Err(format!(
+                    "{label} timed out after {secs:.1}s and was terminated (UDE runs git/gh non-interactively: cache your credentials or load your SSH key into ssh-agent)",
+                    secs = timeout.as_secs_f64()
+                ));
+            }
+            Ok(None) => thread::sleep(POLL_INTERVAL),
+            Err(e) => {
+                terminate(child.as_mut(), readers);
+                return Err(format!("{label}: failed to wait for child: {e}"));
+            }
+        }
+    }
+}
+
+/// The two output reader threads of one child.
+struct Readers {
+    stdout: JoinHandle<Vec<u8>>,
+    stderr: JoinHandle<Vec<u8>>,
+}
+
+impl Readers {
+    /// Polls until both readers have finished (true) or `limit` passes (false).
+    fn finish_by(&self, limit: Instant) -> bool {
+        loop {
+            if self.stdout.is_finished() && self.stderr.is_finished() {
+                return true;
+            }
+            if Instant::now() >= limit {
+                return false;
+            }
+            thread::sleep(POLL_INTERVAL);
+        }
+    }
+
+    /// Joins both readers. Call only after [`Readers::finish_by`] returned true,
+    /// so the join never blocks.
+    fn collect(self, label: &str) -> Result<(Vec<u8>, Vec<u8>), String> {
+        let panicked = |_| format!("{label}: output reader panicked");
+        let stdout = self.stdout.join().map_err(panicked)?;
+        let stderr = self.stderr.join().map_err(panicked)?;
+        Ok((stdout, stderr))
+    }
+}
+
+/// Reads `pipe` to EOF on a new thread and returns everything it read.
+fn spawn_reader<R: Read + Send + 'static>(pipe: Option<R>) -> JoinHandle<Vec<u8>> {
+    thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut pipe) = pipe {
+            let _ = pipe.read_to_end(&mut buf);
+        }
+        buf
+    })
+}
+
+/// The leader exited on its own. Background helpers that closed the inherited
+/// pipes (a credential-cache daemon, for example) are left running; group members
+/// still holding the pipes at the deadline are killed with the group.
+fn finish_after_exit(
+    mut child: Box<dyn ChildWrapper>,
+    readers: Readers,
+    status: ExitStatus,
+    label: &str,
+    deadline: Instant,
 ) -> Result<RunOutput, String> {
-    cmd.output()
-        .map(|out| RunOutput {
-            status: out.status,
-            stdout: out.stdout,
-            stderr: out.stderr,
-        })
-        .map_err(|e| e.to_string())
+    if !readers.finish_by(deadline) {
+        // Fails with ESRCH when no group member is left; the grace poll still applies.
+        let _ = child.start_kill();
+        if !readers.finish_by(Instant::now() + KILL_GRACE) {
+            // Dropping the handles detaches the readers; they exit once the pipes close.
+            return Err(format!(
+                "{label}: output pipes still held open {grace:.1}s after its process group was killed (a descendant left the process group); output discarded",
+                grace = KILL_GRACE.as_secs_f64()
+            ));
+        }
+    }
+    let (stdout, stderr) = readers.collect(label)?;
+    Ok(RunOutput {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+/// Kills the whole process group, reaps it, and gives the readers [`KILL_GRACE`]
+/// to reach EOF. Readers still blocked after that are detached; output is discarded.
+fn terminate(child: &mut dyn ChildWrapper, readers: Readers) {
+    let _ = child.start_kill();
+    let _ = child.wait();
+    let _ = readers.finish_by(Instant::now() + KILL_GRACE);
 }
 
 #[cfg(test)]
@@ -72,8 +198,6 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
     use std::ffi::OsStr;
-    use std::process::Stdio;
-    use std::time::Instant;
 
     const LABEL: &str = "test command";
 

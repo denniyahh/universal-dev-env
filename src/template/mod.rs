@@ -53,33 +53,43 @@ impl TemplateContext {
             .map(|b| b.data_dir().to_string_lossy().to_string())
             .unwrap_or_else(|| format!("{}/.local/share", user_home));
 
-        let git_user_name = std::process::Command::new("git")
+        let mut name_cmd = std::process::Command::new("git");
+        name_cmd
             .current_dir(project_dir)
-            .args(["config", "--get", "user.name"])
-            .output()
-            .ok()
-            .and_then(|out| {
-                if out.status.success() {
-                    Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
-                } else {
-                    None
-                }
-            })
-            .unwrap_or_else(|| "Developer".to_string());
+            .args(["config", "--get", "user.name"]);
+        let git_user_name = crate::process::run_bounded(
+            name_cmd,
+            "git config user.name",
+            crate::process::LOCAL_TIMEOUT,
+        )
+        .ok()
+        .and_then(|out| {
+            if out.status.success() {
+                Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| "Developer".to_string());
 
-        let git_email = std::process::Command::new("git")
+        let mut email_cmd = std::process::Command::new("git");
+        email_cmd
             .current_dir(project_dir)
-            .args(["config", "--get", "user.email"])
-            .output()
-            .ok()
-            .and_then(|out| {
-                if out.status.success() {
-                    Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
-                } else {
-                    None
-                }
-            })
-            .unwrap_or_else(|| "developer@example.com".to_string());
+            .args(["config", "--get", "user.email"]);
+        let git_email = crate::process::run_bounded(
+            email_cmd,
+            "git config user.email",
+            crate::process::LOCAL_TIMEOUT,
+        )
+        .ok()
+        .and_then(|out| {
+            if out.status.success() {
+                Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| "developer@example.com".to_string());
 
         let user = UserContext {
             home: user_home.clone(),
