@@ -1,5 +1,6 @@
 pub mod merge;
 pub mod state;
+use state::STATE_FILE_REL;
 pub use state::{FileStateRecord, ProjectState};
 
 use crate::process::{self, RunOutput};
@@ -1281,9 +1282,6 @@ pub fn sanitize_branch_slug(branch: &str) -> String {
         trimmed.to_string()
     }
 }
-
-/// Relative path reported for failures to read or write the project state ledger.
-const STATE_FILE_REL: &str = ".ude/state.json";
 
 /// Pull outcome for an error loading or saving `.ude/state.json`.
 fn state_pull_failure(reason: String) -> PullResult {
