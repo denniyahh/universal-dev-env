@@ -2475,6 +2475,52 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn test_file_mode_for() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempdir().unwrap();
+        let mode_for = |rel: &str| staging::file_mode_for(Path::new(rel), &root.path().join(rel));
+
+        // New files: every executable path family gets 0o755, anything else 0o644.
+        for rel in [
+            "scripts/hooks/pre-commit",
+            "scratch/new-worktree.sh",
+            "scripts/check-in-container.sh",
+        ] {
+            assert_eq!(mode_for(rel), staging::EXECUTABLE_MODE, "new {rel}");
+        }
+        for rel in [".gitconfig", "scripts/other.sh", "mise.toml"] {
+            assert_eq!(mode_for(rel), staging::REGULAR_MODE, "new {rel}");
+        }
+
+        // Existing files: (path, mode before, expected mode).
+        let cases = [
+            ("scripts/hooks/pre-commit", 0o644, 0o755),
+            ("scripts/hooks/pre-push", 0o755, 0o755),
+            ("scripts/hooks/commit-msg", 0o640, 0o750),
+            ("scratch/new-worktree.sh", 0o600, 0o700),
+            ("scripts/check-in-container.sh", 0o000, 0o100),
+            (".gitconfig", 0o600, 0o600),
+            (".gitignore", 0o755, 0o755),
+        ];
+        for (rel, before, expected) in cases {
+            let path = root.path().join(rel);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, "x\n").unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(before)).unwrap();
+            assert_eq!(mode_for(rel), expected, "{rel} at {before:o}");
+        }
+
+        // A symlinked target is never followed: its mode reads as absent.
+        let outside = tempdir().unwrap();
+        let victim = outside.path().join("victim");
+        fs::write(&victim, "x\n").unwrap();
+        fs::set_permissions(&victim, fs::Permissions::from_mode(0o600)).unwrap();
+        std::os::unix::fs::symlink(&victim, root.path().join("mise.toml")).unwrap();
+        assert_eq!(mode_for("mise.toml"), staging::REGULAR_MODE);
+    }
+
     #[test]
     fn test_staging_abort_removes_created_dirs() {
         let root = tempdir().unwrap();
