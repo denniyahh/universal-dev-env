@@ -1953,24 +1953,18 @@ mod tests {
     #[test]
     fn test_defect2_publication_gate_allowlist_staging_blocks_unvalidated_files() {
         let engine = SyncEngine::new();
+        let git = GitFixture::new();
         let remote_repo = tempdir().unwrap();
 
         // Initialize fake remote repository
-        let _ = Command::new("git").current_dir(remote_repo.path()).args(["init", "-b", "main"]).status();
+        git.run(remote_repo.path(), &["init", "-b", "main"]);
         let templates_dir = remote_repo.path().join("templates/projects/generic");
         fs::create_dir_all(&templates_dir).unwrap();
         let valid_file = templates_dir.join("gitconfig.repo");
         fs::write(&valid_file, "[core]\n  autocrlf = true\n").unwrap();
 
-        let _ = Command::new("git").current_dir(remote_repo.path()).args(["add", "-A"]).status();
-        let _ = Command::new("git").current_dir(remote_repo.path()).args([
-            "-c", "user.name=Tester",
-            "-c", "user.email=tester@example.com",
-            "-c", "commit.gpgsign=false",
-            "commit",
-            "--no-gpg-sign",
-            "-m", "base commit",
-        ]).status();
+        git.run(remote_repo.path(), &["add", "-A"]);
+        git.run(remote_repo.path(), &["commit", "-m", "base commit"]);
 
         // Adversarial setup: Place an unvalidated dirty secret file in templates/
         let dirty_secret_file = remote_repo.path().join("templates/unvalidated-secret.txt");
@@ -1987,12 +1981,7 @@ mod tests {
         let _ = engine.push_to_remote(remote_repo.path(), "main", false, &staged_allowlist);
 
         // Verify git status: the dirty secret file must remain UNTRACKED / UNSTAGED!
-        let status = Command::new("git")
-            .current_dir(remote_repo.path())
-            .args(["status", "--porcelain"])
-            .output()
-            .unwrap();
-        let status_out = String::from_utf8_lossy(&status.stdout);
+        let status_out = git.output(remote_repo.path(), &["status", "--porcelain"]);
 
         // The dirty file must be strictly untracked ('??') and never committed into HEAD
         assert!(
@@ -2000,12 +1989,10 @@ mod tests {
             "Dirty secret file must remain strictly untracked! Status: {status_out}"
         );
 
-        let ls_tree = Command::new("git")
-            .current_dir(remote_repo.path())
-            .args(["ls-tree", "-r", "--name-only", "HEAD"])
-            .output()
-            .unwrap();
-        let ls_tree_out = String::from_utf8_lossy(&ls_tree.stdout);
+        let ls_tree_out = git.output(
+            remote_repo.path(),
+            &["ls-tree", "-r", "--name-only", "HEAD"],
+        );
         assert!(
             !ls_tree_out.contains("unvalidated-secret.txt"),
             "Dirty secret file was committed into HEAD tree! Trees:\n{ls_tree_out}"
@@ -2104,24 +2091,18 @@ mod tests {
     #[test]
     fn test_publication_gate_scans_staged_blob_rejecting_clean_filter_secrets() {
         let engine = SyncEngine::new();
+        let git = GitFixture::new();
         let remote_repo = tempdir().unwrap();
 
         // Initialize fake remote repository
-        let _ = Command::new("git").current_dir(remote_repo.path()).args(["init", "-b", "main"]).status();
+        git.run(remote_repo.path(), &["init", "-b", "main"]);
         let templates_dir = remote_repo.path().join("templates/projects/generic");
         fs::create_dir_all(&templates_dir).unwrap();
         let valid_file = templates_dir.join("gitconfig.repo");
         fs::write(&valid_file, "[core]\n  autocrlf = true\n").unwrap();
 
-        let _ = Command::new("git").current_dir(remote_repo.path()).args(["add", "-A"]).status();
-        let _ = Command::new("git").current_dir(remote_repo.path()).args([
-            "-c", "user.name=Tester",
-            "-c", "user.email=tester@example.com",
-            "-c", "commit.gpgsign=false",
-            "commit",
-            "--no-gpg-sign",
-            "-m", "base commit",
-        ]).status();
+        git.run(remote_repo.path(), &["add", "-A"]);
+        git.run(remote_repo.path(), &["commit", "-m", "base commit"]);
 
         // Now modify valid_file on disk with clean content
         fs::write(&valid_file, "[core]\n  autocrlf = false\n").unwrap();
@@ -2137,10 +2118,11 @@ mod tests {
             fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
         }
 
-        let _ = Command::new("git")
-            .current_dir(remote_repo.path())
-            .args(["config", "filter.injectsecret.clean", &format!("{}", script.display())])
-            .status();
+        let filter_cmd = format!("{}", script.display());
+        git.run(
+            remote_repo.path(),
+            &["config", "filter.injectsecret.clean", &filter_cmd],
+        );
 
         let info_dir = remote_repo.path().join(".git/info");
         fs::create_dir_all(&info_dir).unwrap();
@@ -2163,13 +2145,9 @@ mod tests {
         );
 
         // Verify negative control: git reset HEAD was performed, staging index must be empty
-        let diff_cached = Command::new("git")
-            .current_dir(remote_repo.path())
-            .args(["diff", "--cached", "--name-only"])
-            .output()
-            .unwrap();
+        let diff_cached = git.output(remote_repo.path(), &["diff", "--cached", "--name-only"]);
         assert!(
-            diff_cached.stdout.is_empty(),
+            diff_cached.is_empty(),
             "Staging area must be reset clean after secret detection violation!"
         );
     }
@@ -2241,32 +2219,19 @@ mod tests {
         assert_eq!(sanitize_branch_slug("fix/issue#42/sub_dir"), "fix-issue-42-sub_dir");
 
         let engine = SyncEngine::new();
+        let git = GitFixture::new();
         let remote_dir = tempdir().unwrap();
         let cache_dir = tempdir().unwrap();
 
         // Initialize remote git repo with slash-delimited branch
-        let _ = Command::new("git")
-            .current_dir(remote_dir.path())
-            .args(["init", "-b", "feature/custom-task"])
-            .status();
-        let _ = Command::new("git")
-            .current_dir(remote_dir.path())
-            .args(["config", "user.name", "Tester"])
-            .status();
-        let _ = Command::new("git")
-            .current_dir(remote_dir.path())
-            .args(["config", "user.email", "tester@example.com"])
-            .status();
+        git.run(remote_dir.path(), &["init", "-b", "feature/custom-task"]);
 
         let tmpl_file = remote_dir.path().join("templates/test.txt");
         fs::create_dir_all(tmpl_file.parent().unwrap()).unwrap();
         fs::write(&tmpl_file, "branch content\n").unwrap();
 
-        let _ = Command::new("git").current_dir(remote_dir.path()).args(["add", "-A"]).status();
-        let _ = Command::new("git")
-            .current_dir(remote_dir.path())
-            .args(["commit", "--no-verify", "--no-gpg-sign", "-m", "init slash branch"])
-            .status();
+        git.run(remote_dir.path(), &["add", "-A"]);
+        git.run(remote_dir.path(), &["commit", "-m", "init slash branch"]);
 
         // Call ensure_remote_repo: must acquire lock and clone without path nesting failure!
         let res = engine.ensure_remote_repo(
@@ -2282,33 +2247,24 @@ mod tests {
     #[test]
     fn test_direct_push_after_pr_mode_resets_branch_and_pushes_target() {
         let engine = SyncEngine::new();
+        let git = GitFixture::new();
         let bare_remote = tempdir().unwrap();
         let cache_dir = tempdir().unwrap();
 
         // Initialize bare remote
-        let _ = Command::new("git")
-            .current_dir(bare_remote.path())
-            .args(["init", "--bare", "-b", "main"])
-            .status();
+        git.run(bare_remote.path(), &["init", "--bare", "-b", "main"]);
 
         // Seed initial commit into bare remote
         let seed_dir = tempdir().unwrap();
-        let _ = Command::new("git").current_dir(seed_dir.path()).args(["init", "-b", "main"]).status();
-        let _ = Command::new("git").current_dir(seed_dir.path()).args(["config", "user.name", "Tester"]).status();
-        let _ = Command::new("git").current_dir(seed_dir.path()).args(["config", "user.email", "tester@example.com"]).status();
+        git.run(seed_dir.path(), &["init", "-b", "main"]);
         let seed_tmpl = seed_dir.path().join("templates/projects/generic/gitconfig.repo");
         fs::create_dir_all(seed_tmpl.parent().unwrap()).unwrap();
         fs::write(&seed_tmpl, "[core]\n  autocrlf = true\n").unwrap();
-        let _ = Command::new("git").current_dir(seed_dir.path()).args(["add", "-A"]).status();
-        let _ = Command::new("git")
-            .current_dir(seed_dir.path())
-            .args(["commit", "--no-verify", "--no-gpg-sign", "-m", "initial seed"])
-            .status();
-        let _ = Command::new("git")
-            .current_dir(seed_dir.path())
-            .args(["remote", "add", "origin", bare_remote.path().to_str().unwrap()])
-            .status();
-        let _ = Command::new("git").current_dir(seed_dir.path()).args(["push", "-u", "origin", "main"]).status();
+        git.run(seed_dir.path(), &["add", "-A"]);
+        git.run(seed_dir.path(), &["commit", "-m", "initial seed"]);
+        let bare_url = bare_remote.path().to_str().unwrap();
+        git.run(seed_dir.path(), &["remote", "add", "origin", bare_url]);
+        git.run(seed_dir.path(), &["push", "-u", "origin", "main"]);
 
         // Step 1: Ensure cache checkout of main
         let (tmpl_dir, lock) = engine
@@ -2327,12 +2283,7 @@ mod tests {
         drop(lock);
 
         // Verify remote has a ude-sync branch
-        let branch_list = Command::new("git")
-            .current_dir(bare_remote.path())
-            .args(["branch", "--list"])
-            .output()
-            .unwrap();
-        let branch_out = String::from_utf8_lossy(&branch_list.stdout);
+        let branch_out = git.output(bare_remote.path(), &["branch", "--list"]);
         assert!(branch_out.contains("ude-sync-"), "PR branch must be pushed to bare remote: {branch_out}");
 
         // Step 3: Now run direct push on main (open_pr: false)
@@ -2348,12 +2299,10 @@ mod tests {
         assert!(direct_res.is_ok(), "Direct push must succeed: {:?}", direct_res.err());
 
         // Step 4: Verify bare remote's `main` branch HEAD has the direct edit!
-        let cat_main = Command::new("git")
-            .current_dir(bare_remote.path())
-            .args(["show", "main:templates/projects/generic/gitconfig.repo"])
-            .output()
-            .unwrap();
-        let main_content = String::from_utf8_lossy(&cat_main.stdout);
+        let main_content = git.output(
+            bare_remote.path(),
+            &["show", "main:templates/projects/generic/gitconfig.repo"],
+        );
         assert!(
             main_content.contains("autocrlf = input"),
             "Bare remote main branch must contain direct commit! Got: {main_content}"
@@ -2363,38 +2312,26 @@ mod tests {
     #[test]
     fn test_post_commit_verification_catches_hook_injected_secrets_and_rolls_back() {
         let engine = SyncEngine::new();
+        let git = GitFixture::new();
         let remote_repo = tempdir().unwrap();
 
         // Initialize git repo with main
-        let _ = Command::new("git").current_dir(remote_repo.path()).args(["init", "-b", "main"]).status();
-        let _ = Command::new("git").current_dir(remote_repo.path()).args(["config", "user.name", "Tester"]).status();
-        let _ = Command::new("git").current_dir(remote_repo.path()).args(["config", "user.email", "tester@example.com"]).status();
+        git.run(remote_repo.path(), &["init", "-b", "main"]);
 
         let base_file = remote_repo.path().join("base.txt");
         fs::write(&base_file, "initial").unwrap();
-        let _ = Command::new("git").current_dir(remote_repo.path()).args(["add", "-A"]).status();
-        let _ = Command::new("git")
-            .current_dir(remote_repo.path())
-            .args(["commit", "--no-verify", "--no-gpg-sign", "-m", "base commit"])
-            .status();
+        git.run(remote_repo.path(), &["add", "-A"]);
+        git.run(remote_repo.path(), &["commit", "-m", "base commit"]);
 
-        let base_head = Command::new("git")
-            .current_dir(remote_repo.path())
-            .args(["rev-parse", "HEAD"])
-            .output()
-            .unwrap();
-        let base_head_sha = String::from_utf8_lossy(&base_head.stdout).trim().to_string();
+        let base_head_sha = git.output(remote_repo.path(), &["rev-parse", "HEAD"]);
 
         // Staged allowlist has only base.txt
         let expected_set: std::collections::HashSet<PathBuf> = [PathBuf::from("base.txt")].into_iter().collect();
 
         // 1. Clean commit validation
         fs::write(&base_file, "updated benign content").unwrap();
-        let _ = Command::new("git").current_dir(remote_repo.path()).args(["add", "base.txt"]).status();
-        let _ = Command::new("git")
-            .current_dir(remote_repo.path())
-            .args(["commit", "--no-verify", "--no-gpg-sign", "-m", "benign update"])
-            .status();
+        git.run(remote_repo.path(), &["add", "base.txt"]);
+        git.run(remote_repo.path(), &["commit", "-m", "benign update"]);
         let clean_check = validate_committed_tree(&engine.sanitizer, remote_repo.path(), &expected_set);
         assert!(clean_check.is_ok(), "Clean commit must pass validate_committed_tree");
 
@@ -2403,11 +2340,8 @@ mod tests {
         let body = "111122223333444455556666777788889999";
         let secret_val = format!("{prefix}{body}");
         fs::write(&base_file, format!("token = {secret_val}\n")).unwrap();
-        let _ = Command::new("git").current_dir(remote_repo.path()).args(["add", "base.txt"]).status();
-        let _ = Command::new("git")
-            .current_dir(remote_repo.path())
-            .args(["commit", "--no-verify", "--no-gpg-sign", "-m", "injected secret"])
-            .status();
+        git.run(remote_repo.path(), &["add", "base.txt"]);
+        git.run(remote_repo.path(), &["commit", "-m", "injected secret"]);
 
         let secret_check = validate_committed_tree(&engine.sanitizer, remote_repo.path(), &expected_set);
         assert!(secret_check.is_err(), "Committed secret must fail validate_committed_tree");
@@ -2415,20 +2349,10 @@ mod tests {
 
         // Rollback commit and assert HEAD was restored to the parent
         rollback_commit(remote_repo.path());
-        let head_after = Command::new("git")
-            .current_dir(remote_repo.path())
-            .args(["rev-parse", "HEAD"])
-            .output()
-            .unwrap();
-        let head_after_sha = String::from_utf8_lossy(&head_after.stdout).trim().to_string();
+        let head_after_sha = git.output(remote_repo.path(), &["rev-parse", "HEAD"]);
         assert_ne!(head_after_sha, base_head_sha, "HEAD should be at benign commit, not base");
 
-        let show_head = Command::new("git")
-            .current_dir(remote_repo.path())
-            .args(["show", "HEAD:base.txt"])
-            .output()
-            .unwrap();
-        let head_content = String::from_utf8_lossy(&show_head.stdout);
+        let head_content = git.output(remote_repo.path(), &["show", "HEAD:base.txt"]);
         assert!(!head_content.contains("ghp_"), "HEAD must not contain secret after rollback: {head_content}");
     }
 
