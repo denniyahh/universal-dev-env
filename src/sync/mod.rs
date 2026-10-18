@@ -364,7 +364,7 @@ impl SyncEngine {
         ctx: Option<&crate::template::TemplateContext>,
     ) -> Vec<FileSyncState> {
         let mut states = Vec::new();
-        let project_state = ProjectState::load_from_dir(local_root);
+        let project_state = ProjectState::load_from_dir(local_root).unwrap_or_default();
         let renderer = crate::template::TemplateRenderer::new();
 
         // Inspect known managed files
@@ -713,7 +713,7 @@ impl SyncEngine {
         }
 
         // Pass 2: Write files and update ancestor state
-        let mut project_state = ProjectState::load_from_dir(local_root);
+        let mut project_state = ProjectState::load_from_dir(local_root).unwrap_or_default();
         let mut applied = 0;
 
         for (rel, target, content_bytes, ancestor_hash, ancestor_content) in candidates_to_write {
@@ -893,7 +893,7 @@ impl SyncEngine {
         }
 
         if persist_ancestor_immediately {
-            let mut project_state = ProjectState::load_from_dir(local_root);
+            let mut project_state = ProjectState::load_from_dir(local_root).unwrap_or_default();
             for (rel, hash, content) in &updated_records {
                 project_state.record_file(rel, hash.clone(), content.clone());
             }
@@ -1653,7 +1653,7 @@ mod tests {
         assert!(mise_content.contains(&ctx.user.home));
 
         // Verify state persistence
-        let state = ProjectState::load_from_dir(local_dir.path());
+        let state = ProjectState::load_from_dir(local_dir.path()).unwrap();
         assert!(state.get_ancestor_hash(Path::new(".gitconfig")).is_some());
         assert!(
             state
@@ -2214,7 +2214,7 @@ mod tests {
         assert!(matches!(push_res, PushResult::Success { .. }));
 
         // Verify ancestor state in .ude/state.json is still the BASE hash, NOT the local edit hash
-        let current_state = ProjectState::load_from_dir(local_dir.path());
+        let current_state = ProjectState::load_from_dir(local_dir.path()).unwrap();
         assert_eq!(
             current_state.get_ancestor_hash(Path::new(".gitconfig")),
             Some(base_hash.as_str()),
@@ -2935,7 +2935,7 @@ mod tests {
         let pull_res = engine.pull_updates(local_dir.path(), upstream_dir.path(), &ctx);
         assert_eq!(pull_res, PullResult::Success { applied_files: 0 });
 
-        let updated_state = ProjectState::load_from_dir(local_dir.path());
+        let updated_state = ProjectState::load_from_dir(local_dir.path()).unwrap();
         let v2_hash = SyncEngine::compute_hash(v2_content.as_bytes());
         assert_eq!(
             updated_state.get_ancestor_hash(Path::new("mise.toml")),

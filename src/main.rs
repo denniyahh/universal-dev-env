@@ -737,7 +737,8 @@ fn main() {
                                         println!("  {} {msg}", "✓".green());
                                         if !pr {
                                             let mut project_state =
-                                                sync::ProjectState::load_from_dir(&local_project);
+                                                sync::ProjectState::load_from_dir(&local_project)
+                                                    .unwrap_or_default();
                                             for (rel, hash, content) in updated_records {
                                                 project_state.record_file(&rel, hash, content);
                                             }
