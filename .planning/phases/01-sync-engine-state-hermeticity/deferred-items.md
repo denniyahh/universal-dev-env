@@ -1,7 +1,9 @@
 ## Deferred Items
 
 - Repository baseline is not `cargo fmt --check` clean
-  status: open
+  status: resolved (2026-10-18, db81851 — operator chose one-off repo-wide
+  `cargo fmt` after wave 1, before 01-03; `cargo fmt --check` now exits 0 and is
+  the real gate for 01-03 onward)
   **Found during:** 01-01 Task 1 (measured at HEAD eaa0afe, before any 01-01 change)
   **What:** `cargo fmt --check` exits 1 with 167 diff hunks across src/main.rs,
   src/audit/mod.rs, src/sanitizer/mod.rs, src/semantic/mod.rs, src/sync/merge.rs,
