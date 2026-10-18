@@ -2,11 +2,14 @@ pub mod merge;
 pub mod state;
 pub use state::{FileStateRecord, ProjectState};
 
+use crate::process::{self, RunOutput};
 use crate::sanitizer::{SanitizationResult, Sanitizer};
 use sha2::{Digest, Sha256};
+use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub enum SyncStatus {
@@ -151,16 +154,77 @@ impl Drop for RemoteLockGuard {
     }
 }
 
+/// Time limits for the engine's git and gh spawns.
+///
+/// Internal parameterisation so tests can use sub-second limits. It is not a
+/// user-facing override: there is no config or environment setting for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProcessLimits {
+    /// Limit for local git commands (status, add, commit, checkout, reset, show).
+    pub local: Duration,
+    /// Limit for network commands (clone, fetch, push) and every `gh` call.
+    pub network: Duration,
+}
+
+impl Default for ProcessLimits {
+    fn default() -> Self {
+        Self {
+            local: process::LOCAL_TIMEOUT,
+            network: process::NETWORK_TIMEOUT,
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct SyncEngine {
     sanitizer: Sanitizer,
+    /// Extra environment for every spawned git/gh, applied before the runner's
+    /// scrub of repo-local git variables (tests inject a fixture gitconfig here).
+    extra_env: Vec<(OsString, OsString)>,
+    limits: ProcessLimits,
 }
 
 impl SyncEngine {
     pub fn new() -> Self {
         Self {
             sanitizer: Sanitizer::new(),
+            extra_env: Vec::new(),
+            limits: ProcessLimits::default(),
         }
+    }
+
+    /// Adds environment variables to every git/gh command the engine spawns. The
+    /// runner still removes the repo-local git variables, so this cannot redirect
+    /// git to another repository; it can point git at a global config file.
+    pub fn with_extra_env(mut self, vars: Vec<(OsString, OsString)>) -> Self {
+        self.extra_env = vars;
+        self
+    }
+
+    /// Replaces the time limits of the engine's git/gh commands (tests only).
+    pub fn with_limits(mut self, limits: ProcessLimits) -> Self {
+        self.limits = limits;
+        self
+    }
+
+    /// A git command with the engine's extra environment, run in `dir` if given.
+    fn git(&self, dir: Option<&Path>) -> Command {
+        let mut cmd = Command::new("git");
+        if let Some(dir) = dir {
+            cmd.current_dir(dir);
+        }
+        cmd.envs(self.extra_env.iter().map(|(key, value)| (key, value)));
+        cmd
+    }
+
+    /// Runs `cmd` on the local tier. `label` must not contain argv (remote URLs).
+    fn run_local(&self, cmd: Command, label: &str) -> Result<RunOutput, String> {
+        process::run_bounded(cmd, label, self.limits.local)
+    }
+
+    /// Runs `cmd` on the network tier. `label` must not contain argv (remote URLs).
+    fn run_network(&self, cmd: Command, label: &str) -> Result<RunOutput, String> {
+        process::run_bounded(cmd, label, self.limits.network)
     }
 
     /// Computes the sha256 checksum of a byte slice
@@ -455,64 +519,59 @@ impl SyncEngine {
         let target_checkout = cache_dir.join(format!("remote-{repo_hash}-{safe_branch}"));
 
         if !target_checkout.join(".git").exists() {
-            println!("  Cloning remote repository into cache: {}...", remote_url);
-            let status = Command::new("git")
+            println!(
+                "  Cloning remote repository into cache: {}...",
+                process::redact_userinfo(remote_url)
+            );
+            let mut clone = self.git(None);
+            clone
                 .args(["clone", "--depth", "1", "-b", branch, remote_url])
-                .arg(&target_checkout)
-                .status()
-                .map_err(|e| format!("Failed to execute git clone: {e}"))?;
-
-            if !status.success() {
-                return Err(format!(
-                    "git clone failed with exit status {:?}",
-                    status.code()
+                .arg(&target_checkout);
+            let out = self.run_network(clone, "git clone")?;
+            if !out.status.success() {
+                return Err(with_excerpt(
+                    format!("git clone failed with exit status {:?}", out.status.code()),
+                    &out,
                 ));
             }
         } else {
             // Fetch latest branch
-            let status = Command::new("git")
-                .current_dir(&target_checkout)
-                .args(["fetch", "origin", branch])
-                .status()
-                .map_err(|e| format!("Failed to execute git fetch: {e}"))?;
-
-            if !status.success() {
-                return Err(format!(
-                    "git fetch failed with exit status {:?}",
-                    status.code()
+            let mut fetch = self.git(Some(&target_checkout));
+            fetch.args(["fetch", "origin", branch]);
+            let out = self.run_network(fetch, "git fetch")?;
+            if !out.status.success() {
+                return Err(with_excerpt(
+                    format!("git fetch failed with exit status {:?}", out.status.code()),
+                    &out,
                 ));
             }
 
-            let status = Command::new("git")
-                .current_dir(&target_checkout)
-                .args(["checkout", "-B", branch, &format!("origin/{branch}")])
-                .status()
-                .map_err(|e| format!("Failed to checkout target branch: {e}"))?;
-
-            if !status.success() {
-                return Err(format!(
-                    "git checkout -B {branch} failed with exit status {:?}",
-                    status.code()
+            let mut checkout = self.git(Some(&target_checkout));
+            checkout.args(["checkout", "-B", branch, &format!("origin/{branch}")]);
+            let out = self.run_local(checkout, "git checkout -B")?;
+            if !out.status.success() {
+                return Err(with_excerpt(
+                    format!(
+                        "git checkout -B {branch} failed with exit status {:?}",
+                        out.status.code()
+                    ),
+                    &out,
                 ));
             }
 
-            let status = Command::new("git")
-                .current_dir(&target_checkout)
-                .args(["reset", "--hard", &format!("origin/{branch}")])
-                .status()
-                .map_err(|e| format!("Failed to execute git reset: {e}"))?;
-
-            if !status.success() {
-                return Err(format!(
-                    "git reset failed with exit status {:?}",
-                    status.code()
+            let mut reset = self.git(Some(&target_checkout));
+            reset.args(["reset", "--hard", &format!("origin/{branch}")]);
+            let out = self.run_local(reset, "git reset --hard")?;
+            if !out.status.success() {
+                return Err(with_excerpt(
+                    format!("git reset failed with exit status {:?}", out.status.code()),
+                    &out,
                 ));
             }
 
-            let _ = Command::new("git")
-                .current_dir(&target_checkout)
-                .args(["clean", "-fd"])
-                .status();
+            let mut clean = self.git(Some(&target_checkout));
+            clean.args(["clean", "-fd"]);
+            let _ = self.run_local(clean, "git clean");
         }
 
         // Return the templates directory inside the remote checkout along with the held lock
@@ -1117,6 +1176,16 @@ impl SyncEngine {
     }
 }
 
+/// Appends the redacted stderr excerpt of a failed git/gh run to `message`.
+fn with_excerpt(message: String, out: &RunOutput) -> String {
+    let excerpt = process::stderr_excerpt(out);
+    if excerpt.is_empty() {
+        message
+    } else {
+        format!("{message}: {excerpt}")
+    }
+}
+
 /// Sanitizes a git branch name into a filesystem-safe slug, preventing directory traversal
 /// or uncreated parent folder failures when branch names contain slashes (e.g. `feature/my-branch`).
 pub fn sanitize_branch_slug(branch: &str) -> String {
@@ -1336,28 +1405,6 @@ mod tests {
     use std::process::{Output, Stdio};
     use tempfile::tempdir;
 
-    /// Repository-local git variables (`git rev-parse --local-env-vars`). An inherited
-    /// value would point a fixture command at another repository, so every fixture
-    /// command removes them. Plan 01-03 replaces this copy with
-    /// `crate::process::GIT_LOCAL_ENV_VARS`.
-    const FIXTURE_GIT_LOCAL_ENV_VARS: [&str; 15] = [
-        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-        "GIT_CONFIG",
-        "GIT_CONFIG_PARAMETERS",
-        "GIT_CONFIG_COUNT",
-        "GIT_OBJECT_DIRECTORY",
-        "GIT_DIR",
-        "GIT_WORK_TREE",
-        "GIT_IMPLICIT_WORK_TREE",
-        "GIT_GRAFT_FILE",
-        "GIT_INDEX_FILE",
-        "GIT_NO_REPLACE_OBJECTS",
-        "GIT_REPLACE_REF_BASE",
-        "GIT_PREFIX",
-        "GIT_SHALLOW_FILE",
-        "GIT_COMMON_DIR",
-    ];
-
     const FIXTURE_GITCONFIG: &str =
         "[user]\n\tname = UDE Tester\n\temail = tester@example.com\n[commit]\n\tgpgsign = false\n";
 
@@ -1383,7 +1430,7 @@ mod tests {
         fn cmd(&self, dir: &Path) -> Command {
             let mut cmd = Command::new("git");
             cmd.current_dir(dir);
-            for name in FIXTURE_GIT_LOCAL_ENV_VARS {
+            for name in process::GIT_LOCAL_ENV_VARS {
                 cmd.env_remove(name);
             }
             cmd.env("GIT_CONFIG_GLOBAL", &self.gitconfig)
@@ -1431,7 +1478,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let cmd = fixture.cmd(dir.path());
         let envs: std::collections::HashMap<_, _> = cmd.get_envs().collect();
-        for name in FIXTURE_GIT_LOCAL_ENV_VARS {
+        for name in process::GIT_LOCAL_ENV_VARS {
             assert_eq!(
                 envs.get(OsStr::new(name)),
                 Some(&None),
@@ -1465,7 +1512,7 @@ mod tests {
         // Negative control: a plain git Command carries none of these entries.
         let plain = Command::new("git");
         let plain_envs: Vec<_> = plain.get_envs().collect();
-        for name in FIXTURE_GIT_LOCAL_ENV_VARS
+        for name in process::GIT_LOCAL_ENV_VARS
             .iter()
             .chain(&["GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM"])
         {
@@ -1930,8 +1977,8 @@ mod tests {
 
     #[test]
     fn test_remote_repo_cache_management() {
-        let engine = SyncEngine::new();
         let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
         let cache_dir = tempdir().unwrap();
         let fake_remote = tempdir().unwrap();
 
@@ -2389,8 +2436,8 @@ mod tests {
             "fix-issue-42-sub_dir"
         );
 
-        let engine = SyncEngine::new();
         let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
         let remote_dir = tempdir().unwrap();
         let cache_dir = tempdir().unwrap();
 
@@ -2421,8 +2468,8 @@ mod tests {
 
     #[test]
     fn test_direct_push_after_pr_mode_resets_branch_and_pushes_target() {
-        let engine = SyncEngine::new();
         let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
         let bare_remote = tempdir().unwrap();
         let cache_dir = tempdir().unwrap();
 

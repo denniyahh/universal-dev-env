@@ -1,8 +1,10 @@
 //! Bounded subprocess runner for every `git` / `gh` spawn in UDE (SYNC-03).
 
 use process_wrap::std::{ChildWrapper, CommandWrap};
+use regex::Regex;
 use std::io::Read;
 use std::process::{Command, ExitStatus, Stdio};
+use std::sync::LazyLock;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -42,14 +44,31 @@ pub const GIT_LOCAL_ENV_VARS: [&str; 15] = [
 /// Number of trailing non-empty stderr lines that [`stderr_excerpt`] keeps.
 pub const STDERR_EXCERPT_LINES: usize = 5;
 
-/// RED stub (plan 01-03 Task 1): returns the text unchanged.
+/// `scheme://userinfo@`: the userinfo runs from `://` to the first `@` and contains
+/// no `/`, whitespace or quote, so an `@` later in a path is not mistaken for it.
+static URL_USERINFO: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"([A-Za-z][A-Za-z0-9+.\-]*://)[^/\s'"@]+@"#).expect("valid userinfo pattern")
+});
+
+/// Replaces the userinfo of every `scheme://userinfo@host` occurrence in `text` with
+/// `***`, so a token-bearing remote URL can be printed or logged. Text without such
+/// an occurrence is returned unchanged.
 pub fn redact_userinfo(text: &str) -> String {
-    text.to_string()
+    URL_USERINFO.replace_all(text, "${1}***@").into_owned()
 }
 
-/// RED stub (plan 01-03 Task 1): returns nothing.
-pub fn stderr_excerpt(_out: &RunOutput) -> String {
-    String::new()
+/// The last [`STDERR_EXCERPT_LINES`] non-empty lines of `out`'s stderr (lossy UTF-8,
+/// each trimmed), joined with ` | ` and passed through [`redact_userinfo`]. Empty
+/// stderr gives an empty string.
+pub fn stderr_excerpt(out: &RunOutput) -> String {
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let lines: Vec<&str> = stderr
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    let start = lines.len().saturating_sub(STDERR_EXCERPT_LINES);
+    redact_userinfo(&lines[start..].join(" | "))
 }
 
 /// Exit status and captured output of a child run through [`run_bounded`].

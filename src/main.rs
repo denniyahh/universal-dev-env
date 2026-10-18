@@ -478,7 +478,7 @@ fn main() {
                         eprintln!(
                             "  {} Failed to sync with remote {}: {}",
                             "✗".red(),
-                            r_url,
+                            process::redact_userinfo(r_url),
                             e
                         );
                         std::process::exit(1);
@@ -498,7 +498,12 @@ fn main() {
                 cli::SyncAction::Status => {
                     println!("{}", "==> Checking UDE environment sync status...".bold());
                     if let Some(ref r_url) = remote_url {
-                        println!("  {} Remote Upstream: {} ({})", "ℹ".blue(), r_url, branch);
+                        println!(
+                            "  {} Remote Upstream: {} ({})",
+                            "ℹ".blue(),
+                            process::redact_userinfo(r_url),
+                            branch
+                        );
                     }
                     let sync_ctx = template::TemplateContext::detect_for_project(
                         &local_project,
@@ -560,7 +565,12 @@ fn main() {
                         "==> Pulling updates from central configuration store...".bold()
                     );
                     if let Some(ref r_url) = remote_url {
-                        println!("  {} Remote Upstream: {} ({})", "ℹ".blue(), r_url, branch);
+                        println!(
+                            "  {} Remote Upstream: {} ({})",
+                            "ℹ".blue(),
+                            process::redact_userinfo(r_url),
+                            branch
+                        );
                     }
                     let sync_ctx = template::TemplateContext::detect_for_project(
                         &local_project,
