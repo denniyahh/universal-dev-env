@@ -1,6 +1,93 @@
 use std::fs;
-use std::process::Command;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output, Stdio};
 use tempfile::tempdir;
+
+/// Repository-local git variables (`git rev-parse --local-env-vars`). This crate cannot
+/// import the binary's `process::GIT_LOCAL_ENV_VARS`, so it keeps its own copy.
+const FIXTURE_GIT_LOCAL_ENV_VARS: [&str; 15] = [
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_CONFIG",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG_COUNT",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_IMPLICIT_WORK_TREE",
+    "GIT_GRAFT_FILE",
+    "GIT_INDEX_FILE",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_PREFIX",
+    "GIT_SHALLOW_FILE",
+    "GIT_COMMON_DIR",
+];
+
+const FIXTURE_GITCONFIG: &str =
+    "[user]\n\tname = UDE Tester\n\temail = tester@example.com\n[commit]\n\tgpgsign = false\n";
+
+/// The only git Command constructor in this file: ignores inherited repo-local
+/// variables, reads `global_config` as its only global config, never prompts.
+fn scrubbed_git(dir: &Path, global_config: &Path) -> Command {
+    let mut cmd = Command::new("git");
+    cmd.current_dir(dir);
+    for name in FIXTURE_GIT_LOCAL_ENV_VARS {
+        cmd.env_remove(name);
+    }
+    cmd.env("GIT_CONFIG_GLOBAL", global_config)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(Stdio::null());
+    cmd
+}
+
+/// Runs a fixture git step and panics with its args and stderr if it fails.
+fn run_checked(mut cmd: Command, args: &[&str]) -> Output {
+    let out = cmd
+        .args(args)
+        .output()
+        .unwrap_or_else(|e| panic!("fixture step `git {}` did not start: {e}", args.join(" ")));
+    assert!(
+        out.status.success(),
+        "fixture step `git {}` failed ({}): {}",
+        args.join(" "),
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    out
+}
+
+/// Hermetic git runner for fixtures, with its own gitconfig (test identity, no signing).
+struct GitFixture {
+    _home: tempfile::TempDir,
+    gitconfig: PathBuf,
+}
+
+impl GitFixture {
+    fn new() -> Self {
+        let home = tempdir().expect("create fixture gitconfig dir");
+        let gitconfig = home.path().join("gitconfig");
+        fs::write(&gitconfig, FIXTURE_GITCONFIG).expect("write fixture gitconfig");
+        Self {
+            _home: home,
+            gitconfig,
+        }
+    }
+
+    fn cmd(&self, dir: &Path) -> Command {
+        scrubbed_git(dir, &self.gitconfig)
+    }
+
+    fn run(&self, dir: &Path, args: &[&str]) {
+        run_checked(self.cmd(dir), args);
+    }
+
+    #[allow(dead_code)] // same API as the sync unit-test helper; no e2e test reads output yet
+    fn output(&self, dir: &Path, args: &[&str]) -> String {
+        let out = run_checked(self.cmd(dir), args);
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+}
 
 #[test]
 fn test_cli_e2e_init_and_sync_lifecycle() {
@@ -80,6 +167,7 @@ fn test_doctor_critical_security_exit_code_2_and_negative_control() {
         .args(["doctor", "--host"])
         .env("HOME", fake_home.path())
         .env("XDG_CONFIG_HOME", fake_home.path().join(".config"))
+        .env("GIT_CONFIG_GLOBAL", fake_home.path().join(".gitconfig"))
         .output()
         .expect("ude doctor execution");
 
@@ -95,22 +183,23 @@ fn test_doctor_critical_security_exit_code_2_and_negative_control() {
     fs::create_dir_all(config_dir.join("git")).unwrap();
     fs::write(config_dir.join("git/allowed_signers"), "alice@example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI...\n").unwrap();
 
-    // Configure git signing in isolated environment
-    let _ = Command::new("git")
-        .args(["config", "--global", "gpg.format", "ssh"])
-        .env("HOME", fake_home.path())
-        .env("XDG_CONFIG_HOME", &config_dir)
-        .status();
-    let _ = Command::new("git")
-        .args(["config", "--global", "commit.gpgsign", "true"])
-        .env("HOME", fake_home.path())
-        .env("XDG_CONFIG_HOME", &config_dir)
-        .status();
+    // Configure git signing in isolated environment: the global config the ude
+    // binary reads under HOME=<fake home> (pinned below so both sides use one file)
+    let home_gitconfig = fake_home.path().join(".gitconfig");
+    run_checked(
+        scrubbed_git(fake_home.path(), &home_gitconfig),
+        &["config", "--global", "gpg.format", "ssh"],
+    );
+    run_checked(
+        scrubbed_git(fake_home.path(), &home_gitconfig),
+        &["config", "--global", "commit.gpgsign", "true"],
+    );
 
     let doctor_fixed = Command::new(bin)
         .args(["doctor", "--host"])
         .env("HOME", fake_home.path())
         .env("XDG_CONFIG_HOME", &config_dir)
+        .env("GIT_CONFIG_GLOBAL", &home_gitconfig)
         .output()
         .expect("ude doctor execution");
 
@@ -190,7 +279,8 @@ fn test_doctor_repo_assertions_detect_unconfigured_include_and_hooks() {
     fs::create_dir_all(&repo_dir).unwrap();
 
     // Initialize git repo
-    let _ = Command::new("git").current_dir(&repo_dir).args(["init", "-b", "main"]).status();
+    let git = GitFixture::new();
+    git.run(&repo_dir, &["init", "-b", "main"]);
 
     // Case 1: missing .gitconfig and missing hooks
     let fake_home = temp.path().join("home");
@@ -209,10 +299,10 @@ fn test_doctor_repo_assertions_detect_unconfigured_include_and_hooks() {
 
     // Case 2: inert files (empty .gitconfig, hooksPath=/dev/null, empty hook)
     fs::write(repo_dir.join(".gitconfig"), "").unwrap();
-    let _ = Command::new("git")
-        .current_dir(&repo_dir)
-        .args(["config", "--local", "core.hooksPath", "/dev/null"])
-        .status();
+    git.run(
+        &repo_dir,
+        &["config", "--local", "core.hooksPath", "/dev/null"],
+    );
     let hooks_dir = repo_dir.join("scripts/hooks");
     fs::create_dir_all(&hooks_dir).unwrap();
     fs::write(hooks_dir.join("pre-commit"), "").unwrap();
@@ -254,20 +344,14 @@ fn test_sync_push_pr_does_not_advance_ancestor_state() {
     fs::write(&loc_mise, format!("{init_content}\n# Custom edit\n")).unwrap();
 
     // 4. Setup a fake remote repo with a templates directory containing baseline
+    let git = GitFixture::new();
     let remote_dir = temp.path().join("remote_dir");
-    let _ = Command::new("git").current_dir(temp.path()).args(["init", "-b", "main", "remote_dir"]).status();
+    git.run(temp.path(), &["init", "-b", "main", "remote_dir"]);
     let tdir = remote_dir.join("templates/projects/agents");
     fs::create_dir_all(&tdir).unwrap();
     fs::write(tdir.join("mise.toml.jinja"), &init_content).unwrap();
-    let _ = Command::new("git").current_dir(&remote_dir).args(["add", "-A"]).status();
-    let _ = Command::new("git").current_dir(&remote_dir).args([
-        "-c", "user.name=Tester",
-        "-c", "user.email=tester@example.com",
-        "-c", "commit.gpgsign=false",
-        "commit",
-        "--no-gpg-sign",
-        "-m", "base commit",
-    ]).status();
+    git.run(&remote_dir, &["add", "-A"]);
+    git.run(&remote_dir, &["commit", "-m", "base commit"]);
 
     // 5. Run `ude sync push --remote <remote_dir> --pr` in hermetic environment
     let fake_home = temp.path().join("fake_home");
@@ -338,36 +422,24 @@ fn test_sync_push_remote_failure_does_not_advance_ancestor_state() {
     fs::write(&loc_mise, format!("{init_content}\n# Custom edit\n")).unwrap();
 
     // 4. Setup a bare remote git repo with an active pre-receive rejection hook
+    let git = GitFixture::new();
     let bare_remote = temp.path().join("bare_remote.git");
-    let _ = Command::new("git")
-        .args(["init", "--bare", "-b", "main", &bare_remote.to_string_lossy()])
-        .status();
+    let bare_url = bare_remote.to_string_lossy();
+    git.run(temp.path(), &["init", "--bare", "-b", "main", &bare_url]);
 
     // Seed the bare remote with an initial main branch containing baseline template
     let seed_dir = temp.path().join("seed_repo");
-    let _ = Command::new("git")
-        .args(["init", "-b", "main", &seed_dir.to_string_lossy()])
-        .status();
+    git.run(
+        temp.path(),
+        &["init", "-b", "main", &seed_dir.to_string_lossy()],
+    );
     let tdir = seed_dir.join("templates/projects/agents");
     fs::create_dir_all(&tdir).unwrap();
     fs::write(tdir.join("mise.toml.jinja"), &init_content).unwrap();
-    let _ = Command::new("git").current_dir(&seed_dir).args(["add", "-A"]).status();
-    let _ = Command::new("git").current_dir(&seed_dir).args([
-        "-c", "user.name=Tester",
-        "-c", "user.email=tester@example.com",
-        "-c", "commit.gpgsign=false",
-        "commit",
-        "--no-gpg-sign",
-        "-m", "seed commit",
-    ]).status();
-    let _ = Command::new("git")
-        .current_dir(&seed_dir)
-        .args(["remote", "add", "origin", &bare_remote.to_string_lossy()])
-        .status();
-    let _ = Command::new("git")
-        .current_dir(&seed_dir)
-        .args(["push", "origin", "main"])
-        .status();
+    git.run(&seed_dir, &["add", "-A"]);
+    git.run(&seed_dir, &["commit", "-m", "seed commit"]);
+    git.run(&seed_dir, &["remote", "add", "origin", &bare_url]);
+    git.run(&seed_dir, &["push", "origin", "main"]);
 
     // Install a rejecting pre-receive hook in the bare remote to simulate remote reject / network policy drop
     let hooks_dir = bare_remote.join("hooks");
