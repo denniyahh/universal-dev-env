@@ -5,6 +5,7 @@ pub use state::{FileStateRecord, ProjectState};
 use crate::process::{self, RunOutput};
 use crate::sanitizer::{SanitizationResult, Sanitizer};
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -207,14 +208,19 @@ impl SyncEngine {
         self
     }
 
-    /// A git command with the engine's extra environment, run in `dir` if given.
-    fn git(&self, dir: Option<&Path>) -> Command {
-        let mut cmd = Command::new("git");
+    /// A `program` command with the engine's extra environment, run in `dir` if given.
+    fn tool(&self, program: &str, dir: Option<&Path>) -> Command {
+        let mut cmd = Command::new(program);
         if let Some(dir) = dir {
             cmd.current_dir(dir);
         }
         cmd.envs(self.extra_env.iter().map(|(key, value)| (key, value)));
         cmd
+    }
+
+    /// A git command with the engine's extra environment, run in `dir` if given.
+    fn git(&self, dir: Option<&Path>) -> Command {
+        self.tool("git", dir)
     }
 
     /// Runs `cmd` on the local tier. `label` must not contain argv (remote URLs).
@@ -940,10 +946,10 @@ impl SyncEngine {
         open_pr: bool,
         staged_files: &[PathBuf],
     ) -> Result<String, String> {
-        let status = Command::new("git")
-            .current_dir(remote_checkout)
-            .args(["status", "--porcelain"])
-            .output()
+        let mut status_cmd = self.git(Some(remote_checkout));
+        status_cmd.args(["status", "--porcelain"]);
+        let status = self
+            .run_local(status_cmd, "git status")
             .map_err(|e| format!("Failed to check git status in remote checkout: {e}"))?;
 
         if status.stdout.is_empty() {
@@ -963,35 +969,30 @@ impl SyncEngine {
 
         // Stage ONLY the explicit validated allowlist of files
         for rel_p in &rel_staged_paths {
-            let add_status = Command::new("git")
-                .current_dir(remote_checkout)
-                .args(["add", "--"])
-                .arg(rel_p)
-                .status()
+            let mut add = self.git(Some(remote_checkout));
+            add.args(["add", "--"]).arg(rel_p);
+            let add_out = self
+                .run_local(add, "git add")
                 .map_err(|e| format!("Failed to stage {}: {e}", rel_p.display()))?;
 
-            if !add_status.success() {
-                let _ = Command::new("git")
-                    .current_dir(remote_checkout)
-                    .args(["reset", "HEAD", "--"])
-                    .status();
-                return Err(format!(
-                    "git add failed in remote checkout for {}",
-                    rel_p.display()
+            if !add_out.status.success() {
+                self.reset_index(remote_checkout);
+                return Err(with_excerpt(
+                    format!("git add failed in remote checkout for {}", rel_p.display()),
+                    &add_out,
                 ));
             }
         }
 
         // Inspect staged index: assert that ONLY allowed files are staged
-        let diff_cached = Command::new("git")
-            .current_dir(remote_checkout)
-            .args(["diff", "--cached", "--name-only"])
-            .output()
+        let mut diff = self.git(Some(remote_checkout));
+        diff.args(["diff", "--cached", "--name-only"]);
+        let diff_cached = self
+            .run_local(diff, "git diff --cached")
             .map_err(|e| format!("Failed to inspect staged diff in remote checkout: {e}"))?;
 
         let staged_output = String::from_utf8_lossy(&diff_cached.stdout);
-        let expected_set: std::collections::HashSet<PathBuf> =
-            rel_staged_paths.into_iter().collect();
+        let expected_set: HashSet<PathBuf> = rel_staged_paths.into_iter().collect();
 
         for line in staged_output.lines() {
             let trimmed = line.trim();
@@ -1000,10 +1001,7 @@ impl SyncEngine {
             }
             let p = PathBuf::from(trimmed);
             if !expected_set.contains(&p) {
-                let _ = Command::new("git")
-                    .current_dir(remote_checkout)
-                    .args(["reset", "HEAD", "--"])
-                    .status();
+                self.reset_index(remote_checkout);
                 return Err(format!(
                     "Publication gate violation: unvalidated file staged in remote checkout: {}",
                     p.display()
@@ -1012,17 +1010,14 @@ impl SyncEngine {
 
             // Defense in depth: Check staged git index blob bytes for secrets
             let show_arg = format!(":{}", p.to_string_lossy());
-            let blob_res = Command::new("git")
-                .current_dir(remote_checkout)
-                .args(["show", &show_arg])
-                .output()
+            let mut show = self.git(Some(remote_checkout));
+            show.args(["show", &show_arg]);
+            let blob_res = self
+                .run_local(show, "git show")
                 .map_err(|e| format!("Failed to read staged git blob for {}: {e}", p.display()))?;
 
             if !blob_res.status.success() {
-                let _ = Command::new("git")
-                    .current_dir(remote_checkout)
-                    .args(["reset", "HEAD", "--"])
-                    .status();
+                self.reset_index(remote_checkout);
                 return Err(format!(
                     "Publication gate violation: failed to inspect staged git blob for {}",
                     p.display()
@@ -1033,10 +1028,7 @@ impl SyncEngine {
             if let SanitizationResult::SecretDetected { reason, .. } =
                 self.sanitizer.check_secrets(&blob_content)
             {
-                let _ = Command::new("git")
-                    .current_dir(remote_checkout)
-                    .args(["reset", "HEAD", "--"])
-                    .status();
+                self.reset_index(remote_checkout);
                 return Err(format!(
                     "Publication gate violation: secret detected in staged index blob {}: {reason}",
                     p.display()
@@ -1056,83 +1048,72 @@ impl SyncEngine {
                 &Self::compute_hash(commit_msg.as_bytes())[..8],
                 epoch_secs
             );
-            let branch_status = Command::new("git")
-                .current_dir(remote_checkout)
-                .args(["checkout", "-b", &sync_branch])
-                .status()
+            let mut create_branch = self.git(Some(remote_checkout));
+            create_branch.args(["checkout", "-b", &sync_branch]);
+            let branch_out = self
+                .run_local(create_branch, "git checkout -b")
                 .map_err(|e| format!("Failed to create sync branch {sync_branch}: {e}"))?;
 
-            if !branch_status.success() {
-                return Err(format!("git checkout -b {sync_branch} failed"));
+            if !branch_out.status.success() {
+                return Err(with_excerpt(
+                    format!("git checkout -b {sync_branch} failed"),
+                    &branch_out,
+                ));
             }
 
-            let commit_status = Command::new("git")
-                .current_dir(remote_checkout)
-                .args(["commit", "--no-verify", "--no-gpg-sign", "-m", commit_msg])
-                .status()
+            let commit_out = self
+                .run_local(
+                    self.commit_command(remote_checkout, commit_msg),
+                    "git commit",
+                )
                 .map_err(|e| format!("Failed to commit in remote checkout: {e}"))?;
 
-            if !commit_status.success() {
-                let _ = Command::new("git")
-                    .current_dir(remote_checkout)
-                    .args(["checkout", branch])
-                    .status();
-                let _ = Command::new("git")
-                    .current_dir(remote_checkout)
-                    .args(["branch", "-D", &sync_branch])
-                    .status();
-                return Err("git commit failed in remote checkout".to_string());
+            if !commit_out.status.success() {
+                self.abandon_sync_branch(remote_checkout, branch, &sync_branch);
+                return Err(with_excerpt(
+                    "git commit failed in remote checkout".to_string(),
+                    &commit_out,
+                ));
             }
 
-            if let Err(err) =
-                validate_committed_tree(&self.sanitizer, remote_checkout, &expected_set)
-            {
-                rollback_commit(remote_checkout);
-                let _ = Command::new("git")
-                    .current_dir(remote_checkout)
-                    .args(["checkout", branch])
-                    .status();
-                let _ = Command::new("git")
-                    .current_dir(remote_checkout)
-                    .args(["branch", "-D", &sync_branch])
-                    .status();
+            if let Err(err) = self.validate_committed_tree(remote_checkout, &expected_set) {
+                self.rollback_commit(remote_checkout);
+                self.abandon_sync_branch(remote_checkout, branch, &sync_branch);
                 return Err(err);
             }
 
-            let push_status = Command::new("git")
-                .current_dir(remote_checkout)
-                .args(["push", "-u", "origin", &sync_branch])
-                .status()
+            let mut push = self.git(Some(remote_checkout));
+            push.args(["push", "-u", "origin", &sync_branch]);
+            let push_out = self
+                .run_network(push, "git push")
                 .map_err(|e| format!("Failed to push sync branch: {e}"))?;
 
             // Return working tree to canonical branch
-            let _ = Command::new("git")
-                .current_dir(remote_checkout)
-                .args(["checkout", branch])
-                .status();
+            self.git_best_effort(remote_checkout, &["checkout", branch], "git checkout");
 
-            if !push_status.success() {
-                return Err(format!("git push failed for branch {sync_branch}"));
+            if !push_out.status.success() {
+                return Err(with_excerpt(
+                    format!("git push failed for branch {sync_branch}"),
+                    &push_out,
+                ));
             }
 
             // Attempt to create PR via gh CLI if available
-            let pr_cmd = Command::new("gh")
-                .current_dir(remote_checkout)
-                .args([
-                    "pr",
-                    "create",
-                    "--title",
-                    commit_msg,
-                    "--body",
-                    "Automated pull request from UDE remote synchronization.",
-                    "--base",
-                    branch,
-                    "--head",
-                    &sync_branch,
-                ])
-                .output();
+            let mut pr = self.tool("gh", Some(remote_checkout));
+            pr.args([
+                "pr",
+                "create",
+                "--title",
+                commit_msg,
+                "--body",
+                "Automated pull request from UDE remote synchronization.",
+                "--base",
+                branch,
+                "--head",
+                &sync_branch,
+            ]);
 
-            match pr_cmd {
+            match self.run_network(pr, "gh pr create") {
                 Ok(output) if output.status.success() => {
                     let pr_url = String::from_utf8_lossy(&output.stdout).trim().to_string();
                     Ok(format!("Opened GitHub Pull Request: {pr_url}"))
@@ -1142,37 +1123,148 @@ impl SyncEngine {
                 )),
             }
         } else {
-            let commit_status = Command::new("git")
-                .current_dir(remote_checkout)
-                .args(["commit", "--no-verify", "--no-gpg-sign", "-m", commit_msg])
-                .status()
+            let commit_out = self
+                .run_local(
+                    self.commit_command(remote_checkout, commit_msg),
+                    "git commit",
+                )
                 .map_err(|e| format!("Failed to commit in remote checkout: {e}"))?;
 
-            if !commit_status.success() {
-                return Err("git commit failed in remote checkout".to_string());
+            if !commit_out.status.success() {
+                return Err(with_excerpt(
+                    "git commit failed in remote checkout".to_string(),
+                    &commit_out,
+                ));
             }
 
-            if let Err(err) =
-                validate_committed_tree(&self.sanitizer, remote_checkout, &expected_set)
-            {
-                rollback_commit(remote_checkout);
+            if let Err(err) = self.validate_committed_tree(remote_checkout, &expected_set) {
+                self.rollback_commit(remote_checkout);
                 return Err(err);
             }
 
-            let push_status = Command::new("git")
-                .current_dir(remote_checkout)
-                .args(["push", "origin", &format!("HEAD:refs/heads/{branch}")])
-                .status()
+            let mut push = self.git(Some(remote_checkout));
+            push.args(["push", "origin", &format!("HEAD:refs/heads/{branch}")]);
+            let push_out = self
+                .run_network(push, "git push")
                 .map_err(|e| format!("Failed to push to remote: {e}"))?;
 
-            if !push_status.success() {
-                return Err(format!("git push origin {branch} failed"));
+            if !push_out.status.success() {
+                return Err(with_excerpt(
+                    format!("git push origin {branch} failed"),
+                    &push_out,
+                ));
             }
 
             Ok(format!(
                 "Directly pushed changes to remote branch '{branch}'."
             ))
         }
+    }
+
+    /// The cache-checkout commit command (no hooks, no signing).
+    fn commit_command(&self, repo: &Path, message: &str) -> Command {
+        let mut commit = self.git(Some(repo));
+        commit.args(["commit", "--no-verify", "--no-gpg-sign", "-m", message]);
+        commit
+    }
+
+    /// Runs a cleanup git command in `repo` on the local tier and ignores the result.
+    fn git_best_effort(&self, repo: &Path, args: &[&str], label: &str) {
+        let mut cmd = self.git(Some(repo));
+        cmd.args(args);
+        let _ = self.run_local(cmd, label);
+    }
+
+    /// Best-effort unstaging of everything in `repo`'s index.
+    fn reset_index(&self, repo: &Path) {
+        self.git_best_effort(repo, &["reset", "HEAD", "--"], "git reset");
+    }
+
+    /// Best-effort return to `branch` and deletion of the abandoned `sync_branch`.
+    fn abandon_sync_branch(&self, repo: &Path, branch: &str, sync_branch: &str) {
+        self.git_best_effort(repo, &["checkout", branch], "git checkout");
+        self.git_best_effort(repo, &["branch", "-D", sync_branch], "git branch -D");
+    }
+
+    /// Rolls back a committed HEAD revision in the remote checkout repository cleanly.
+    fn rollback_commit(&self, repo: &Path) {
+        let mut verify = self.git(Some(repo));
+        verify.args(["rev-parse", "--verify", "HEAD~1"]);
+        let has_parent = self
+            .run_local(verify, "git rev-parse")
+            .map(|out| out.status.success())
+            .unwrap_or(false);
+
+        if has_parent {
+            self.git_best_effort(repo, &["reset", "--hard", "HEAD~1"], "git reset --hard");
+        } else {
+            self.git_best_effort(repo, &["update-ref", "-d", "HEAD"], "git update-ref");
+            self.git_best_effort(repo, &["reset", "--hard"], "git reset --hard");
+            self.git_best_effort(repo, &["clean", "-fd"], "git clean");
+        }
+    }
+
+    /// Validates the committed tree in HEAD before pushing to remote repository,
+    /// asserting that no unexpected files or secret credentials exist in the committed
+    /// tree. `paths` is the validated allowlist, relative to `repo`.
+    fn validate_committed_tree(&self, repo: &Path, paths: &HashSet<PathBuf>) -> Result<(), String> {
+        let mut diff_tree = self.git(Some(repo));
+        diff_tree.args([
+            "diff-tree",
+            "--root",
+            "--no-commit-id",
+            "--name-only",
+            "-r",
+            "HEAD",
+        ]);
+        let diff_tree = self.run_local(diff_tree, "git diff-tree").map_err(|e| {
+            format!("Failed to inspect committed diff-tree in remote checkout: {e}")
+        })?;
+
+        if !diff_tree.status.success() {
+            return Err("git diff-tree failed in remote checkout".to_string());
+        }
+
+        let committed_output = String::from_utf8_lossy(&diff_tree.stdout);
+        for line in committed_output.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let p = PathBuf::from(trimmed);
+            if !paths.contains(&p) {
+                return Err(format!(
+                    "Post-commit publication gate violation: unvalidated file committed in HEAD: {}",
+                    p.display()
+                ));
+            }
+
+            let show_arg = format!("HEAD:{}", p.to_string_lossy());
+            let mut show = self.git(Some(repo));
+            show.args(["show", &show_arg]);
+            let blob_res = self
+                .run_local(show, "git show")
+                .map_err(|e| format!("Failed to read committed blob for {}: {e}", p.display()))?;
+
+            if !blob_res.status.success() {
+                return Err(format!(
+                    "Post-commit publication gate violation: failed to inspect committed blob for {}",
+                    p.display()
+                ));
+            }
+
+            let blob_content = String::from_utf8_lossy(&blob_res.stdout);
+            if let SanitizationResult::SecretDetected { reason, .. } =
+                self.sanitizer.check_secrets(&blob_content)
+            {
+                return Err(format!(
+                    "Post-commit publication gate violation: secret detected in committed HEAD blob {}: {reason}",
+                    p.display()
+                ));
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -1256,102 +1348,6 @@ fn validate_safe_write_target(local_root: &Path, rel_path: &Path) -> Result<Path
     }
 
     Ok(target)
-}
-
-/// Rolls back a committed HEAD revision in the remote checkout repository cleanly.
-fn rollback_commit(repo: &Path) {
-    let has_parent = Command::new("git")
-        .current_dir(repo)
-        .args(["rev-parse", "--verify", "HEAD~1"])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-
-    if has_parent {
-        let _ = Command::new("git")
-            .current_dir(repo)
-            .args(["reset", "--hard", "HEAD~1"])
-            .status();
-    } else {
-        let _ = Command::new("git")
-            .current_dir(repo)
-            .args(["update-ref", "-d", "HEAD"])
-            .status();
-        let _ = Command::new("git")
-            .current_dir(repo)
-            .args(["reset", "--hard"])
-            .status();
-        let _ = Command::new("git")
-            .current_dir(repo)
-            .args(["clean", "-fd"])
-            .status();
-    }
-}
-
-/// Validates the committed tree in HEAD before pushing to remote repository,
-/// asserting that no unexpected files or secret credentials exist in the committed tree.
-fn validate_committed_tree(
-    sanitizer: &Sanitizer,
-    remote_checkout: &Path,
-    expected_set: &std::collections::HashSet<PathBuf>,
-) -> Result<(), String> {
-    let diff_tree = Command::new("git")
-        .current_dir(remote_checkout)
-        .args([
-            "diff-tree",
-            "--root",
-            "--no-commit-id",
-            "--name-only",
-            "-r",
-            "HEAD",
-        ])
-        .output()
-        .map_err(|e| format!("Failed to inspect committed diff-tree in remote checkout: {e}"))?;
-
-    if !diff_tree.status.success() {
-        return Err("git diff-tree failed in remote checkout".to_string());
-    }
-
-    let committed_output = String::from_utf8_lossy(&diff_tree.stdout);
-    for line in committed_output.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let p = PathBuf::from(trimmed);
-        if !expected_set.contains(&p) {
-            return Err(format!(
-                "Post-commit publication gate violation: unvalidated file committed in HEAD: {}",
-                p.display()
-            ));
-        }
-
-        let show_arg = format!("HEAD:{}", p.to_string_lossy());
-        let blob_res = Command::new("git")
-            .current_dir(remote_checkout)
-            .args(["show", &show_arg])
-            .output()
-            .map_err(|e| format!("Failed to read committed blob for {}: {e}", p.display()))?;
-
-        if !blob_res.status.success() {
-            return Err(format!(
-                "Post-commit publication gate violation: failed to inspect committed blob for {}",
-                p.display()
-            ));
-        }
-
-        let blob_content = String::from_utf8_lossy(&blob_res.stdout);
-        if let SanitizationResult::SecretDetected { reason, .. } =
-            sanitizer.check_secrets(&blob_content)
-        {
-            return Err(format!(
-                "Post-commit publication gate violation: secret detected in committed HEAD blob {}: {reason}",
-                p.display()
-            ));
-        }
-    }
-
-    Ok(())
 }
 
 fn map_to_upstream(upstream_root: &Path, rel: &Path) -> Option<PathBuf> {
@@ -2124,8 +2120,8 @@ mod tests {
 
     #[test]
     fn test_defect2_publication_gate_allowlist_staging_blocks_unvalidated_files() {
-        let engine = SyncEngine::new();
         let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
         let remote_repo = tempdir().unwrap();
 
         // Initialize fake remote repository
@@ -2288,8 +2284,8 @@ mod tests {
 
     #[test]
     fn test_publication_gate_scans_staged_blob_rejecting_clean_filter_secrets() {
-        let engine = SyncEngine::new();
         let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
         let remote_repo = tempdir().unwrap();
 
         // Initialize fake remote repository
@@ -2654,8 +2650,8 @@ mod tests {
 
     #[test]
     fn test_post_commit_verification_catches_hook_injected_secrets_and_rolls_back() {
-        let engine = SyncEngine::new();
         let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
         let remote_repo = tempdir().unwrap();
 
         // Initialize git repo with main
@@ -2676,8 +2672,7 @@ mod tests {
         fs::write(&base_file, "updated benign content").unwrap();
         git.run(remote_repo.path(), &["add", "base.txt"]);
         git.run(remote_repo.path(), &["commit", "-m", "benign update"]);
-        let clean_check =
-            validate_committed_tree(&engine.sanitizer, remote_repo.path(), &expected_set);
+        let clean_check = engine.validate_committed_tree(remote_repo.path(), &expected_set);
         assert!(
             clean_check.is_ok(),
             "Clean commit must pass validate_committed_tree"
@@ -2691,8 +2686,7 @@ mod tests {
         git.run(remote_repo.path(), &["add", "base.txt"]);
         git.run(remote_repo.path(), &["commit", "-m", "injected secret"]);
 
-        let secret_check =
-            validate_committed_tree(&engine.sanitizer, remote_repo.path(), &expected_set);
+        let secret_check = engine.validate_committed_tree(remote_repo.path(), &expected_set);
         assert!(
             secret_check.is_err(),
             "Committed secret must fail validate_committed_tree"
@@ -2704,7 +2698,7 @@ mod tests {
         );
 
         // Rollback commit and assert HEAD was restored to the parent
-        rollback_commit(remote_repo.path());
+        engine.rollback_commit(remote_repo.path());
         let head_after_sha = git.output(remote_repo.path(), &["rev-parse", "HEAD"]);
         assert_ne!(
             head_after_sha, base_head_sha,
