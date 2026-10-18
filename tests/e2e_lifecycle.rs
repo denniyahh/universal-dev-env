@@ -811,3 +811,99 @@ fn test_sync_ignores_inherited_git_dir() {
         "ude sync push modified the decoy repository named by GIT_DIR"
     );
 }
+
+#[test]
+fn test_sync_corrupt_state_fails_loudly() {
+    let bin = env!("CARGO_BIN_EXE_ude");
+    let proj = tempdir().unwrap();
+
+    let init = Command::new(bin)
+        .args([
+            "init",
+            "--path",
+            &proj.path().to_string_lossy(),
+            "--type",
+            "rust",
+        ])
+        .output()
+        .expect("ude init execution");
+    assert!(
+        init.status.success(),
+        "ude init must succeed: {}",
+        String::from_utf8_lossy(&init.stderr)
+    );
+
+    let state_file = proj.path().join(".ude/state.json");
+    let original = fs::read(&state_file).expect("init writes .ude/state.json");
+
+    let ude = |args: &[&str]| -> Output {
+        let mut cmd = Command::new(bin);
+        cmd.current_dir(proj.path()).args(args).stdin(Stdio::null());
+        for name in FIXTURE_GIT_LOCAL_ENV_VARS {
+            cmd.env_remove(name);
+        }
+        cmd.output().expect("ude execution")
+    };
+    let describe = |out: &Output| {
+        format!(
+            "exit {:?}\nOut: {}\nErr: {}",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        )
+    };
+
+    // Corrupt JSON: status and pull fail with exit 2 and never reset the file.
+    let corrupt = b"{not json";
+    fs::write(&state_file, corrupt).unwrap();
+    for args in [&["sync", "status"][..], &["sync", "pull"][..]] {
+        let out = ude(args);
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "`ude {}` on a corrupt state.json must exit 2. {}",
+            args.join(" "),
+            describe(&out)
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("state.json") && stderr.contains("corrupt"),
+            "`ude {}` must name the corrupt state file. {}",
+            args.join(" "),
+            describe(&out)
+        );
+        assert_eq!(
+            fs::read(&state_file).unwrap(),
+            corrupt,
+            "`ude {}` modified the corrupt state.json",
+            args.join(" ")
+        );
+    }
+
+    // A state file from a newer ude is refused, not reset.
+    let future = br#"{"version": 99, "files": {}}"#;
+    fs::write(&state_file, future).unwrap();
+    let out = ude(&["sync", "status"]);
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "a newer state.json must exit 2. {}",
+        describe(&out)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("newer"),
+        "a newer state.json must be reported as newer. {}",
+        describe(&out)
+    );
+    assert_eq!(fs::read(&state_file).unwrap(), future);
+
+    // Negative control: the original state loads and status succeeds.
+    fs::write(&state_file, &original).unwrap();
+    let out = ude(&["sync", "status"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "status on the original state must succeed. {}",
+        describe(&out)
+    );
+}
