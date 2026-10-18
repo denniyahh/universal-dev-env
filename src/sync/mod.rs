@@ -66,25 +66,21 @@ pub enum PullResult {
     IoFailed { path: PathBuf, reason: String },
 }
 
-#[cfg(unix)]
-unsafe extern "C" {
-    fn flock(fd: std::os::raw::c_int, operation: std::os::raw::c_int) -> std::os::raw::c_int;
-}
-#[cfg(unix)]
-const LOCK_EX: std::os::raw::c_int = 2;
-#[cfg(unix)]
-const LOCK_NB: std::os::raw::c_int = 4;
-#[cfg(unix)]
-const LOCK_UN: std::os::raw::c_int = 8;
+/// Interval between attempts to take a contended remote cache lock.
+const LOCK_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
+/// Exclusive advisory lock on a remote cache checkout (std file locking: flock(2) on
+/// Unix, LockFileEx on Windows). The kernel releases it when the holding process
+/// dies, and spawned children do not inherit it (descriptors are close-on-exec).
 #[derive(Debug)]
 pub struct RemoteLockGuard {
-    #[allow(dead_code)]
     file: std::fs::File,
     pub lock_path: PathBuf,
 }
 
 impl RemoteLockGuard {
+    /// Opens (creating if needed) `lock_path` and takes its exclusive lock, polling
+    /// every [`LOCK_POLL_INTERVAL`] for up to `timeout_secs` while another holder has it.
     pub fn acquire(lock_path: &Path, timeout_secs: u64) -> Result<Self, String> {
         let file = std::fs::OpenOptions::new()
             .read(true)
@@ -94,64 +90,37 @@ impl RemoteLockGuard {
             .open(lock_path)
             .map_err(|e| format!("Failed to open lockfile {}: {e}", lock_path.display()))?;
 
-        #[cfg(unix)]
-        {
-            use std::os::unix::io::AsRawFd;
-            use std::time::{Duration, Instant};
-
-            let start = Instant::now();
-            let timeout = Duration::from_secs(timeout_secs);
-            let poll_interval = Duration::from_millis(50);
-
-            loop {
-                let res = unsafe { flock(file.as_raw_fd(), LOCK_EX | LOCK_NB) };
-                if res == 0 {
+        let deadline = std::time::Instant::now() + Duration::from_secs(timeout_secs);
+        loop {
+            match file.try_lock() {
+                Ok(()) => {
                     return Ok(Self {
                         file,
                         lock_path: lock_path.to_path_buf(),
                     });
                 }
-
-                let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
-                if errno != 11 {
-                    return Err(format!(
-                        "flock error on {}: {}",
-                        lock_path.display(),
-                        std::io::Error::last_os_error()
-                    ));
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    if std::time::Instant::now() >= deadline {
+                        return Err(format!(
+                            "Timed out after {}s waiting for remote cache lock on {}",
+                            timeout_secs,
+                            lock_path.display()
+                        ));
+                    }
+                    std::thread::sleep(LOCK_POLL_INTERVAL);
                 }
-
-                if start.elapsed() >= timeout {
-                    return Err(format!(
-                        "Timed out after {}s waiting for remote cache lock on {}",
-                        timeout_secs,
-                        lock_path.display()
-                    ));
+                Err(std::fs::TryLockError::Error(e)) => {
+                    return Err(format!("Failed to lock {}: {e}", lock_path.display()));
                 }
-
-                std::thread::sleep(poll_interval);
             }
-        }
-
-        #[cfg(not(unix))]
-        {
-            Ok(Self {
-                file,
-                lock_path: lock_path.to_path_buf(),
-            })
         }
     }
 }
 
 impl Drop for RemoteLockGuard {
     fn drop(&mut self) {
-        #[cfg(unix)]
-        {
-            use std::os::unix::io::AsRawFd;
-            unsafe {
-                flock(self.file.as_raw_fd(), LOCK_UN);
-            }
-        }
+        // Best effort: closing the file releases the lock as well.
+        let _ = self.file.unlock();
     }
 }
 
