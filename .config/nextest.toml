@@ -1,0 +1,8 @@
+# cargo-nextest configuration.
+#
+# JUnit XML is the machine-readable test report used as TDD RED evidence:
+# `cargo nextest run --bin ude <filter>` writes it to
+# target/nextest/default/junit.xml. Plain `cargo test` console output is not a
+# format the RED-evidence classifier accepts.
+[profile.default.junit]
+path = "junit.xml"
