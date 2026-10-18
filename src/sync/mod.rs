@@ -34,6 +34,22 @@ pub struct FileSyncState {
     pub upstream_content: Option<String>,
 }
 
+/// One present version of a managed file in a three-way comparison.
+#[derive(Debug, Clone, Copy)]
+struct FileVersion<'a> {
+    /// [`SyncEngine::fingerprint`] of the version (for an ancestor, as recorded).
+    fingerprint: &'a str,
+    /// The text, when the version is valid UTF-8 (and, for an ancestor, recorded).
+    text: Option<&'a str>,
+}
+
+impl<'a> FileVersion<'a> {
+    /// The version with `fingerprint`, or `None` when the file is absent.
+    fn new(fingerprint: Option<&'a str>, text: Option<&'a str>) -> Option<Self> {
+        fingerprint.map(|fingerprint| Self { fingerprint, text })
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum PushResult {
     Success {
@@ -210,9 +226,22 @@ impl SyncEngine {
         format!("{:x}", hasher.finalize())
     }
 
-    /// Content fingerprint used to classify managed files.
+    /// Content fingerprint used to classify managed files and record ancestors.
+    ///
+    /// Valid UTF-8 is hashed after [`Self::normalize_eol`], so CRLF and LF renderings
+    /// of the same text share a fingerprint (a lone CR stays content). Other bytes are
+    /// hashed raw. Non-content keys (cache directory, branch names) keep using the
+    /// byte-exact [`Self::compute_hash`].
     pub fn fingerprint(bytes: &[u8]) -> String {
-        Self::compute_hash(bytes)
+        match std::str::from_utf8(bytes) {
+            Ok(text) => Self::compute_hash(Self::normalize_eol(text).as_bytes()),
+            Err(_) => Self::compute_hash(bytes),
+        }
+    }
+
+    /// Replaces every CRLF pair in `text` with LF. A lone CR is content and is kept.
+    pub fn normalize_eol(text: &str) -> String {
+        text.replace("\r\n", "\n")
     }
 
     /// Detects 3-way sync status using SHA-256 hashes of ancestor (O), local (A), and upstream (B).
@@ -276,65 +305,63 @@ impl SyncEngine {
         }
     }
 
-    /// Detects 3-way sync status and attempts orthogonal text merge when both sides diverge from ancestor.
+    /// Classifies one managed file from its ancestor, local and upstream versions.
+    ///
+    /// The status comes from fingerprints alone. Contents are used only to merge, and
+    /// only when the fingerprints conflict and all three versions are text; the merged
+    /// text is LF-normalized. An absent version is never merged as empty text.
+    fn classify_file(
+        ancestor: Option<FileVersion<'_>>,
+        local: Option<FileVersion<'_>>,
+        upstream: Option<FileVersion<'_>>,
+        has_local_override: bool,
+    ) -> (SyncStatus, Option<String>) {
+        let status = Self::compare_3way_hashes(
+            ancestor.map(|v| v.fingerprint),
+            local.map(|v| v.fingerprint),
+            upstream.map(|v| v.fingerprint),
+            has_local_override,
+        );
+        if status != SyncStatus::Conflicted {
+            return (status, None);
+        }
+        let (Some(base), Some(local), Some(upstream)) = (
+            ancestor.and_then(|v| v.text),
+            local.and_then(|v| v.text),
+            upstream.and_then(|v| v.text),
+        ) else {
+            return (status, None);
+        };
+        match merge::merge_3way_text(
+            &Self::normalize_eol(base),
+            &Self::normalize_eol(local),
+            &Self::normalize_eol(upstream),
+        ) {
+            merge::MergeResult::Clean(merged) => (SyncStatus::Merged, Some(merged)),
+            merge::MergeResult::Conflict => (SyncStatus::Conflicted, None),
+        }
+    }
+
+    /// Detects 3-way sync status of text contents by fingerprint and attempts an
+    /// orthogonal text merge when both sides diverge from the ancestor.
     pub fn compare_3way_with_merge(
         ancestor_content: Option<&str>,
         local_content: Option<&str>,
         upstream_content: Option<&str>,
         has_local_override: bool,
     ) -> (SyncStatus, Option<String>) {
-        if local_content == upstream_content && local_content.is_some() {
-            return if has_local_override {
-                (SyncStatus::Overridden, None)
-            } else {
-                (SyncStatus::InSync, None)
-            };
-        }
-
-        match ancestor_content {
-            Some(o) => {
-                let local_matches_base = local_content == Some(o);
-                let upstream_matches_base = upstream_content == Some(o);
-
-                match (local_matches_base, upstream_matches_base) {
-                    (true, false) => (SyncStatus::UpstreamModified, None),
-                    (false, true) => {
-                        if has_local_override {
-                            (SyncStatus::Overridden, None)
-                        } else {
-                            (SyncStatus::LocallyModified, None)
-                        }
-                    }
-                    (false, false) => {
-                        let local_str = local_content.unwrap_or("");
-                        let upstream_str = upstream_content.unwrap_or("");
-                        match merge::merge_3way_text(o, local_str, upstream_str) {
-                            merge::MergeResult::Clean(merged) => (SyncStatus::Merged, Some(merged)),
-                            merge::MergeResult::Conflict => (SyncStatus::Conflicted, None),
-                        }
-                    }
-                    (true, true) => {
-                        if has_local_override {
-                            (SyncStatus::Overridden, None)
-                        } else {
-                            (SyncStatus::InSync, None)
-                        }
-                    }
-                }
-            }
-            None => {
-                let a_hash = None;
-                let l_hash = local_content.map(|c| Self::compute_hash(c.as_bytes()));
-                let u_hash = upstream_content.map(|c| Self::compute_hash(c.as_bytes()));
-                let status = Self::compare_3way_hashes(
-                    a_hash,
-                    l_hash.as_deref(),
-                    u_hash.as_deref(),
-                    has_local_override,
-                );
-                (status, None)
-            }
-        }
+        let fingerprint = |content: Option<&str>| content.map(|c| Self::fingerprint(c.as_bytes()));
+        let (ancestor_fp, local_fp, upstream_fp) = (
+            fingerprint(ancestor_content),
+            fingerprint(local_content),
+            fingerprint(upstream_content),
+        );
+        Self::classify_file(
+            FileVersion::new(ancestor_fp.as_deref(), ancestor_content),
+            FileVersion::new(local_fp.as_deref(), local_content),
+            FileVersion::new(upstream_fp.as_deref(), upstream_content),
+            has_local_override,
+        )
     }
 
     /// Detects 3-way sync status between ancestor (base), local, and upstream content string slices.
@@ -396,7 +423,7 @@ impl SyncEngine {
             let local_content = local_bytes
                 .as_ref()
                 .and_then(|b| std::str::from_utf8(b).ok().map(|s| s.to_string()));
-            let local_hash = local_bytes.as_ref().map(|b| Self::compute_hash(b));
+            let local_hash = local_bytes.as_ref().map(|b| Self::fingerprint(b));
 
             let (upstream_bytes, upstream_content) = match upstream_path.as_ref() {
                 Some(p) => {
@@ -428,41 +455,18 @@ impl SyncEngine {
                 }
                 None => (None, None),
             };
-            let upstream_hash = upstream_bytes.as_ref().map(|b| Self::compute_hash(b));
+            let upstream_hash = upstream_bytes.as_ref().map(|b| Self::fingerprint(b));
 
             let has_local_override = check_for_override(local_root, &rel);
             let ancestor_hash = project_state.get_ancestor_hash(&rel).map(String::from);
             let ancestor_content = project_state.get_ancestor_content(&rel);
 
-            let (status, merged_content) = if local_content.is_some()
-                && upstream_content.is_some()
-                && ancestor_content.is_some()
-            {
-                Self::compare_3way_with_merge(
-                    ancestor_content,
-                    local_content.as_deref(),
-                    upstream_content.as_deref(),
-                    has_local_override,
-                )
-            } else if local_content.is_some()
-                && upstream_content.is_some()
-                && ancestor_hash.is_none()
-            {
-                Self::compare_3way_with_merge(
-                    None,
-                    local_content.as_deref(),
-                    upstream_content.as_deref(),
-                    has_local_override,
-                )
-            } else {
-                let st = Self::compare_3way_hashes(
-                    ancestor_hash.as_deref(),
-                    local_hash.as_deref(),
-                    upstream_hash.as_deref(),
-                    has_local_override,
-                );
-                (st, None)
-            };
+            let (status, merged_content) = Self::classify_file(
+                FileVersion::new(ancestor_hash.as_deref(), ancestor_content),
+                FileVersion::new(local_hash.as_deref(), local_content.as_deref()),
+                FileVersion::new(upstream_hash.as_deref(), upstream_content.as_deref()),
+                has_local_override,
+            );
 
             states.push(FileSyncState {
                 relative_path: rel,
@@ -652,12 +656,12 @@ impl SyncEngine {
                             raw_str.to_string()
                         };
                         let b = rendered.as_bytes().to_vec();
-                        (b, Some(rendered))
+                        (b, Some(Self::normalize_eol(&rendered)))
                     } else {
                         (upstream_bytes, None)
                     };
 
-                let new_hash = Self::compute_hash(&content_bytes);
+                let new_hash = Self::fingerprint(&content_bytes);
                 candidates_to_write.push((
                     s.relative_path.clone(),
                     target_path,
@@ -690,8 +694,12 @@ impl SyncEngine {
                 let up_hash = s
                     .upstream_hash
                     .clone()
-                    .unwrap_or_else(|| Self::compute_hash(content.as_bytes()));
-                let up_content = s.upstream_content.clone().or_else(|| Some(content.clone()));
+                    .unwrap_or_else(|| Self::fingerprint(content.as_bytes()));
+                let up_content = s
+                    .upstream_content
+                    .as_deref()
+                    .map(Self::normalize_eol)
+                    .or_else(|| Some(content.clone()));
                 candidates_to_write.push((
                     s.relative_path.clone(),
                     target_path,
@@ -712,7 +720,7 @@ impl SyncEngine {
                 converged_to_record.push((
                     s.relative_path.clone(),
                     loc_h.clone(),
-                    s.upstream_content.clone(),
+                    s.upstream_content.as_deref().map(Self::normalize_eol),
                 ));
             }
         }
@@ -859,7 +867,10 @@ impl SyncEngine {
                         let parameterized = self
                             .sanitizer
                             .parameterize_paths(content, user_home, xdg_config);
-                        (parameterized.into_bytes(), Some(content.to_string()))
+                        (
+                            parameterized.into_bytes(),
+                            Some(Self::normalize_eol(content)),
+                        )
                     } else {
                         (raw_bytes.clone(), None)
                     };
@@ -901,7 +912,7 @@ impl SyncEngine {
                 };
             }
 
-            let local_hash = Self::compute_hash(&raw_bytes);
+            let local_hash = Self::fingerprint(&raw_bytes);
             staged_files.push(target_upstream.clone());
             updated_records.push((rel_path, local_hash, raw_local_str));
             synced += 1;
