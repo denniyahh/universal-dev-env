@@ -1,6 +1,7 @@
 pub mod audit;
 pub mod cli;
 pub mod manifest;
+pub mod process;
 pub mod sanitizer;
 pub mod semantic;
 pub mod sync;
