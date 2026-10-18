@@ -362,9 +362,9 @@ impl SyncEngine {
         local_root: &Path,
         upstream_root: &Path,
         ctx: Option<&crate::template::TemplateContext>,
-    ) -> Vec<FileSyncState> {
+    ) -> Result<Vec<FileSyncState>, String> {
         let mut states = Vec::new();
-        let project_state = ProjectState::load_from_dir(local_root).unwrap_or_default();
+        let project_state = ProjectState::load_from_dir(local_root)?;
         let renderer = crate::template::TemplateRenderer::new();
 
         // Inspect known managed files
@@ -469,7 +469,7 @@ impl SyncEngine {
             });
         }
 
-        states
+        Ok(states)
     }
 
     /// Ensures a remote git repository is cached locally and updated.
@@ -571,7 +571,10 @@ impl SyncEngine {
         upstream_root: &Path,
         ctx: &crate::template::TemplateContext,
     ) -> PullResult {
-        let states = self.scan_project(local_root, upstream_root, Some(ctx));
+        let states = match self.scan_project(local_root, upstream_root, Some(ctx)) {
+            Ok(states) => states,
+            Err(reason) => return state_pull_failure(reason),
+        };
         let renderer = crate::template::TemplateRenderer::new();
 
         // Gate 1: Check for conflicts across the entire project
@@ -713,7 +716,10 @@ impl SyncEngine {
         }
 
         // Pass 2: Write files and update ancestor state
-        let mut project_state = ProjectState::load_from_dir(local_root).unwrap_or_default();
+        let mut project_state = match ProjectState::load_from_dir(local_root) {
+            Ok(state) => state,
+            Err(reason) => return state_pull_failure(reason),
+        };
         let mut applied = 0;
 
         for (rel, target, content_bytes, ancestor_hash, ancestor_content) in candidates_to_write {
@@ -787,7 +793,10 @@ impl SyncEngine {
     ) -> PushResult {
         let dummy_ctx =
             crate::template::TemplateContext::detect_for_project(local_root, "project", "generic");
-        let states = self.scan_project(local_root, upstream_root, Some(&dummy_ctx));
+        let states = match self.scan_project(local_root, upstream_root, Some(&dummy_ctx)) {
+            Ok(states) => states,
+            Err(reason) => return state_push_failure(reason),
+        };
         let mut candidates_to_write = Vec::new();
 
         // Pass 1: Strict atomic pre-validation across ALL modified candidates
@@ -893,11 +902,16 @@ impl SyncEngine {
         }
 
         if persist_ancestor_immediately {
-            let mut project_state = ProjectState::load_from_dir(local_root).unwrap_or_default();
+            let mut project_state = match ProjectState::load_from_dir(local_root) {
+                Ok(state) => state,
+                Err(reason) => return state_push_failure(reason),
+            };
             for (rel, hash, content) in &updated_records {
                 project_state.record_file(rel, hash.clone(), content.clone());
             }
-            let _ = project_state.save_to_dir(local_root);
+            if let Err(e) = project_state.save_to_dir(local_root) {
+                return state_push_failure(format!("Failed to persist state: {e}"));
+            }
         }
 
         PushResult::Success {
@@ -1265,6 +1279,25 @@ pub fn sanitize_branch_slug(branch: &str) -> String {
         "default".to_string()
     } else {
         trimmed.to_string()
+    }
+}
+
+/// Relative path reported for failures to read or write the project state ledger.
+const STATE_FILE_REL: &str = ".ude/state.json";
+
+/// Pull outcome for an error loading or saving `.ude/state.json`.
+fn state_pull_failure(reason: String) -> PullResult {
+    PullResult::IoFailed {
+        path: PathBuf::from(STATE_FILE_REL),
+        reason,
+    }
+}
+
+/// Push outcome for an error loading or saving `.ude/state.json`.
+fn state_push_failure(reason: String) -> PushResult {
+    PushResult::IoFailed {
+        path: PathBuf::from(STATE_FILE_REL),
+        reason,
     }
 }
 
@@ -1663,7 +1696,9 @@ mod tests {
         assert!(state.get_ancestor_hash(Path::new("mise.toml")).is_some());
 
         // Negative control: Re-scanning now must report InSync for all 3 files
-        let states = engine.scan_project(local_dir.path(), upstream_dir.path(), Some(&ctx));
+        let states = engine
+            .scan_project(local_dir.path(), upstream_dir.path(), Some(&ctx))
+            .unwrap();
         for s in states {
             if s.relative_path == Path::new(".gitconfig")
                 || s.relative_path == Path::new("scripts/hooks/pre-commit")
@@ -2335,7 +2370,9 @@ mod tests {
             "rust",
         );
         ctx.user.home = user_home.to_string();
-        let states = engine.scan_project(local_dir.path(), upstream_dir.path(), Some(&ctx));
+        let states = engine
+            .scan_project(local_dir.path(), upstream_dir.path(), Some(&ctx))
+            .unwrap();
         let gitconfig_state = states
             .iter()
             .find(|s| s.relative_path == Path::new(".gitconfig"))
@@ -2383,7 +2420,9 @@ mod tests {
         );
 
         // Scan project: must report UpstreamModified, NOT frozen in Overridden!
-        let states = engine.scan_project(local_dir.path(), upstream_dir.path(), Some(&ctx));
+        let states = engine
+            .scan_project(local_dir.path(), upstream_dir.path(), Some(&ctx))
+            .unwrap();
         let mise_state = states
             .iter()
             .find(|s| s.relative_path == Path::new("mise.toml"))
@@ -2924,7 +2963,9 @@ mod tests {
         );
 
         // 3. Scan: reports InSync
-        let states = engine.scan_project(local_dir.path(), upstream_dir.path(), Some(&ctx));
+        let states = engine
+            .scan_project(local_dir.path(), upstream_dir.path(), Some(&ctx))
+            .unwrap();
         let mise_st = states
             .iter()
             .find(|s| s.relative_path == Path::new("mise.toml"))
@@ -2948,7 +2989,9 @@ mod tests {
         fs::write(&up_mise, v3_content).unwrap();
 
         // 6. Scan: must report UpstreamModified, NOT Conflicted!
-        let states2 = engine.scan_project(local_dir.path(), upstream_dir.path(), Some(&ctx));
+        let states2 = engine
+            .scan_project(local_dir.path(), upstream_dir.path(), Some(&ctx))
+            .unwrap();
         let mise_st2 = states2
             .iter()
             .find(|s| s.relative_path == Path::new("mise.toml"))
@@ -2983,7 +3026,9 @@ mod tests {
         );
 
         // Scan: must detect identical hashes and report InSync without failing UTF-8 decode
-        let states = engine.scan_project(local_dir.path(), upstream_dir.path(), Some(&ctx));
+        let states = engine
+            .scan_project(local_dir.path(), upstream_dir.path(), Some(&ctx))
+            .unwrap();
         let hook_st = states
             .iter()
             .find(|s| s.relative_path == Path::new("scripts/hooks/pre-push"))
@@ -2997,7 +3042,9 @@ mod tests {
         modified_bytes[0] = 0xAA;
         fs::write(&loc_hook, &modified_bytes).unwrap();
 
-        let states2 = engine.scan_project(local_dir.path(), upstream_dir.path(), Some(&ctx));
+        let states2 = engine
+            .scan_project(local_dir.path(), upstream_dir.path(), Some(&ctx))
+            .unwrap();
         let hook_st2 = states2
             .iter()
             .find(|s| s.relative_path == Path::new("scripts/hooks/pre-push"))
