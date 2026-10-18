@@ -51,7 +51,7 @@ Seeded at requirement level from RESEARCH.md; task IDs bound from the planner's 
 | 01-04-T1 | 04 | 3 | SYNC-02 | — | Corrupt/future-version state.json → Err. NC: missing file → Ok(default) | unit | `cargo test --bin ude sync::state::tests::test_load_` | ❌ W0 | ⬜ pending |
 | 01-06-T2 | 06 | 5 | SYNC-02 | — | Staged writes keep modes (0755 hooks, 0644 existing). NC: not 0600 | unit (unix) | `cargo test --bin ude sync::tests::test_staged_write_modes` | ❌ W0 | ⬜ pending |
 | 01-06-T2 (+01-09-T2 sidecar) | 06, 09 | 5, 8 | SYNC-02 | — | Symlinked target/sidecar refused. NC: regular path succeeds | unit | `cargo test --bin ude sync::tests::test_pull_updates_refuses_to_write_through_symlink` | ✅ / ❌ | ⬜ pending |
-| 01-01-T1 | 01 | 1 | SYNC-03 | — | Timeout kills process group < 2s. NC: `echo ok` → Ok | unit | `cargo test --bin ude process::tests::test_timeout_kills_group` | ❌ W0 | ⬜ pending |
+| 01-01-T1 | 01 | 1 | SYNC-03 | — | Timeout kills the whole process group (grandchild dead, < 3s; plan 01-01 T1 is authoritative). NC: `echo ok` → Ok | unit | `cargo test --bin ude process::tests::test_timeout_kills_group` | ❌ W0 | ⬜ pending |
 | 01-01-T1 | 01 | 1 | SYNC-03 | — | No pipe deadlock on 1 MiB stdout+stderr. NC: 0-byte case | unit | `cargo test --bin ude process::tests::test_drains_large_output` | ❌ W0 | ⬜ pending |
 | 01-01-T1 | 01 | 1 | SYNC-03 | — | Git env scrubbed, `GIT_TERMINAL_PROMPT=0`. NC: raw Command lacks entries | unit | `cargo test --bin ude process::tests::test_env_scrub` | ❌ W0 | ⬜ pending |
 | 01-03-T2 | 03 | 2 | SYNC-03 | — | Hanging pre-receive hook → timeout, ref unchanged. NC: hook exit 0 → success | unit | `cargo test --bin ude sync::tests::test_push_timeout_hanging_hook` | ❌ W0 | ⬜ pending |

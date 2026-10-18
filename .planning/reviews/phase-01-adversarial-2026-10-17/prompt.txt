@@ -1,0 +1,45 @@
+You are an adversarial reviewer. Attack the following documents. Do not summarize or praise them. Find, with the exact file and the exact line/quoted text for each:
+1. Contradictions between the documents or between requirements and plans.
+2. Unstated assumptions that would break under real use or edge loads.
+3. Decisions or steps that do not survive contact with the actual codebase or tools.
+4. Scope leaks (work that belongs in another phase, item, or abstraction layer).
+5. Acceptance criteria that are not falsifiable or have no negative control.
+6. Missing edge cases, concurrency hazards, or unhandled failure modes.
+
+Be specific and hostile. Prefer 5 sharp, reproducible findings with file:line citations to 20 vague ones. Where a finding is speculation, label it explicitly as speculation.
+
+## What you are reviewing
+
+A Rust CLI (`ude`, a "universal development environment" tool) syncs managed template files between a project working tree and an upstream git repo (`ude sync pull` / `ude sync push`). Phase 1 makes that sync hermetic, atomic and conflict-safe. The working directory you are in is a read-only snapshot of the repository at commit dce84d4. Source code is under `src/` (no `src/lib.rs`; tests live in `#[cfg(test)]` modules of the `ude` bin target plus `tests/e2e_lifecycle.rs`).
+
+PRIMARY TARGETS (attack these):
+- .planning/phases/01-sync-engine-state-hermeticity/01-01-PLAN.md through 01-11-PLAN.md (11 executable plans; an automated executor agent will follow them literally, task by task, running each `<automated>` command and treating `<fails_when>` as the failure signal)
+
+CONTEXT (the locked contract the plans must honour — attack contradictions with it):
+- .planning/phases/01-sync-engine-state-hermeticity/01-CONTEXT.md (locked decisions D-01..D-18, incl. 2026-10-17 operator amendments under D-07, D-09, D-18)
+- .planning/REQUIREMENTS.md (SYNC-01..SYNC-06)
+- .planning/ROADMAP.md (Phase 1 success criteria)
+- docs/REMEDIATION_PLAN.md Track 1 (the acceptance bar per D-01)
+- .planning/phases/01-sync-engine-state-hermeticity/01-RESEARCH.md, 01-VALIDATION.md, 01-PATTERNS.md
+
+The plans already passed three rounds of an internal plan checker (same model family as the author). Those rounds fixed: multi-filter `cargo test` syntax, an unbounded reader-thread join after process-group kill, mutation-gate runtime/scoping, a vacuous merge test. Do not re-report those unless the fix itself is wrong. You are here to find what a same-family checker missed.
+
+High-value areas to attack (not exhaustive):
+- Ordering: does any plan's intermediate state break `cargo test` / clippy for the next plan in the 10-wave serial chain? Does a later plan depend on a symbol an earlier plan never creates (check each plan's "Artifacts this phase produces" against later `read_first`/actions)?
+- State-file migration (v1 -> v2) and the forward-version guard: data loss paths, migrations that run on read-only commands, partial migration.
+- Atomicity claims (stage-validate-commit, state.json written last) vs. what actually happens on crash between renames; D-01/D-05 explicitly exclude fsync/journal — check the plans don't silently claim stronger guarantees in must_haves or tests.
+- Deletion/tombstone/conflict truth table: enumerate (ancestor, local, upstream) x (present/absent/empty/modified) and find a cell the plans leave undefined or define inconsistently across 01-07, 01-09, 01-10.
+- The bounded subprocess runner (01-01): process groups, pipe draining, timeouts, behaviour when git spawns credential helpers/ssh; Windows/macOS claims.
+- Push race detection (01-11): can the test actually inject the race it claims? Can rollback leave the cache inconsistent?
+- Every `<automated>` command + `<fails_when>`: can it pass while the property is broken (vacuous), or fail while the property holds (environment-dependent)? Shell pitfalls (`set -e` with `!`, pipes masking exit codes, rg exit 1 on no match, cargo test filter matching zero tests).
+
+## Rules
+- Read-only. Do not modify any file. You may run read-only commands (rg, cat, git log/show in the snapshot, `cargo metadata --offline`). Avoid `cargo build`/`cargo test` unless a finding genuinely needs it; if you do, set CARGO_TARGET_DIR to a directory inside the current snapshot.
+- Cite `path:line` for every finding (plans are long; give the line in the PLAN file and, where relevant, the line in src/ that contradicts it).
+- Verify against `src/` before claiming a plan step won't work.
+
+## Output format
+## CONFIRMED (verified against source/docs — each with path:line evidence and a one-line reproduction or quote)
+## SUSPECTED (plausible but unverified — say what would confirm it)
+## SPECULATION (labelled)
+End with a one-paragraph verdict: would you let an automated executor run these 11 plans as written? Why or why not.

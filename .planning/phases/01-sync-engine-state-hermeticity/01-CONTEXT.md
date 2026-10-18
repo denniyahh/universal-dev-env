@@ -125,6 +125,7 @@ Scale context: 18 template files, single user, on-demand CLI (no daemon).
 - **Re-fetch-and-retry on an upstream race:** rejected for now (D-18). Revisit if multi-machine pushes collide often.
 - **Timeout overrides via config or env:** not needed yet.
 - **Bounding the `curl` call in `src/semantic/mod.rs`:** belongs with Phase 2 (TypeSafe guardrails).
+- **Project-level `state.json` lock (accepted limitation, operator 2026-10-18):** `ude sync resolve` (D-09) reads, modifies and writes `.ude/state.json` without a lock, so a pull or push in the same project at nearly the same moment can overwrite its result: a resolve that doesn't stick, or a stale ancestor that later shows a false conflict. No local file content is lost and the next run re-detects it. This is the same class as today's unlocked local-templates mode, and it is accepted under D-01's single-user bar. Revisit if agents or scripts run sync commands concurrently in one project. A fix would reuse the 01-03 std file-lock guard on `.ude/`. (External adversarial review 2026-10-17, finding 8.)
 
 </deferred>
 
