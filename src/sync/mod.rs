@@ -1228,7 +1228,149 @@ fn check_for_override(local_root: &Path, rel: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::{OsStr, OsString};
+    use std::process::{Output, Stdio};
     use tempfile::tempdir;
+
+    /// Repository-local git variables (`git rev-parse --local-env-vars`). An inherited
+    /// value would point a fixture command at another repository, so every fixture
+    /// command removes them. Plan 01-03 replaces this copy with
+    /// `crate::process::GIT_LOCAL_ENV_VARS`.
+    const FIXTURE_GIT_LOCAL_ENV_VARS: [&str; 15] = [
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_CONFIG",
+        "GIT_CONFIG_PARAMETERS",
+        "GIT_CONFIG_COUNT",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_IMPLICIT_WORK_TREE",
+        "GIT_GRAFT_FILE",
+        "GIT_INDEX_FILE",
+        "GIT_NO_REPLACE_OBJECTS",
+        "GIT_REPLACE_REF_BASE",
+        "GIT_PREFIX",
+        "GIT_SHALLOW_FILE",
+        "GIT_COMMON_DIR",
+    ];
+
+    const FIXTURE_GITCONFIG: &str =
+        "[user]\n\tname = UDE Tester\n\temail = tester@example.com\n[commit]\n\tgpgsign = false\n";
+
+    /// Hermetic git runner for test fixtures. Commands ignore inherited repo-local
+    /// variables, read only the fixture gitconfig (no host identity, no system
+    /// config), never prompt, and `run` / `output` panic when a step fails.
+    struct GitFixture {
+        _home: tempfile::TempDir,
+        gitconfig: PathBuf,
+    }
+
+    impl GitFixture {
+        fn new() -> Self {
+            let home = tempdir().expect("create fixture gitconfig dir");
+            let gitconfig = home.path().join("gitconfig");
+            fs::write(&gitconfig, FIXTURE_GITCONFIG).expect("write fixture gitconfig");
+            Self {
+                _home: home,
+                gitconfig,
+            }
+        }
+
+        fn cmd(&self, dir: &Path) -> Command {
+            let mut cmd = Command::new("git");
+            cmd.current_dir(dir);
+            for name in FIXTURE_GIT_LOCAL_ENV_VARS {
+                cmd.env_remove(name);
+            }
+            cmd.env("GIT_CONFIG_GLOBAL", &self.gitconfig)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .stdin(Stdio::null());
+            cmd
+        }
+
+        fn run(&self, dir: &Path, args: &[&str]) {
+            self.checked(dir, args);
+        }
+
+        fn output(&self, dir: &Path, args: &[&str]) -> String {
+            let out = self.checked(dir, args);
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        }
+
+        fn checked(&self, dir: &Path, args: &[&str]) -> Output {
+            let out = self.cmd(dir).args(args).output().unwrap_or_else(|e| {
+                panic!("fixture step `git {}` did not start: {e}", args.join(" "))
+            });
+            assert!(
+                out.status.success(),
+                "fixture step `git {}` failed ({}): {}",
+                args.join(" "),
+                out.status,
+                String::from_utf8_lossy(&out.stderr)
+            );
+            out
+        }
+
+        /// Global-config variables for code under test that spawns its own git.
+        fn gitconfig_env(&self) -> Vec<(OsString, OsString)> {
+            vec![
+                ("GIT_CONFIG_GLOBAL".into(), self.gitconfig.clone().into()),
+                ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+            ]
+        }
+    }
+
+    #[test]
+    fn test_git_fixture_scrubs_local_env() {
+        let fixture = GitFixture::new();
+        let dir = tempdir().unwrap();
+        let cmd = fixture.cmd(dir.path());
+        let envs: std::collections::HashMap<_, _> = cmd.get_envs().collect();
+        for name in FIXTURE_GIT_LOCAL_ENV_VARS {
+            assert_eq!(
+                envs.get(OsStr::new(name)),
+                Some(&None),
+                "{name} must be removed from fixture git commands"
+            );
+        }
+        let gitconfig = fixture.gitconfig.as_os_str();
+        assert_eq!(
+            envs.get(OsStr::new("GIT_CONFIG_NOSYSTEM")),
+            Some(&Some(OsStr::new("1")))
+        );
+        assert_eq!(
+            envs.get(OsStr::new("GIT_CONFIG_GLOBAL")),
+            Some(&Some(gitconfig))
+        );
+        for (key, value) in fixture.gitconfig_env() {
+            assert_eq!(
+                envs.get(key.as_os_str()),
+                Some(&Some(value.as_os_str())),
+                "gitconfig_env disagrees with cmd"
+            );
+        }
+
+        // The fixture gitconfig is what git actually reads: the identity comes from it.
+        fixture.run(dir.path(), &["init", "-b", "main"]);
+        assert_eq!(
+            fixture.output(dir.path(), &["config", "user.name"]),
+            "UDE Tester"
+        );
+
+        // Negative control: a plain git Command carries none of these entries.
+        let plain = Command::new("git");
+        let plain_envs: Vec<_> = plain.get_envs().collect();
+        for name in FIXTURE_GIT_LOCAL_ENV_VARS
+            .iter()
+            .chain(&["GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM"])
+        {
+            assert!(
+                plain_envs.iter().all(|(key, _)| *key != OsStr::new(name)),
+                "plain git Command unexpectedly configures {name}"
+            );
+        }
+    }
 
     #[test]
     fn test_sync_status_in_sync() {
@@ -1678,38 +1820,19 @@ mod tests {
     #[test]
     fn test_remote_repo_cache_management() {
         let engine = SyncEngine::new();
+        let git = GitFixture::new();
         let cache_dir = tempdir().unwrap();
         let fake_remote = tempdir().unwrap();
 
         // Initialize a fake remote git repository with a templates/ directory
-        let status = Command::new("git")
-            .current_dir(fake_remote.path())
-            .args(["init", "-b", "main"])
-            .status()
-            .unwrap();
-        assert!(status.success());
+        git.run(fake_remote.path(), &["init", "-b", "main"]);
 
         let fake_templates = fake_remote.path().join("templates");
         fs::create_dir_all(&fake_templates).unwrap();
         fs::write(fake_templates.join("test.txt"), "remote template content").unwrap();
 
-        let _ = Command::new("git")
-            .current_dir(fake_remote.path())
-            .args(["add", "-A"])
-            .status();
-        let commit_status = Command::new("git")
-            .current_dir(fake_remote.path())
-            .args([
-                "-c", "user.name=Tester",
-                "-c", "user.email=tester@example.com",
-                "-c", "commit.gpgsign=false",
-                "commit",
-                "--no-gpg-sign",
-                "-m", "init fake remote",
-            ])
-            .status()
-            .unwrap();
-        assert!(commit_status.success());
+        git.run(fake_remote.path(), &["add", "-A"]);
+        git.run(fake_remote.path(), &["commit", "-m", "init fake remote"]);
 
         let remote_url = fake_remote.path().to_string_lossy().to_string();
         let (resolved, _lock1) = engine
@@ -1720,21 +1843,11 @@ mod tests {
         assert!(resolved.join("test.txt").exists());
 
         // Test branch switching isolation: create develop branch with distinct file
-        let _ = Command::new("git")
-            .current_dir(fake_remote.path())
-            .args(["checkout", "-b", "develop"])
-            .status();
+        git.run(fake_remote.path(), &["checkout", "-b", "develop"]);
         fs::write(fake_templates.join("develop.txt"), "develop branch template").unwrap();
-        let _ = Command::new("git").current_dir(fake_remote.path()).args(["add", "-A"]).status();
-        let _ = Command::new("git").current_dir(fake_remote.path()).args([
-            "-c", "user.name=Tester",
-            "-c", "user.email=tester@example.com",
-            "-c", "commit.gpgsign=false",
-            "commit",
-            "--no-gpg-sign",
-            "-m", "develop commit",
-        ]).status();
-        let _ = Command::new("git").current_dir(fake_remote.path()).args(["checkout", "main"]).status();
+        git.run(fake_remote.path(), &["add", "-A"]);
+        git.run(fake_remote.path(), &["commit", "-m", "develop commit"]);
+        git.run(fake_remote.path(), &["checkout", "main"]);
 
         let (resolved_develop, _lock2) = engine
             .ensure_remote_repo(&remote_url, "develop", cache_dir.path())
