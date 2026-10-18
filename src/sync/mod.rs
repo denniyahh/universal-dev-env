@@ -210,6 +210,11 @@ impl SyncEngine {
         format!("{:x}", hasher.finalize())
     }
 
+    /// Content fingerprint used to classify managed files.
+    pub fn fingerprint(bytes: &[u8]) -> String {
+        Self::compute_hash(bytes)
+    }
+
     /// Detects 3-way sync status using SHA-256 hashes of ancestor (O), local (A), and upstream (B).
     pub fn compare_3way_hashes(
         ancestor_hash: Option<&str>,
@@ -1619,6 +1624,103 @@ mod tests {
                 true,
             ),
             SyncStatus::Overridden
+        );
+    }
+
+    #[test]
+    fn test_fingerprint() {
+        let fp = SyncEngine::fingerprint;
+        assert_eq!(
+            fp(b"a\r\nb\r\n"),
+            fp(b"a\nb\n"),
+            "CRLF and LF renderings of the same text must share a fingerprint"
+        );
+
+        // Negative controls: real differences keep distinct fingerprints.
+        assert_ne!(fp(b"a\nb\n"), fp(b"a\nc\n"));
+        assert_ne!(fp(b"a\rb"), fp(b"a\nb"), "a lone CR is content");
+        let invalid_crlf = [0xff, b'\r', b'\n'];
+        let invalid_lf = [0xff, b'\n'];
+        assert_ne!(
+            fp(&invalid_crlf),
+            fp(&invalid_lf),
+            "non-UTF-8 bytes must not be normalized"
+        );
+        assert_eq!(fp(&invalid_crlf), SyncEngine::compute_hash(&invalid_crlf));
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn test_fingerprint_crlf_lf_equivalence_prop(
+            lines in proptest::collection::vec(r"[^\r\n]{0,16}", 0..=8)
+        ) {
+            let lf = lines.join("\n");
+            let crlf = lines.join("\r\n");
+            proptest::prop_assert_eq!(
+                SyncEngine::fingerprint(crlf.as_bytes()),
+                SyncEngine::fingerprint(lf.as_bytes())
+            );
+            // CR-free text is already canonical: its fingerprint is the raw hash.
+            proptest::prop_assert_eq!(
+                SyncEngine::fingerprint(lf.as_bytes()),
+                SyncEngine::compute_hash(lf.as_bytes())
+            );
+            // Negative control: a real content change moves the fingerprint.
+            let extended = format!("{lf}x");
+            proptest::prop_assert_ne!(
+                SyncEngine::fingerprint(extended.as_bytes()),
+                SyncEngine::fingerprint(lf.as_bytes())
+            );
+        }
+    }
+
+    /// Status that `scan_project` reports for `rel`.
+    fn scan_status(engine: &SyncEngine, local: &Path, upstream: &Path, rel: &str) -> SyncStatus {
+        engine
+            .scan_project(local, upstream, None)
+            .unwrap()
+            .into_iter()
+            .find(|s| s.relative_path == Path::new(rel))
+            .unwrap_or_else(|| panic!("{rel} is not a managed file"))
+            .status
+    }
+
+    /// Writes `content` as the upstream template for `.gitconfig`.
+    fn write_upstream_gitconfig(upstream: &Path, content: &[u8]) {
+        let path = upstream.join("projects/generic/gitconfig.repo");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, content).unwrap();
+    }
+
+    #[test]
+    fn test_scan_crlf_only_difference_in_sync() {
+        let engine = SyncEngine::new();
+        let local_dir = tempdir().unwrap();
+        let upstream_dir = tempdir().unwrap();
+        let lf = "[core]\n  autocrlf = input\n";
+
+        let mut state = ProjectState::default();
+        state.record_file(
+            Path::new(".gitconfig"),
+            SyncEngine::fingerprint(lf.as_bytes()),
+            Some(lf.to_string()),
+        );
+        state.save_to_dir(local_dir.path()).unwrap();
+        write_upstream_gitconfig(upstream_dir.path(), lf.as_bytes());
+
+        let local = local_dir.path().join(".gitconfig");
+        fs::write(&local, lf.replace('\n', "\r\n")).unwrap();
+        assert_eq!(
+            scan_status(&engine, local_dir.path(), upstream_dir.path(), ".gitconfig"),
+            SyncStatus::InSync,
+            "a CRLF-only difference must not register as drift"
+        );
+
+        // Negative control: a real edit in the CRLF file is still a local modification.
+        fs::write(&local, lf.replace("input", "false").replace('\n', "\r\n")).unwrap();
+        assert_eq!(
+            scan_status(&engine, local_dir.path(), upstream_dir.path(), ".gitconfig"),
+            SyncStatus::LocallyModified
         );
     }
 
