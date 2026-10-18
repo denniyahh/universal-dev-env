@@ -809,7 +809,7 @@ impl SyncEngine {
             Ok(applied) => applied,
             Err(reason) => {
                 return PullResult::IoFailed {
-                    path: PathBuf::from(STATE_FILE_REL),
+                    path: local_root.to_path_buf(),
                     reason: format!("rename phase failed, state not updated: {reason}"),
                 };
             }
@@ -925,36 +925,35 @@ impl SyncEngine {
             }
         }
 
-        // Pass 2: Transactional materialization of validated files
-        let mut synced = 0;
-        let mut staged_files = Vec::new();
+        // Pass 2: stage every template (and, when persisting immediately, the new state)
+        // before replacing anything (D-05). A staging error returns here; dropping
+        // `transaction` deletes the temps and any directories staging created.
+        let mut transaction = staging::StagedTransaction::new(upstream_root);
         let mut updated_records = Vec::new();
 
         for (rel_path, target_upstream, parameterized_bytes, raw_bytes, raw_local_str) in
             candidates_to_write
         {
-            if let Some(parent) = target_upstream.parent()
-                && let Err(err) = fs::create_dir_all(parent)
-            {
+            let Ok(upstream_rel) = target_upstream.strip_prefix(upstream_root) else {
                 return PushResult::IoFailed {
                     path: rel_path,
-                    reason: format!("Failed to create parent directory: {err}"),
+                    reason: format!(
+                        "Upstream target {} is outside the upstream root",
+                        target_upstream.display()
+                    ),
                 };
-            }
-            if let Err(err) = fs::write(&target_upstream, &parameterized_bytes) {
+            };
+            let mode = staging::file_mode_for(&rel_path, &target_upstream);
+            if let Err(reason) = transaction.stage_write(upstream_rel, &parameterized_bytes, mode) {
                 return PushResult::IoFailed {
                     path: rel_path,
-                    reason: format!("Failed to write upstream template: {err}"),
+                    reason,
                 };
             }
-
-            let local_hash = Self::fingerprint(&raw_bytes);
-            staged_files.push(target_upstream.clone());
-            updated_records.push((rel_path, local_hash, raw_local_str));
-            synced += 1;
+            updated_records.push((rel_path, Self::fingerprint(&raw_bytes), raw_local_str));
         }
 
-        if persist_ancestor_immediately {
+        let staged_state = if persist_ancestor_immediately {
             let mut project_state = match ProjectState::load_from_dir(local_root) {
                 Ok(state) => state,
                 Err(reason) => return state_push_failure(reason),
@@ -962,13 +961,36 @@ impl SyncEngine {
             for (rel, hash, content) in &updated_records {
                 project_state.record_file(rel, hash.clone(), content.clone());
             }
-            if let Err(e) = project_state.save_to_dir(local_root) {
-                return state_push_failure(format!("Failed to persist state: {e}"));
+            match project_state.stage_to_dir(local_root) {
+                Ok(staged) => Some(staged),
+                Err(reason) => {
+                    return state_push_failure(format!("Failed to stage state: {reason}"));
+                }
             }
+        } else {
+            None
+        };
+
+        // Commit phase: templates first, state.json last.
+        let applied = match transaction.commit() {
+            Ok(applied) => applied,
+            Err(reason) => {
+                return PushResult::IoFailed {
+                    path: upstream_root.to_path_buf(),
+                    reason: format!("rename phase failed, state not updated: {reason}"),
+                };
+            }
+        };
+        if let Some(staged) = staged_state
+            && let Err(e) = staged.commit()
+        {
+            return state_push_failure(format!("Failed to persist state: {e}"));
         }
 
+        let staged_files: Vec<PathBuf> =
+            applied.iter().map(|rel| upstream_root.join(rel)).collect();
         PushResult::Success {
-            synced_files: synced,
+            synced_files: staged_files.len(),
             staged_files,
             updated_records,
         }
