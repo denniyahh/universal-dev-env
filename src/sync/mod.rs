@@ -1736,6 +1736,56 @@ mod tests {
     }
 
     #[test]
+    fn test_scan_after_v1_migration_in_sync() {
+        let engine = SyncEngine::new();
+        let local_dir = tempdir().unwrap();
+        let upstream_dir = tempdir().unwrap();
+        let lf = "[core]\n  autocrlf = input\n";
+        let crlf = lf.replace('\n', "\r\n");
+
+        // A version 1 ledger: raw-byte hash and verbatim CRLF content.
+        let v1 = serde_json::json!({
+            "version": 1,
+            "files": { ".gitconfig": {
+                "ancestor_hash": SyncEngine::compute_hash(crlf.as_bytes()),
+                "last_synced_at": null,
+                "ancestor_content": crlf,
+            }},
+        });
+        let state_path = local_dir.path().join(STATE_FILE_REL);
+        fs::create_dir_all(state_path.parent().unwrap()).unwrap();
+        fs::write(&state_path, v1.to_string()).unwrap();
+        fs::write(local_dir.path().join(".gitconfig"), &crlf).unwrap();
+        write_upstream_gitconfig(upstream_dir.path(), lf.as_bytes());
+
+        assert_eq!(
+            scan_status(&engine, local_dir.path(), upstream_dir.path(), ".gitconfig"),
+            SyncStatus::InSync
+        );
+
+        // The migrated ancestor is what the local copy is compared against: with only
+        // upstream edited, the unchanged CRLF local copy must not count as a local edit.
+        let edited = lf.replace("input", "false");
+        write_upstream_gitconfig(upstream_dir.path(), edited.as_bytes());
+        assert_eq!(
+            scan_status(&engine, local_dir.path(), upstream_dir.path(), ".gitconfig"),
+            SyncStatus::UpstreamModified
+        );
+
+        // The next save persists version 2 with fingerprint semantics.
+        ProjectState::load_from_dir(local_dir.path())
+            .unwrap()
+            .save_to_dir(local_dir.path())
+            .unwrap();
+        let saved = fs::read_to_string(&state_path).unwrap();
+        assert!(saved.contains("\"version\": 2"), "saved state was: {saved}");
+        assert!(
+            saved.contains(&SyncEngine::fingerprint(lf.as_bytes())),
+            "saved state was: {saved}"
+        );
+    }
+
+    #[test]
     fn test_pull_updates_materializes_files_and_updates_state() {
         let engine = SyncEngine::new();
         let local_dir = tempdir().unwrap();

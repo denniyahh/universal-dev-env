@@ -113,7 +113,7 @@ fn test_cli_e2e_init_and_sync_lifecycle() {
         ".ude/state.json must be created by init"
     );
     let state_content = fs::read_to_string(&state_file).unwrap();
-    assert!(state_content.contains("\"version\": 1"));
+    assert!(state_content.contains("\"version\": 2"));
     assert!(state_content.contains(".gitconfig"));
     assert!(state_content.contains("mise.toml"));
 
