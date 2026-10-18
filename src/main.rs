@@ -282,23 +282,47 @@ fn main() {
             // 3. Register git include and hooks in local git repo if .git exists
             if project_path.join(".git").exists() {
                 // Activate .gitconfig include
-                let _ = Command::new("git")
-                    .current_dir(&project_path)
-                    .args(["config", "--local", "include.path", "../.gitconfig"])
-                    .status();
+                let mut include_cmd = Command::new("git");
+                include_cmd.current_dir(&project_path).args([
+                    "config",
+                    "--local",
+                    "include.path",
+                    "../.gitconfig",
+                ]);
+                let _ = process::run_bounded(
+                    include_cmd,
+                    "git config include.path",
+                    process::LOCAL_TIMEOUT,
+                );
 
                 // Set core.hooksPath
-                let _ = Command::new("git")
-                    .current_dir(&project_path)
-                    .args(["config", "--local", "core.hooksPath", "scripts/hooks"])
-                    .status();
+                let mut hooks_cmd = Command::new("git");
+                hooks_cmd.current_dir(&project_path).args([
+                    "config",
+                    "--local",
+                    "core.hooksPath",
+                    "scripts/hooks",
+                ]);
+                let _ = process::run_bounded(
+                    hooks_cmd,
+                    "git config core.hooksPath",
+                    process::LOCAL_TIMEOUT,
+                );
 
                 // Ensure tracked hooks have mode 100755 in git index
                 for hook in &["commit-msg", "pre-commit", "pre-push"] {
-                    let _ = Command::new("git")
-                        .current_dir(&project_path)
-                        .args(["update-index", "--add", "--chmod=+x", &format!("scripts/hooks/{hook}")])
-                        .status();
+                    let mut chmod_cmd = Command::new("git");
+                    chmod_cmd.current_dir(&project_path).args([
+                        "update-index",
+                        "--add",
+                        "--chmod=+x",
+                        &format!("scripts/hooks/{hook}"),
+                    ]);
+                    let _ = process::run_bounded(
+                        chmod_cmd,
+                        "git update-index --chmod=+x",
+                        process::LOCAL_TIMEOUT,
+                    );
                 }
             }
 
