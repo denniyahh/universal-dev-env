@@ -26,12 +26,12 @@ Systematic execution of the 4-track remediation plan derived from external adver
   5. Divergent concurrent modifications generate structured `.conflict` files with Myers conflict markers while preserving local developer changes.
   6. Outbound push verifies branch continuity and rejects divergent push candidates safely.
 
-**Plans**: 1/11 plans executed
+**Plans**: 2/11 plans executed
 
 Plans:
 **Wave 1**
 - [x] 01-01: Bounded process-group runner (`src/process.rs`) and the 10 git calls outside `src/sync/` (SYNC-03).
-- [ ] 01-02: `GitFixture` helper making test git commands hermetic in sync unit and e2e tests (SYNC-03).
+- [x] 01-02: `GitFixture` helper making test git commands hermetic in sync unit and e2e tests (SYNC-03).
 
 **Wave 2** *(blocked on Wave 1 completion)*
 - [ ] 01-03: Sync's 31 git/gh calls on the runner, test-only env/timeout injection, std file lock (D-04), inherited-`GIT_DIR` e2e test, hermeticity check (SYNC-03).
@@ -121,7 +121,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Sync Engine & State Hermeticity | 1/11 | In Progress | - |
+| 1. Sync Engine & State Hermeticity | 2/11 | In Progress | - |
 | 2. Sanitizer, Boundaries & Security Hardening | 0/3 | Not started | - |
 | 3. Doctor & CLI Hardening | 0/3 | Not started | - |
 | 4. Templates, Archetypes & Manifest Decoupling | 0/3 | Not started | - |

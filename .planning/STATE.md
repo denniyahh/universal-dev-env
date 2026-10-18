@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 01
 current_phase_name: Sync Engine & State Hermeticity
 status: executing
-stopped_at: Completed 01-01-PLAN.md
-last_updated: "2026-10-18T17:35:01.349Z"
+stopped_at: Completed 01-02-PLAN.md
+last_updated: "2026-10-18T17:45:23.354Z"
 last_activity: 2026-10-18
 last_activity_desc: Phase 01 execution started
-state_head: 53f8e77a027394791b54992dd3c34e92bc495247
+state_head: 5983ef1e678d99e4fbb55ef60e61e856c29b92a5
 progress:
   total_phases: 4
   completed_phases: 0
   total_plans: 11
-  completed_plans: 1
+  completed_plans: 2
   percent: 0
 ---
 
@@ -28,7 +28,7 @@ See: `.planning/PROJECT.md` (updated 2026-10-12)
 ## Current Position
 
 Phase: 01 (Sync Engine & State Hermeticity) — EXECUTING
-Plan: 2 of 11
+Plan: 3 of 11
 Status: Ready to execute
 Last activity: 2026-10-18 — Phase 01 execution started
 
@@ -59,6 +59,7 @@ Progress: [░░░░░░░░░░] 0%
 | Plan | Duration | Tasks | Files |
 |------|----------|-------|-------|
 | Phase 01 P01 | 11min | 2 tasks | 7 files |
+| Phase 01 P02 | 7min | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -71,6 +72,7 @@ Recent decisions affecting current work:
 - [Init]: Structure roadmap across 4 engineering tracks (Sync → Security → Doctor → Templates).
 - [Init]: Use offline Git fixtures for sync verification to ensure reproducible hermetic test runs.
 - [Phase 01]: 01-01: repo baseline fails cargo fmt --check (167 pre-existing hunks); plans gate on rustfmt of new files plus no increase in hunk count until a repo-wide fmt is decided
+- [Phase 01]: 01-02: fixture git commands come only from GitFixture::cmd (sync tests) or scrubbed_git (e2e); fixture commits rely on the fixture gitconfig for identity and gpgsign=false instead of -c / --no-gpg-sign flags
 
 ### Pending Todos
 
@@ -91,6 +93,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-18T17:35:01.255Z
-Stopped at: Completed 01-01-PLAN.md
+Last session: 2026-10-18T17:45:23.310Z
+Stopped at: Completed 01-02-PLAN.md
 Resume file: None
