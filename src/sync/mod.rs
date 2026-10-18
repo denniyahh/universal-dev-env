@@ -2053,6 +2053,159 @@ mod tests {
         );
     }
 
+    /// A child spawned as the leader of its own process group. Drop kills the whole
+    /// group with the `kill` binary and reaps the child, so a failed assertion still
+    /// cleans up (including grandchildren such as flock's `sleep`).
+    #[cfg(target_os = "linux")]
+    struct GroupGuard {
+        child: std::process::Child,
+        killed: bool,
+    }
+
+    #[cfg(target_os = "linux")]
+    impl GroupGuard {
+        fn spawn(mut cmd: Command) -> Self {
+            use std::os::unix::process::CommandExt;
+            let child = cmd
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .process_group(0)
+                .spawn()
+                .expect("spawn process group leader");
+            Self {
+                child,
+                killed: false,
+            }
+        }
+
+        /// SIGKILLs the group (its PGID is the leader's PID) and reaps the leader.
+        fn kill(&mut self) -> std::process::ExitStatus {
+            let pgid = self.child.id();
+            let status = Command::new("kill")
+                .args(["-KILL", "--", &format!("-{pgid}")])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .expect("run the kill binary");
+            self.killed = true;
+            let _ = self.child.wait();
+            status
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    impl Drop for GroupGuard {
+        fn drop(&mut self) {
+            if !self.killed {
+                let _ = self.kill();
+            }
+        }
+    }
+
+    /// A direct child; Drop stops it with `Child::kill` and reaps it.
+    #[cfg(target_os = "linux")]
+    struct ChildGuard(std::process::Child);
+
+    #[cfg(target_os = "linux")]
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    /// Link targets of every open descriptor of `pid`, from /proc/<pid>/fd.
+    #[cfg(target_os = "linux")]
+    fn open_fd_targets(pid: u32) -> Vec<PathBuf> {
+        fs::read_dir(format!("/proc/{pid}/fd"))
+            .expect("list /proc/<pid>/fd")
+            .map(|entry| fs::read_link(entry.expect("fd entry").path()).expect("read fd link"))
+            .collect()
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_remote_lock_released_when_holder_killed() {
+        let flock = which::which("flock")
+            .expect("util-linux `flock` not found on PATH; this test needs it as the lock holder");
+        let temp = tempdir().unwrap();
+        let lock_path = temp.path().join("holder.lock");
+
+        // flock(1) takes the lock, forks `sleep 30` with the lock fd closed (-o) and
+        // holds the lock itself until it is killed.
+        let mut cmd = Command::new(flock);
+        cmd.args(["-o", "-x"]).arg(&lock_path).args(["sleep", "30"]);
+        let mut holder = GroupGuard::spawn(cmd);
+
+        // Cross-process contention through flock(2), observed within 2 s.
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let err = loop {
+            match RemoteLockGuard::acquire(&lock_path, 0) {
+                Err(e) => break e,
+                Ok(guard) => {
+                    drop(guard);
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "flock holder never took the lock"
+                    );
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            }
+        };
+        assert!(
+            err.contains("waiting for remote cache lock"),
+            "unexpected contention error: {err}"
+        );
+
+        let status = holder.kill();
+        assert!(
+            status.success(),
+            "kill of the holder's process group failed: {status}"
+        );
+        let reacquired = RemoteLockGuard::acquire(&lock_path, 2);
+        assert!(
+            reacquired.is_ok(),
+            "lock still held after its holder was killed: {:?}",
+            reacquired.err()
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_remote_lock_not_inherited_by_children() {
+        use std::os::unix::process::CommandExt;
+        let spawn_sleep = |stdin: Stdio| {
+            let child = Command::new("sleep")
+                .arg("5")
+                .stdin(stdin)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .process_group(0)
+                .spawn()
+                .expect("spawn sleep");
+            ChildGuard(child)
+        };
+        let temp = tempdir().unwrap();
+        let lock_path = temp.path().join("inherit.lock");
+        let _guard = RemoteLockGuard::acquire(&lock_path, 1).expect("acquire remote lock");
+        let lock_file = fs::canonicalize(&lock_path).unwrap();
+
+        // std's spawn returns after exec, so the child's descriptor table is final.
+        let plain = spawn_sleep(Stdio::null());
+        assert!(
+            !open_fd_targets(plain.0.id()).contains(&lock_file),
+            "a spawned child inherited the lock file descriptor"
+        );
+
+        // Negative control: a child handed the lock file as stdin is seen holding it.
+        let inheriting = spawn_sleep(Stdio::from(fs::File::open(&lock_path).unwrap()));
+        assert!(
+            open_fd_targets(inheriting.0.id()).contains(&lock_file),
+            "the descriptor scan missed an inherited lock file"
+        );
+    }
+
     #[test]
     fn test_defect1_failed_push_does_not_commit_ancestor_state() {
         let engine = SyncEngine::new();
