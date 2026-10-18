@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 /// Record of a file's state at the last successful synchronization or initialization.
@@ -24,6 +24,21 @@ pub struct ProjectState {
 
 /// Newest `.ude/state.json` schema version this build reads and writes.
 pub const CURRENT_STATE_VERSION: u32 = 1;
+
+/// RED stub for a staged state write.
+#[allow(dead_code)]
+pub struct StagedState {
+    temp: tempfile::NamedTempFile,
+    project_dir: PathBuf,
+    target: PathBuf,
+}
+
+impl StagedState {
+    /// RED stub: does nothing.
+    pub fn commit(self) -> Result<(), String> {
+        Ok(())
+    }
+}
 
 impl Default for ProjectState {
     fn default() -> Self {
@@ -83,6 +98,18 @@ impl ProjectState {
         fs::write(&state_path, json)
             .map_err(|e| format!("Failed to write state file {}: {e}", state_path.display()))?;
         Ok(())
+    }
+
+    /// RED stub: writes directly and returns a staged handle whose commit does nothing.
+    pub fn stage_to_dir(&self, project_dir: &Path) -> Result<StagedState, String> {
+        self.save_to_dir(project_dir)?;
+        let ude_dir = project_dir.join(".ude");
+        let temp = tempfile::NamedTempFile::new_in(&ude_dir).map_err(|e| e.to_string())?;
+        Ok(StagedState {
+            temp,
+            project_dir: project_dir.to_path_buf(),
+            target: ude_dir.join("state.json"),
+        })
     }
 
     /// Retrieves the ancestor hash for a given relative path.
@@ -234,5 +261,138 @@ mod tests {
         write_state_file(dir.path(), current.as_bytes());
         let loaded = ProjectState::load_from_dir(dir.path()).unwrap();
         assert_eq!(loaded.version, CURRENT_STATE_VERSION);
+    }
+
+    /// A state with one recorded file whose hash is `hash`.
+    fn state_with(hash: &str) -> ProjectState {
+        let mut state = ProjectState::default();
+        state.record_file(Path::new("mise.toml"), hash.to_string(), None);
+        state
+    }
+
+    /// Names in `dir` that start with `.tmp` (NamedTempFile's prefix).
+    fn tmp_entries(dir: &Path) -> Vec<String> {
+        fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .filter(|name| name.starts_with(".tmp"))
+            .collect()
+    }
+
+    #[test]
+    fn test_state_save_atomic() {
+        let dir = tempdir().unwrap();
+        state_with("old").save_to_dir(dir.path()).unwrap();
+        let state_path = dir.path().join(".ude/state.json");
+        let before = fs::read(&state_path).unwrap();
+
+        // Staged but never committed (a crash before commit): the old file is untouched.
+        let staged = state_with("new").stage_to_dir(dir.path()).unwrap();
+        drop(staged);
+        assert_eq!(
+            fs::read(&state_path).unwrap(),
+            before,
+            "an uncommitted staged state replaced state.json"
+        );
+        assert!(
+            tmp_entries(&dir.path().join(".ude")).is_empty(),
+            "a dropped staged state left a temp file"
+        );
+
+        // Negative control: committing replaces the file with the new state.
+        state_with("new")
+            .stage_to_dir(dir.path())
+            .unwrap()
+            .commit()
+            .unwrap();
+        let loaded = ProjectState::load_from_dir(dir.path()).unwrap();
+        assert_eq!(
+            loaded.get_ancestor_hash(Path::new("mise.toml")),
+            Some("new")
+        );
+        assert!(tmp_entries(&dir.path().join(".ude")).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_state_save_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir().unwrap();
+        let state_path = dir.path().join(".ude/state.json");
+        let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+
+        state_with("a").save_to_dir(dir.path()).unwrap();
+        assert_ne!(
+            mode(&state_path),
+            0o600,
+            "new state.json kept the tempfile mode"
+        );
+        assert_eq!(mode(&state_path), 0o644);
+
+        fs::set_permissions(&state_path, fs::Permissions::from_mode(0o640)).unwrap();
+        state_with("b").save_to_dir(dir.path()).unwrap();
+        assert_eq!(
+            mode(&state_path),
+            0o640,
+            "existing state.json mode not kept"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_state_save_refuses_symlinked_ude_dir() {
+        use std::os::unix::fs::symlink;
+
+        // Case A, stage time: `.ude` is a symlink to a directory outside the project.
+        let project = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        symlink(outside.path(), project.path().join(".ude")).unwrap();
+
+        let err = state_with("a")
+            .save_to_dir(project.path())
+            .expect_err("save_to_dir wrote through a symlinked .ude");
+        assert!(err.contains(".ude"), "error does not name the path: {err}");
+        let err = state_with("a")
+            .stage_to_dir(project.path())
+            .err()
+            .expect("stage_to_dir accepted a symlinked .ude");
+        assert!(err.contains(".ude"), "error does not name the path: {err}");
+        assert!(!outside.path().join("state.json").exists());
+        assert!(tmp_entries(outside.path()).is_empty());
+
+        // Case B, commit time: state.json becomes a symlink after staging.
+        let project = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        state_with("old").save_to_dir(project.path()).unwrap();
+        let victim = outside.path().join("victim.json");
+        fs::write(&victim, b"outside").unwrap();
+        let staged = state_with("new").stage_to_dir(project.path()).unwrap();
+        let state_path = project.path().join(".ude/state.json");
+        fs::remove_file(&state_path).unwrap();
+        symlink(&victim, &state_path).unwrap();
+
+        let err = staged
+            .commit()
+            .expect_err("commit replaced a symlinked state.json");
+        assert!(
+            err.contains("state.json"),
+            "error does not name the symlink: {err}"
+        );
+        assert!(
+            fs::symlink_metadata(&state_path)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(fs::read(&victim).unwrap(), b"outside");
+
+        // Negative control: a regular `.ude` saves and holds the new state.
+        let project = tempdir().unwrap();
+        state_with("new").save_to_dir(project.path()).unwrap();
+        let loaded = ProjectState::load_from_dir(project.path()).unwrap();
+        assert_eq!(
+            loaded.get_ancestor_hash(Path::new("mise.toml")),
+            Some("new")
+        );
     }
 }
