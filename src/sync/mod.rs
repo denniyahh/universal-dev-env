@@ -59,14 +59,32 @@ pub enum EolStyle {
     Crlf,
 }
 
-/// Dominant line-ending style of `bytes`.
-pub fn detect_eol_style(_bytes: &[u8]) -> EolStyle {
-    EolStyle::Lf
+/// Dominant line-ending style of `bytes`: [`EolStyle::Crlf`] only when CRLF pairs
+/// outnumber bare LF bytes. Ties and content without any LF are [`EolStyle::Lf`].
+pub fn detect_eol_style(bytes: &[u8]) -> EolStyle {
+    let crlf = bytes.windows(2).filter(|pair| *pair == b"\r\n").count();
+    let bare_lf = bytes.iter().filter(|&&byte| byte == b'\n').count() - crlf;
+    if crlf > bare_lf {
+        EolStyle::Crlf
+    } else {
+        EolStyle::Lf
+    }
 }
 
 /// Renders LF-normalized `text_lf` with `style` line endings.
-pub fn apply_eol_style(text_lf: &str, _style: EolStyle) -> String {
-    text_lf.to_string()
+pub fn apply_eol_style(text_lf: &str, style: EolStyle) -> String {
+    match style {
+        EolStyle::Lf => text_lf.to_string(),
+        EolStyle::Crlf => text_lf.replace('\n', "\r\n"),
+    }
+}
+
+/// Line-ending style of the existing file at `path`, or `None` when it is absent,
+/// unreadable or not valid UTF-8 (such a destination is written as the source is).
+fn existing_text_eol_style(path: &Path) -> Option<EolStyle> {
+    let bytes = fs::read(path).ok()?;
+    std::str::from_utf8(&bytes).ok()?;
+    Some(detect_eol_style(&bytes))
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -674,8 +692,14 @@ impl SyncEngine {
                         } else {
                             raw_str.to_string()
                         };
-                        let b = rendered.as_bytes().to_vec();
-                        (b, Some(Self::normalize_eol(&rendered)))
+                        // Keep the local file's line endings; a file absent locally
+                        // (or binary) is written exactly as upstream renders it.
+                        let rendered_lf = Self::normalize_eol(&rendered);
+                        let written = match existing_text_eol_style(&target_path) {
+                            Some(style) => apply_eol_style(&rendered_lf, style),
+                            None => rendered,
+                        };
+                        (written.into_bytes(), Some(rendered_lf))
                     } else {
                         (upstream_bytes, None)
                     };
@@ -719,10 +743,15 @@ impl SyncEngine {
                     .as_deref()
                     .map(Self::normalize_eol)
                     .or_else(|| Some(content.clone()));
+                // The merged text is LF-normalized; write it in the local file's style.
+                let written = match existing_text_eol_style(&target_path) {
+                    Some(style) => apply_eol_style(&content, style),
+                    None => content,
+                };
                 candidates_to_write.push((
                     s.relative_path.clone(),
                     target_path,
-                    content.into_bytes(),
+                    written.into_bytes(),
                     up_hash,
                     up_content,
                 ));
@@ -869,6 +898,7 @@ impl SyncEngine {
                     }
                 };
 
+                let upstream_target = map_to_upstream(upstream_root, &state.relative_path);
                 let (parameterized_bytes, raw_local_str) =
                     if let Ok(content) = std::str::from_utf8(&raw_bytes) {
                         // Gate 2: Secret check (reject credentials)
@@ -886,17 +916,22 @@ impl SyncEngine {
                         let parameterized = self
                             .sanitizer
                             .parameterize_paths(content, user_home, xdg_config);
-                        (
-                            parameterized.into_bytes(),
-                            Some(Self::normalize_eol(content)),
-                        )
+                        // Keep an existing template's line endings; a new template
+                        // is published as the local text is.
+                        let published =
+                            match upstream_target.as_deref().and_then(existing_text_eol_style) {
+                                Some(style) => {
+                                    apply_eol_style(&Self::normalize_eol(&parameterized), style)
+                                }
+                                None => parameterized,
+                            };
+                        (published.into_bytes(), Some(Self::normalize_eol(content)))
                     } else {
                         (raw_bytes.clone(), None)
                     };
 
                 // Stage into candidates list
-                if let Some(target_upstream) = map_to_upstream(upstream_root, &state.relative_path)
-                {
+                if let Some(target_upstream) = upstream_target {
                     candidates_to_write.push((
                         state.relative_path.clone(),
                         target_upstream,
