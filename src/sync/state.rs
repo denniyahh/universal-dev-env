@@ -1,3 +1,4 @@
+use super::SyncEngine;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
@@ -24,7 +25,14 @@ pub struct ProjectState {
 }
 
 /// Newest `.ude/state.json` schema version this build reads and writes.
-pub const CURRENT_STATE_VERSION: u32 = 1;
+///
+/// Version 2 records ancestors as [`SyncEngine::fingerprint`] plus LF-normalized
+/// content. Version 1 files are migrated in memory on load (D-07).
+pub const CURRENT_STATE_VERSION: u32 = 2;
+
+/// Schema whose ancestor hashes are raw-byte SHA-256 ([`SyncEngine::compute_hash`])
+/// and whose ancestor content is stored verbatim.
+const RAW_HASH_STATE_VERSION: u32 = 1;
 
 /// Location of the state ledger relative to the project root.
 pub(crate) const STATE_FILE_REL: &str = ".ude/state.json";
@@ -75,6 +83,7 @@ impl ProjectState {
     /// A missing file yields the default empty state (first sync of a fresh project).
     /// An unreadable or corrupt file, version 0, or a version newer than
     /// [`CURRENT_STATE_VERSION`] is an error: the file is never reset or rewritten here.
+    /// A version 1 file is migrated in memory; the next save persists the result.
     pub fn load_from_dir(project_dir: &Path) -> Result<Self, String> {
         let state_path = project_dir.join(STATE_FILE_REL);
         let content = match fs::read_to_string(&state_path) {
@@ -102,8 +111,36 @@ impl ProjectState {
                 "State file {} has version {v}, written by a newer ude (this build supports up to {CURRENT_STATE_VERSION}); upgrade ude",
                 state_path.display()
             )),
+            RAW_HASH_STATE_VERSION => Ok(state.migrated_from_raw_hashes(project_dir)),
             _ => Ok(state),
         }
+    }
+
+    /// Converts a version 1 state to fingerprint semantics (D-07).
+    ///
+    /// A record with content is re-hashed from it and its content LF-normalized. A
+    /// record without content adopts the fingerprint of the local file only when the
+    /// file's raw hash equals the recorded one, so nothing genuinely modified reads as
+    /// in sync. Keys that are not safe project-relative paths are never read.
+    fn migrated_from_raw_hashes(mut self, project_dir: &Path) -> Self {
+        for (key, record) in &mut self.files {
+            match record.ancestor_content.take() {
+                Some(text) => {
+                    record.ancestor_hash = SyncEngine::fingerprint(text.as_bytes());
+                    record.ancestor_content = Some(SyncEngine::normalize_eol(&text));
+                }
+                None => {
+                    if let Ok(path) = super::validate_safe_write_target(project_dir, Path::new(key))
+                        && let Ok(bytes) = fs::read(path)
+                        && SyncEngine::compute_hash(&bytes) == record.ancestor_hash
+                    {
+                        record.ancestor_hash = SyncEngine::fingerprint(&bytes);
+                    }
+                }
+            }
+        }
+        self.version = CURRENT_STATE_VERSION;
+        self
     }
 
     /// Atomically saves the project state to `<project_dir>/.ude/state.json`
@@ -193,7 +230,6 @@ impl ProjectState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sync::SyncEngine;
     use tempfile::tempdir;
 
     #[test]
