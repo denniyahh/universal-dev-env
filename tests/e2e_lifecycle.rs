@@ -155,6 +155,62 @@ fn test_cli_e2e_init_and_sync_lifecycle() {
 }
 
 #[test]
+fn test_sync_status_crlf_only_change_in_sync() {
+    let bin = env!("CARGO_BIN_EXE_ude");
+    let proj = tempdir().unwrap();
+
+    let init = Command::new(bin)
+        .args([
+            "init",
+            "--path",
+            &proj.path().to_string_lossy(),
+            "--type",
+            "rust",
+        ])
+        .output()
+        .expect("ude init execution");
+    assert!(
+        init.status.success(),
+        "ude init must succeed: {}",
+        String::from_utf8_lossy(&init.stderr)
+    );
+
+    let status = || -> String {
+        let mut cmd = Command::new(bin);
+        cmd.current_dir(proj.path())
+            .args(["sync", "status"])
+            .stdin(Stdio::null());
+        for name in FIXTURE_GIT_LOCAL_ENV_VARS {
+            cmd.env_remove(name);
+        }
+        let out = cmd.output().expect("ude sync status execution");
+        String::from_utf8_lossy(&out.stdout).to_string()
+    };
+
+    let gitconfig = proj.path().join(".gitconfig");
+    let lf = fs::read_to_string(&gitconfig).unwrap();
+    assert!(
+        lf.contains('\n') && !lf.contains('\r'),
+        "precondition: init writes .gitconfig with LF line endings"
+    );
+    let crlf = lf.replace('\n', "\r\n");
+    fs::write(&gitconfig, &crlf).unwrap();
+    let stdout = status();
+    assert!(
+        stdout.contains(".gitconfig: In Sync"),
+        "a CRLF-only rewrite must stay In Sync. Output was: {stdout}"
+    );
+
+    // Negative control: a real edit to one line of the CRLF file is drift.
+    fs::write(&gitconfig, crlf.replacen("\r\n", " ; edited\r\n", 1)).unwrap();
+    let stdout = status();
+    assert!(
+        stdout.contains(".gitconfig: Locally Modified"),
+        "an edited CRLF file must be Locally Modified. Output was: {stdout}"
+    );
+}
+
+#[test]
 fn test_cli_project_init_and_doctor_host_flags() {
     let bin = env!("CARGO_BIN_EXE_ude");
     let proj = tempdir().unwrap();
