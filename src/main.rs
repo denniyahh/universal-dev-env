@@ -404,8 +404,10 @@ fn main() {
             for rel in &managed_rels {
                 let p = project_path.join(rel);
                 if let Ok(bytes) = fs::read(&p) {
-                    let hash = sync::SyncEngine::compute_hash(&bytes);
-                    let content = String::from_utf8(bytes).ok();
+                    let hash = sync::SyncEngine::fingerprint(&bytes);
+                    let content = String::from_utf8(bytes)
+                        .ok()
+                        .map(|text| sync::SyncEngine::normalize_eol(&text));
                     project_state.record_file(rel, hash, content);
                 }
             }
