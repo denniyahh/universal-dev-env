@@ -2556,6 +2556,102 @@ mod tests {
         );
     }
 
+    /// A bare remote seeded with one template on `main` whose pre-receive hook is the
+    /// POSIX sh script `hook` (installed after seeding, mode 0o755).
+    #[cfg(unix)]
+    fn bare_remote_with_pre_receive(git: &GitFixture, hook: &str) -> tempfile::TempDir {
+        use std::os::unix::fs::PermissionsExt;
+        let bare = tempdir().unwrap();
+        git.run(bare.path(), &["init", "--bare", "-b", "main"]);
+        let seed = tempdir().unwrap();
+        git.run(seed.path(), &["init", "-b", "main"]);
+        let tmpl = seed
+            .path()
+            .join("templates/projects/generic/gitconfig.repo");
+        fs::create_dir_all(tmpl.parent().unwrap()).unwrap();
+        fs::write(&tmpl, "[core]\n  autocrlf = true\n").unwrap();
+        git.run(seed.path(), &["add", "-A"]);
+        git.run(seed.path(), &["commit", "-m", "seed"]);
+        git.run(
+            seed.path(),
+            &["push", bare.path().to_str().unwrap(), "main"],
+        );
+        let hook_path = bare.path().join("hooks/pre-receive");
+        fs::write(&hook_path, hook).unwrap();
+        fs::set_permissions(&hook_path, fs::Permissions::from_mode(0o755)).unwrap();
+        bare
+    }
+
+    /// Clones `bare` into a fresh cache, edits the managed template and pushes directly.
+    /// Returns the push result and how long push_to_remote took.
+    #[cfg(unix)]
+    fn direct_push_through(
+        engine: &SyncEngine,
+        bare: &Path,
+    ) -> (Result<String, String>, std::time::Duration) {
+        let cache = tempdir().unwrap();
+        let (tmpl_dir, _lock) = engine
+            .ensure_remote_repo(bare.to_str().unwrap(), "main", cache.path())
+            .expect("cache checkout of the bare remote");
+        let checkout = tmpl_dir.parent().unwrap();
+        let managed = tmpl_dir.join("projects/generic/gitconfig.repo");
+        fs::write(&managed, "[core]\n  autocrlf = false\n").unwrap();
+        let start = std::time::Instant::now();
+        let res = engine.push_to_remote(checkout, "main", false, &[managed]);
+        (res, start.elapsed())
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_push_timeout_hanging_hook() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new()
+            .with_extra_env(git.gitconfig_env())
+            .with_limits(ProcessLimits {
+                local: Duration::from_secs(10),
+                network: Duration::from_millis(1500),
+            });
+
+        let hanging = bare_remote_with_pre_receive(&git, "#!/bin/sh\nsleep 20\n");
+        let main_before = git.output(hanging.path(), &["rev-parse", "refs/heads/main"]);
+        let (res, elapsed) = direct_push_through(&engine, hanging.path());
+        let err = match res {
+            Ok(msg) => panic!("push through a hanging hook returned Ok after {elapsed:?}: {msg}"),
+            Err(e) => e,
+        };
+        assert!(
+            err.contains("git push"),
+            "error does not name git push: {err}"
+        );
+        assert!(
+            err.contains("timed out after 1.5s"),
+            "error does not name the limit: {err}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(8),
+            "push_to_remote took {elapsed:?}"
+        );
+        assert_eq!(
+            git.output(hanging.path(), &["rev-parse", "refs/heads/main"]),
+            main_before,
+            "remote main moved although the push was cancelled"
+        );
+
+        // Negative control: an accepting hook under the same limits lets the push through.
+        let accepting = bare_remote_with_pre_receive(&git, "#!/bin/sh\nexit 0\n");
+        let main_before = git.output(accepting.path(), &["rev-parse", "refs/heads/main"]);
+        let (res, _) = direct_push_through(&engine, accepting.path());
+        assert!(
+            res.is_ok(),
+            "push through an accepting hook failed: {res:?}"
+        );
+        assert_ne!(
+            git.output(accepting.path(), &["rev-parse", "refs/heads/main"]),
+            main_before,
+            "remote main did not advance after a successful push"
+        );
+    }
+
     #[test]
     fn test_post_commit_verification_catches_hook_injected_secrets_and_rolls_back() {
         let engine = SyncEngine::new();

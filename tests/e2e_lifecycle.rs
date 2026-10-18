@@ -82,7 +82,6 @@ impl GitFixture {
         run_checked(self.cmd(dir), args);
     }
 
-    #[allow(dead_code)] // same API as the sync unit-test helper; no e2e test reads output yet
     fn output(&self, dir: &Path, args: &[&str]) -> String {
         let out = run_checked(self.cmd(dir), args);
         String::from_utf8_lossy(&out.stdout).trim().to_string()
@@ -785,4 +784,30 @@ fn test_sync_ignores_inherited_git_dir() {
             "ude sync status ({run} run) modified the decoy repository named by GIT_DIR"
         );
     }
+
+    // sync push of a local edit: the real remote advances, the decoy stays untouched.
+    let main_before = git.output(&bare_remote, &["rev-parse", "refs/heads/main"]);
+    fs::write(
+        local_proj.join("mise.toml"),
+        format!("{init_content}\n# edit pushed with an inherited GIT_DIR\n"),
+    )
+    .unwrap();
+    let push = ude_with_decoy(&["sync", "push", "--remote", &bare_url]);
+    assert!(
+        push.status.success(),
+        "ude sync push must succeed with an inherited GIT_DIR. Out: {}\nErr: {}",
+        String::from_utf8_lossy(&push.stdout),
+        String::from_utf8_lossy(&push.stderr)
+    );
+    assert_ne!(
+        git.output(&bare_remote, &["rev-parse", "refs/heads/main"]),
+        main_before,
+        "ude sync push did not advance the real remote's main. Out: {}",
+        String::from_utf8_lossy(&push.stdout)
+    );
+    assert_eq!(
+        snapshot_tree(&decoy),
+        decoy_before,
+        "ude sync push modified the decoy repository named by GIT_DIR"
+    );
 }
