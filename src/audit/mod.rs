@@ -125,12 +125,16 @@ impl Auditor {
         });
 
         // 3. Global git config GPG format
-        let gpg_format = std::process::Command::new("git")
-            .args(["config", "--global", "--get", "gpg.format"])
-            .output()
-            .ok()
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-            .unwrap_or_default();
+        let mut gpg_format_cmd = std::process::Command::new("git");
+        gpg_format_cmd.args(["config", "--global", "--get", "gpg.format"]);
+        let gpg_format = crate::process::run_bounded(
+            gpg_format_cmd,
+            "git config gpg.format",
+            crate::process::LOCAL_TIMEOUT,
+        )
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
 
         reports.push(AuditReport {
             category: "Git & SSH Security".to_string(),
@@ -143,12 +147,16 @@ impl Auditor {
         });
 
         // 4. Global git commit signing
-        let gpg_sign = std::process::Command::new("git")
-            .args(["config", "--global", "--get", "commit.gpgsign"])
-            .output()
-            .ok()
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-            .unwrap_or_default();
+        let mut gpg_sign_cmd = std::process::Command::new("git");
+        gpg_sign_cmd.args(["config", "--global", "--get", "commit.gpgsign"]);
+        let gpg_sign = crate::process::run_bounded(
+            gpg_sign_cmd,
+            "git config commit.gpgsign",
+            crate::process::LOCAL_TIMEOUT,
+        )
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
 
         reports.push(AuditReport {
             category: "Git & SSH Security".to_string(),
@@ -196,13 +204,21 @@ impl Auditor {
             CheckStatus::Warning("Root .gitconfig template is empty (0 bytes)".to_string())
         } else {
             // Verify repository-local .git/config includes the root .gitconfig
-            let include_out = std::process::Command::new("git")
-                .current_dir(repo_path)
-                .args(["config", "--local", "--get-all", "include.path"])
-                .output()
-                .ok()
-                .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
-                .unwrap_or_default();
+            let mut include_cmd = std::process::Command::new("git");
+            include_cmd.current_dir(repo_path).args([
+                "config",
+                "--local",
+                "--get-all",
+                "include.path",
+            ]);
+            let include_out = crate::process::run_bounded(
+                include_cmd,
+                "git config include.path",
+                crate::process::LOCAL_TIMEOUT,
+            )
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+            .unwrap_or_default();
             let has_include = include_out
                 .lines()
                 .any(|l| l.trim() == "../.gitconfig" || l.trim() == ".gitconfig");
@@ -221,13 +237,18 @@ impl Auditor {
         });
 
         // 2. Check core.hooksPath configuration
-        let hooks_path_out = std::process::Command::new("git")
+        let mut hooks_path_cmd = std::process::Command::new("git");
+        hooks_path_cmd
             .current_dir(repo_path)
-            .args(["config", "--get", "core.hooksPath"])
-            .output()
-            .ok()
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-            .unwrap_or_default();
+            .args(["config", "--get", "core.hooksPath"]);
+        let hooks_path_out = crate::process::run_bounded(
+            hooks_path_cmd,
+            "git config core.hooksPath",
+            crate::process::LOCAL_TIMEOUT,
+        )
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
         reports.push(AuditReport {
             category: "Git Hooks".to_string(),
             name: "Repository core.hooksPath".to_string(),
@@ -252,13 +273,20 @@ impl Auditor {
                 CheckStatus::Warning(format!("Hook 'scripts/hooks/{hook}' is empty (0 bytes)"))
             } else {
                 // Verify tracked executable mode 100755 in git index
-                let ls_stage = std::process::Command::new("git")
-                    .current_dir(repo_path)
-                    .args(["ls-files", "--stage", &format!("scripts/hooks/{hook}")])
-                    .output()
-                    .ok()
-                    .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
-                    .unwrap_or_default();
+                let mut ls_stage_cmd = std::process::Command::new("git");
+                ls_stage_cmd.current_dir(repo_path).args([
+                    "ls-files",
+                    "--stage",
+                    &format!("scripts/hooks/{hook}"),
+                ]);
+                let ls_stage = crate::process::run_bounded(
+                    ls_stage_cmd,
+                    "git ls-files --stage",
+                    crate::process::LOCAL_TIMEOUT,
+                )
+                .ok()
+                .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+                .unwrap_or_default();
                 let first_word = ls_stage.split_whitespace().next().unwrap_or("");
                 if first_word == "100755" {
                     CheckStatus::Pass
