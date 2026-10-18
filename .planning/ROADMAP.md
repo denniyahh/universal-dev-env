@@ -26,7 +26,7 @@ Systematic execution of the 4-track remediation plan derived from external adver
   5. Divergent concurrent modifications generate structured `.conflict` files with Myers conflict markers while preserving local developer changes.
   6. Outbound push verifies branch continuity and rejects divergent push candidates safely.
 
-**Plans**: 4/11 plans executed
+**Plans**: 5/11 plans executed
 
 Plans:
 **Wave 1**
@@ -40,7 +40,7 @@ Plans:
 - [x] 01-04: Corrupt or newer `state.json` fails loudly (D-06, forward-version guard), atomic staged state save, exit codes 1/2 (SYNC-02).
 
 **Wave 4** *(blocked on Wave 3 completion)*
-- [ ] 01-05: CRLF-insensitive fingerprints, classification by hash, state schema v2 migration (D-07), line-ending-preserving writes (SYNC-04).
+- [x] 01-05: CRLF-insensitive fingerprints, classification by hash, state schema v2 migration (D-07), line-ending-preserving writes (SYNC-04).
 
 **Wave 5** *(blocked on Wave 4 completion)*
 - [ ] 01-06: Stage-validate-commit for pull/push writes, explicit file modes, `state.json` written last (D-05) (SYNC-02).
@@ -121,7 +121,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Sync Engine & State Hermeticity | 4/11 | In Progress | - |
+| 1. Sync Engine & State Hermeticity | 5/11 | In Progress | - |
 | 2. Sanitizer, Boundaries & Security Hardening | 0/3 | Not started | - |
 | 3. Doctor & CLI Hardening | 0/3 | Not started | - |
 | 4. Templates, Archetypes & Manifest Decoupling | 0/3 | Not started | - |

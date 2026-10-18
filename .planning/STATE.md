@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 01
 current_phase_name: Sync Engine & State Hermeticity
 status: executing
-stopped_at: Completed 01-04-PLAN.md
-last_updated: "2026-10-18T19:25:13.126Z"
+stopped_at: Completed 01-05-PLAN.md
+last_updated: "2026-10-18T19:43:50.180Z"
 last_activity: 2026-10-18
 last_activity_desc: Phase 01 execution started
-state_head: 8451db990c64a7c8296babab9786700494162f90
+state_head: 99d9b440183f7530f13c6d5e2ff6f8bb7049d3cb
 progress:
   total_phases: 4
   completed_phases: 0
   total_plans: 11
-  completed_plans: 4
+  completed_plans: 5
   percent: 0
 ---
 
@@ -28,7 +28,7 @@ See: `.planning/PROJECT.md` (updated 2026-10-12)
 ## Current Position
 
 Phase: 01 (Sync Engine & State Hermeticity) — EXECUTING
-Plan: 5 of 11
+Plan: 6 of 11
 Status: Ready to execute
 Last activity: 2026-10-18 — Phase 01 execution started
 
@@ -62,6 +62,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 01 P02 | 7min | 2 tasks | 2 files |
 | Phase 01 P03 | 15min | 3 tasks | 4 files |
 | Phase 01 P04 | 8min | 2 tasks | 4 files |
+| Phase 01 P05 | 15min | 3 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -79,6 +80,9 @@ Recent decisions affecting current work:
 - [Phase 01]: 01-03: RemoteLockGuard uses std File::try_lock (D-04); its kill/no-inheritance tests are characterization tests that also pass on the old flock code
 - [Phase 01]: 01-04: sync exit codes are EXIT_DRIFT=1 (conflicts) and EXIT_HARD_FAILURE=2 (state, remote-cache, I/O, remote push); SecretBlocked/BoundaryBlocked/policy-shift stay 1 until CLI-04
 - [Phase 01]: 01-04: state.json is written only via stage_to_dir + StagedState::commit (validate at stage and before persist; existing mode kept, new file 0o644); a load never resets a bad file
+- [Phase 01]: 01-05: managed files are classified by SyncEngine::fingerprint (SHA-256 of LF-normalized UTF-8, raw for non-UTF-8) via classify_file; content is used only to merge when all three versions are text; compute_hash stays raw for cache key and PR branch name
+- [Phase 01]: 01-05: state.json is version 2; version 1 files are migrated in memory on load (content records re-hashed and LF-normalized; hash-only records adopt the fingerprint only on a raw-hash match; keys failing validate_safe_write_target are never read)
+- [Phase 01]: 01-05: pull and push write text in the destination's dominant line-ending style (ties LF); absent or binary destinations get the source bytes as is
 
 ### Pending Todos
 
@@ -99,6 +103,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-18T19:25:13.054Z
-Stopped at: Completed 01-04-PLAN.md
+Last session: 2026-10-18T19:43:50.123Z
+Stopped at: Completed 01-05-PLAN.md
 Resume file: None
