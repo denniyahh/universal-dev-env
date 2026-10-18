@@ -9,6 +9,67 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+/// Mode for a new hook or script file.
+pub const EXECUTABLE_MODE: u32 = 0o755;
+
+/// Mode for a new file that is not a hook or script (fixed, not umask-derived).
+pub const REGULAR_MODE: u32 = 0o644;
+
+/// Owner execute bit: an existing hook or script always keeps at least this.
+const OWNER_EXEC: u32 = 0o100;
+
+/// Read bits of the owner, group and other classes.
+const READ_BITS: u32 = 0o444;
+
+/// Shift that turns a class's read bit into the same class's execute bit.
+const READ_TO_EXEC_SHIFT: u32 = 2;
+
+/// Permission and special bits taken over from an existing target.
+const MODE_BITS: u32 = 0o7777;
+
+/// Whether `rel` is a hook or script path that must stay executable.
+fn is_executable_path(rel: &Path) -> bool {
+    rel.starts_with("scripts/hooks")
+        || rel.starts_with("scratch")
+        || rel == Path::new("scripts/check-in-container.sh")
+}
+
+/// Mode bits of `target` when it exists as a regular file (a symlink is never followed).
+fn existing_file_mode(target: &Path) -> Option<u32> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::symlink_metadata(target)
+            .ok()
+            .filter(|meta| meta.is_file())
+            .map(|meta| meta.permissions().mode() & MODE_BITS)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = target;
+        None
+    }
+}
+
+/// Mode for staging `rel` over `target`.
+///
+/// An existing file keeps its mode, so a file the user restricted (0o600) stays
+/// restricted. An existing hook or script additionally gets an execute bit for every
+/// class that can read it plus the owner (0o644 becomes 0o755, 0o700 stays 0o700), so
+/// it is never left non-executable and its access is never widened. A new file gets
+/// [`EXECUTABLE_MODE`] for a hook or script path and [`REGULAR_MODE`] otherwise.
+pub fn file_mode_for(rel: &Path, target: &Path) -> u32 {
+    let executable = is_executable_path(rel);
+    match existing_file_mode(target) {
+        Some(existing) if executable => {
+            existing | ((existing & READ_BITS) >> READ_TO_EXEC_SHIFT) | OWNER_EXEC
+        }
+        Some(existing) => existing,
+        None if executable => EXECUTABLE_MODE,
+        None => REGULAR_MODE,
+    }
+}
+
 /// One staged file: its project-relative path, absolute target and temp file.
 struct StagedWrite {
     rel: PathBuf,

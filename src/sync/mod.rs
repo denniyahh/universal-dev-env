@@ -788,7 +788,7 @@ impl SyncEngine {
         let mut transaction = staging::StagedTransaction::new(local_root);
 
         for (rel, target, content_bytes, ancestor_hash, ancestor_content) in candidates_to_write {
-            let mode = pull_file_mode(&rel, &target);
+            let mode = staging::file_mode_for(&rel, &target);
             if let Err(reason) = transaction.stage_write(&rel, &content_bytes, mode) {
                 return PullResult::IoFailed { path: rel, reason };
             }
@@ -1341,28 +1341,6 @@ fn state_pull_failure(reason: String) -> PullResult {
         path: PathBuf::from(STATE_FILE_REL),
         reason,
     }
-}
-
-/// Mode for a file pull writes: 0o755 for hook and script paths, otherwise the
-/// existing target's mode, or 0o644 for a new file.
-fn pull_file_mode(rel: &Path, target: &Path) -> u32 {
-    let rel_str = rel.to_string_lossy();
-    if rel_str.starts_with("scripts/hooks/")
-        || rel_str.starts_with("scratch/")
-        || rel_str == "scripts/check-in-container.sh"
-    {
-        return 0o755;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if let Ok(meta) = fs::symlink_metadata(target) {
-            return meta.permissions().mode() & 0o7777;
-        }
-    }
-    #[cfg(not(unix))]
-    let _ = target;
-    0o644
 }
 
 /// Push outcome for an error loading or saving `.ude/state.json`.
