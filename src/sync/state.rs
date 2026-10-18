@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -25,8 +26,17 @@ pub struct ProjectState {
 /// Newest `.ude/state.json` schema version this build reads and writes.
 pub const CURRENT_STATE_VERSION: u32 = 1;
 
-/// RED stub for a staged state write.
-#[allow(dead_code)]
+/// Location of the state ledger relative to the project root.
+pub(crate) const STATE_FILE_REL: &str = ".ude/state.json";
+
+/// Mode for a newly created `state.json` (an existing file keeps its own mode).
+#[cfg(unix)]
+const STATE_FILE_MODE: u32 = 0o644;
+
+/// A serialized state written to a temp file in `.ude/`, not yet visible as `state.json`.
+///
+/// [`StagedState::commit`] renames it over `state.json`; dropping it without a commit
+/// deletes the temp file and leaves the existing `state.json` untouched.
 pub struct StagedState {
     temp: tempfile::NamedTempFile,
     project_dir: PathBuf,
@@ -34,8 +44,17 @@ pub struct StagedState {
 }
 
 impl StagedState {
-    /// RED stub: does nothing.
+    /// Re-validates `.ude/state.json` against symlinks and escapes, then atomically
+    /// replaces it with the staged content.
     pub fn commit(self) -> Result<(), String> {
+        super::validate_safe_write_target(&self.project_dir, Path::new(STATE_FILE_REL))?;
+        self.temp.persist(&self.target).map_err(|e| {
+            format!(
+                "Failed to replace state file {}: {}",
+                self.target.display(),
+                e.error
+            )
+        })?;
         Ok(())
     }
 }
@@ -57,7 +76,7 @@ impl ProjectState {
     /// An unreadable or corrupt file, version 0, or a version newer than
     /// [`CURRENT_STATE_VERSION`] is an error: the file is never reset or rewritten here.
     pub fn load_from_dir(project_dir: &Path) -> Result<Self, String> {
-        let state_path = project_dir.join(".ude/state.json");
+        let state_path = project_dir.join(STATE_FILE_REL);
         let content = match fs::read_to_string(&state_path) {
             Ok(content) => content,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
@@ -87,28 +106,43 @@ impl ProjectState {
         }
     }
 
-    /// Saves the project state to `<project_dir>/.ude/state.json`.
+    /// Atomically saves the project state to `<project_dir>/.ude/state.json`
+    /// ([`Self::stage_to_dir`] followed by [`StagedState::commit`]).
     pub fn save_to_dir(&self, project_dir: &Path) -> Result<(), String> {
+        self.stage_to_dir(project_dir)?.commit()
+    }
+
+    /// Writes the serialized state to a temp file in `<project_dir>/.ude/` without
+    /// touching `state.json`. Refuses a symlinked or escaping `.ude` / `state.json`
+    /// before creating anything. The temp file gets the existing `state.json` mode,
+    /// or [`STATE_FILE_MODE`] when there is none.
+    pub fn stage_to_dir(&self, project_dir: &Path) -> Result<StagedState, String> {
+        let target = super::validate_safe_write_target(project_dir, Path::new(STATE_FILE_REL))?;
         let ude_dir = project_dir.join(".ude");
         fs::create_dir_all(&ude_dir)
             .map_err(|e| format!("Failed to create .ude directory: {e}"))?;
-        let state_path = ude_dir.join("state.json");
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| format!("Failed to serialize state: {e}"))?;
-        fs::write(&state_path, json)
-            .map_err(|e| format!("Failed to write state file {}: {e}", state_path.display()))?;
-        Ok(())
-    }
-
-    /// RED stub: writes directly and returns a staged handle whose commit does nothing.
-    pub fn stage_to_dir(&self, project_dir: &Path) -> Result<StagedState, String> {
-        self.save_to_dir(project_dir)?;
-        let ude_dir = project_dir.join(".ude");
-        let temp = tempfile::NamedTempFile::new_in(&ude_dir).map_err(|e| e.to_string())?;
+        let write_err =
+            |e: std::io::Error| format!("Failed to stage state file {}: {e}", target.display());
+        let mut temp = tempfile::NamedTempFile::new_in(&ude_dir).map_err(write_err)?;
+        temp.write_all(json.as_bytes()).map_err(write_err)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = match fs::symlink_metadata(&target) {
+                Ok(meta) => meta.permissions().mode() & 0o7777,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => STATE_FILE_MODE,
+                Err(e) => return Err(write_err(e)),
+            };
+            temp.as_file()
+                .set_permissions(fs::Permissions::from_mode(mode))
+                .map_err(write_err)?;
+        }
         Ok(StagedState {
             temp,
             project_dir: project_dir.to_path_buf(),
-            target: ude_dir.join("state.json"),
+            target,
         })
     }
 
