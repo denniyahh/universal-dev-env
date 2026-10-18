@@ -2395,6 +2395,208 @@ mod tests {
         assert_eq!(tmp_leftovers(local.path()), Vec::<PathBuf>::new());
     }
 
+    #[cfg(unix)]
+    fn file_mode(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        fs::symlink_metadata(path).unwrap().permissions().mode() & 0o7777
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_staged_write_modes() {
+        use std::os::unix::fs::PermissionsExt;
+        let engine = SyncEngine::new();
+
+        // New files: a hook gets 0o755, a config gets 0o644 (never the 0o600 temp default).
+        let local = tempdir().unwrap();
+        let upstream = tempdir().unwrap();
+        for (up_rel, text) in [
+            (
+                "projects/generic/gitconfig.repo",
+                "[core]\n  autocrlf = input\n",
+            ),
+            ("projects/generic/hooks/pre-commit", "#!/bin/sh\nexit 0\n"),
+        ] {
+            let path = upstream.path().join(up_rel);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, text).unwrap();
+        }
+        let ctx =
+            crate::template::TemplateContext::detect_for_project(local.path(), "test-proj", "rust");
+        let res = engine.pull_updates(local.path(), upstream.path(), &ctx);
+        assert_eq!(res, PullResult::Success { applied_files: 2 });
+        assert_eq!(
+            file_mode(&local.path().join("scripts/hooks/pre-commit")),
+            0o755
+        );
+        assert_eq!(file_mode(&local.path().join(".gitconfig")), 0o644);
+
+        // Existing files rewritten by pull (local == ancestor, upstream changed).
+        // (local path, upstream path, mode before, expected mode after)
+        let cases = [
+            (
+                ".gitignore",
+                "projects/generic/gitignore.repo",
+                0o640,
+                0o640,
+            ),
+            (
+                ".gitconfig",
+                "projects/generic/gitconfig.repo",
+                0o600,
+                0o600,
+            ),
+            (
+                "scripts/hooks/pre-push",
+                "projects/generic/hooks/pre-push",
+                0o644,
+                0o755,
+            ),
+            (
+                "scripts/hooks/commit-msg",
+                "projects/generic/hooks/commit-msg",
+                0o700,
+                0o700,
+            ),
+        ];
+        let local = tempdir().unwrap();
+        let upstream = tempdir().unwrap();
+        let mut state = ProjectState::default();
+        for (rel, up_rel, before, _) in cases {
+            let old = format!("old {rel}\n");
+            let path = local.path().join(rel);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, &old).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(before)).unwrap();
+            state.record_file(
+                Path::new(rel),
+                SyncEngine::fingerprint(old.as_bytes()),
+                Some(old.clone()),
+            );
+            let up_path = upstream.path().join(up_rel);
+            fs::create_dir_all(up_path.parent().unwrap()).unwrap();
+            fs::write(up_path, format!("new {rel}\n")).unwrap();
+        }
+        state.save_to_dir(local.path()).unwrap();
+        let res = engine.pull_updates(local.path(), upstream.path(), &ctx);
+        assert_eq!(res, PullResult::Success { applied_files: 4 });
+        for (rel, _, before, expected) in cases {
+            let path = local.path().join(rel);
+            assert_eq!(
+                fs::read_to_string(&path).unwrap(),
+                format!("new {rel}\n"),
+                "{rel} was not rewritten"
+            );
+            let after = file_mode(&path);
+            assert_eq!(after, expected, "{rel}: {before:o} became {after:o}");
+            // Negative control: the 0o600 temp default never leaks onto a pulled file.
+            assert!(
+                after != 0o600 || before == 0o600,
+                "{rel} got the temp default 0o600"
+            );
+        }
+    }
+
+    #[test]
+    fn test_staging_abort_removes_created_dirs() {
+        let root = tempdir().unwrap();
+        // A pre-existing empty directory is not ours to remove.
+        fs::create_dir(root.path().join("scratch")).unwrap();
+        // A directory where a file is expected makes the last staging step fail.
+        fs::create_dir(root.path().join("mise.toml")).unwrap();
+
+        let mut transaction = staging::StagedTransaction::new(root.path());
+        for (rel, mode) in [
+            ("scripts/hooks/pre-commit", 0o755),
+            (".agents/AGENTS.md", 0o644),
+            ("scratch/new-worktree.sh", 0o755),
+        ] {
+            transaction
+                .stage_write(Path::new(rel), b"content\n", mode)
+                .unwrap();
+        }
+        assert!(root.path().join("scripts/hooks").is_dir());
+        assert!(root.path().join(".agents").is_dir());
+        let err = transaction
+            .stage_write(Path::new("mise.toml"), b"x\n", 0o644)
+            .unwrap_err();
+        assert!(err.contains("directory"), "{err}");
+        drop(transaction);
+
+        assert!(!root.path().join("scripts").exists());
+        assert!(!root.path().join(".agents").exists());
+        assert!(root.path().join("scratch").is_dir());
+        assert_eq!(tmp_leftovers(root.path()), Vec::<PathBuf>::new());
+
+        // Negative control: a committed transaction keeps the directories it created.
+        let root = tempdir().unwrap();
+        let mut transaction = staging::StagedTransaction::new(root.path());
+        transaction
+            .stage_write(Path::new("scripts/hooks/pre-commit"), b"hook\n", 0o755)
+            .unwrap();
+        transaction
+            .stage_write(Path::new(".agents/AGENTS.md"), b"agents\n", 0o644)
+            .unwrap();
+        let applied = transaction.commit().unwrap();
+        assert_eq!(
+            applied,
+            vec![
+                PathBuf::from("scripts/hooks/pre-commit"),
+                PathBuf::from(".agents/AGENTS.md")
+            ]
+        );
+        assert_eq!(
+            fs::read_to_string(root.path().join("scripts/hooks/pre-commit")).unwrap(),
+            "hook\n"
+        );
+        assert!(root.path().join(".agents/AGENTS.md").is_file());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_commit_revalidates_symlink_before_rename() {
+        let root = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        let victim = outside.path().join("victim");
+        fs::write(&victim, "outside\n").unwrap();
+        let target = root.path().join(".gitconfig");
+        fs::write(&target, "old\n").unwrap();
+
+        let mut transaction = staging::StagedTransaction::new(root.path());
+        transaction
+            .stage_write(Path::new(".gitconfig"), b"new\n", 0o644)
+            .unwrap();
+        fs::remove_file(&target).unwrap();
+        std::os::unix::fs::symlink(&victim, &target).unwrap();
+
+        let err = transaction.commit().unwrap_err();
+        assert!(err.contains("symlink"), "{err}");
+        assert!(err.contains("0 of 1"), "{err}");
+        assert!(
+            fs::symlink_metadata(&target)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the planted symlink must not be replaced"
+        );
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "outside\n");
+        assert_eq!(tmp_leftovers(root.path()), Vec::<PathBuf>::new());
+
+        // Negative control: without the swap the same commit succeeds.
+        let root = tempdir().unwrap();
+        let target = root.path().join(".gitconfig");
+        fs::write(&target, "old\n").unwrap();
+        let mut transaction = staging::StagedTransaction::new(root.path());
+        transaction
+            .stage_write(Path::new(".gitconfig"), b"new\n", 0o644)
+            .unwrap();
+        assert_eq!(
+            transaction.commit().unwrap(),
+            vec![PathBuf::from(".gitconfig")]
+        );
+        assert_eq!(fs::read_to_string(&target).unwrap(), "new\n");
+    }
+
     #[test]
     fn test_push_updates_blocked_on_conflict() {
         let engine = SyncEngine::new();
