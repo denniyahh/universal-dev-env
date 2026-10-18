@@ -13,6 +13,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// Exit code for drift, conflicts or skipped files.
+const EXIT_DRIFT: i32 = 1;
+/// Exit code for hard failures (I/O, state, remote).
+const EXIT_HARD_FAILURE: i32 = 2;
+
 fn main() {
     let args = cli::Cli::parse();
 
@@ -481,7 +486,7 @@ fn main() {
                             process::redact_userinfo(r_url),
                             e
                         );
-                        std::process::exit(1);
+                        std::process::exit(EXIT_HARD_FAILURE);
                     }
                 }
             } else {
@@ -510,8 +515,17 @@ fn main() {
                         "project",
                         "generic",
                     );
-                    let states =
-                        engine.scan_project(&local_project, &root_template_dir, Some(&sync_ctx));
+                    let states = match engine.scan_project(
+                        &local_project,
+                        &root_template_dir,
+                        Some(&sync_ctx),
+                    ) {
+                        Ok(states) => states,
+                        Err(e) => {
+                            eprintln!("  {} Failed to read sync state: {e}", "✗".red());
+                            std::process::exit(EXIT_HARD_FAILURE);
+                        }
+                    };
                     for s in states {
                         match s.status {
                             sync::SyncStatus::InSync => {
@@ -598,7 +612,7 @@ fn main() {
                             eprintln!(
                                 "     Resolve local modifications or create a .local override before pulling."
                             );
-                            std::process::exit(1);
+                            std::process::exit(EXIT_DRIFT);
                         }
                         sync::PullResult::IoFailed { path, reason } => {
                             eprintln!(
@@ -607,7 +621,7 @@ fn main() {
                                 path.display(),
                                 reason
                             );
-                            std::process::exit(1);
+                            std::process::exit(EXIT_HARD_FAILURE);
                         }
                     }
                 }
@@ -737,8 +751,18 @@ fn main() {
                                         println!("  {} {msg}", "✓".green());
                                         if !pr {
                                             let mut project_state =
-                                                sync::ProjectState::load_from_dir(&local_project)
-                                                    .unwrap_or_default();
+                                                match sync::ProjectState::load_from_dir(
+                                                    &local_project,
+                                                ) {
+                                                    Ok(state) => state,
+                                                    Err(e) => {
+                                                        eprintln!(
+                                                            "  {} Failed to read sync state: {e}",
+                                                            "✗".red()
+                                                        );
+                                                        std::process::exit(EXIT_HARD_FAILURE);
+                                                    }
+                                                };
                                             for (rel, hash, content) in updated_records {
                                                 project_state.record_file(&rel, hash, content);
                                             }
@@ -763,7 +787,7 @@ fn main() {
                                             "  {} Failed to push to remote: {err}",
                                             "✗".red()
                                         );
-                                        std::process::exit(1);
+                                        std::process::exit(EXIT_HARD_FAILURE);
                                     }
                                 }
                             }
@@ -791,7 +815,7 @@ fn main() {
                                 "✗".red(),
                                 path.display()
                             );
-                            std::process::exit(1);
+                            std::process::exit(EXIT_DRIFT);
                         }
                         sync::PushResult::IoFailed { path, reason } => {
                             eprintln!(
@@ -800,11 +824,11 @@ fn main() {
                                 path.display(),
                                 reason
                             );
-                            std::process::exit(1);
+                            std::process::exit(EXIT_HARD_FAILURE);
                         }
                         sync::PushResult::GitRemoteFailed { reason } => {
                             eprintln!("  {} Remote sync failed: {}", "✗".red(), reason);
-                            std::process::exit(1);
+                            std::process::exit(EXIT_HARD_FAILURE);
                         }
                     }
                 }

@@ -37,16 +37,39 @@ impl Default for ProjectState {
 
 impl ProjectState {
     /// Loads the project state from `<project_dir>/.ude/state.json`.
-    /// Returns default empty state if the file does not exist or is invalid.
+    ///
+    /// A missing file yields the default empty state (first sync of a fresh project).
+    /// An unreadable or corrupt file, version 0, or a version newer than
+    /// [`CURRENT_STATE_VERSION`] is an error: the file is never reset or rewritten here.
     pub fn load_from_dir(project_dir: &Path) -> Result<Self, String> {
         let state_path = project_dir.join(".ude/state.json");
-        if state_path.exists()
-            && let Ok(content) = fs::read_to_string(&state_path)
-            && let Ok(state) = serde_json::from_str::<ProjectState>(&content)
-        {
-            return Ok(state);
+        let content = match fs::read_to_string(&state_path) {
+            Ok(content) => content,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
+            Err(e) => {
+                return Err(format!(
+                    "Failed to read state file {}: {e}",
+                    state_path.display()
+                ));
+            }
+        };
+        let state = serde_json::from_str::<ProjectState>(&content).map_err(|e| {
+            format!(
+                "State file {} is corrupt ({e}); refusing to reset it. Fix or remove the file, then re-run.",
+                state_path.display()
+            )
+        })?;
+        match state.version {
+            0 => Err(format!(
+                "State file {} has unsupported version 0",
+                state_path.display()
+            )),
+            v if v > CURRENT_STATE_VERSION => Err(format!(
+                "State file {} has version {v}, written by a newer ude (this build supports up to {CURRENT_STATE_VERSION}); upgrade ude",
+                state_path.display()
+            )),
+            _ => Ok(state),
         }
-        Ok(Self::default())
     }
 
     /// Saves the project state to `<project_dir>/.ude/state.json`.
