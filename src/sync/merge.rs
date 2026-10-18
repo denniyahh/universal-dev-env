@@ -1,4 +1,4 @@
-use similar::{capture_diff_slices, Algorithm, DiffOp};
+use similar::{Algorithm, DiffOp, capture_diff_slices};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum MergeResult {
@@ -149,7 +149,9 @@ pub fn merge_3way_text(base: &str, local: &str, upstream: &str) -> MergeResult {
     // Sort edits by base_start. If base_start is equal (e.g. insertion followed by replace),
     // stable sort ensures order.
     combined.sort_by_key(|e| match e {
-        TaggedEdit::Local(ed) | TaggedEdit::Upstream(ed) | TaggedEdit::Both(ed) => (ed.base_start, ed.base_end),
+        TaggedEdit::Local(ed) | TaggedEdit::Upstream(ed) | TaggedEdit::Both(ed) => {
+            (ed.base_start, ed.base_end)
+        }
     });
 
     let mut result_lines: Vec<&str> = Vec::new();

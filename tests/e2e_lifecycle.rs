@@ -96,14 +96,23 @@ fn test_cli_e2e_init_and_sync_lifecycle() {
 
     // 1. Run `ude init` with --path
     let init_status = Command::new(bin)
-        .args(["init", "--path", &proj.path().to_string_lossy(), "--type", "rust"])
+        .args([
+            "init",
+            "--path",
+            &proj.path().to_string_lossy(),
+            "--type",
+            "rust",
+        ])
         .status()
         .expect("ude init execution");
     assert!(init_status.success(), "ude init must succeed");
 
     // Verify state.json was created
     let state_file = proj.path().join(".ude/state.json");
-    assert!(state_file.exists(), ".ude/state.json must be created by init");
+    assert!(
+        state_file.exists(),
+        ".ude/state.json must be created by init"
+    );
     let state_content = fs::read_to_string(&state_file).unwrap();
     assert!(state_content.contains("\"version\": 1"));
     assert!(state_content.contains(".gitconfig"));
@@ -117,8 +126,14 @@ fn test_cli_e2e_init_and_sync_lifecycle() {
         .expect("ude sync status execution");
     assert!(status_output.status.success());
     let stdout = String::from_utf8_lossy(&status_output.stdout);
-    assert!(stdout.contains(".gitconfig: In Sync"), "Output was: {stdout}");
-    assert!(stdout.contains("mise.toml: In Sync"), "Output was: {stdout}");
+    assert!(
+        stdout.contains(".gitconfig: In Sync"),
+        "Output was: {stdout}"
+    );
+    assert!(
+        stdout.contains("mise.toml: In Sync"),
+        "Output was: {stdout}"
+    );
 
     // 3. Edit local file
     let loc_mise = proj.path().join("mise.toml");
@@ -130,8 +145,14 @@ fn test_cli_e2e_init_and_sync_lifecycle() {
         .output()
         .expect("ude sync status execution");
     let stdout2 = String::from_utf8_lossy(&status_output2.stdout);
-    assert!(stdout2.contains("mise.toml: Locally Modified"), "Output was: {stdout2}");
-    assert!(stdout2.contains(".gitconfig: In Sync"), "Output was: {stdout2}");
+    assert!(
+        stdout2.contains("mise.toml: Locally Modified"),
+        "Output was: {stdout2}"
+    );
+    assert!(
+        stdout2.contains(".gitconfig: In Sync"),
+        "Output was: {stdout2}"
+    );
 }
 
 #[test]
@@ -141,7 +162,13 @@ fn test_cli_project_init_and_doctor_host_flags() {
 
     // Verify `ude project init <path>` subcommand syntax works
     let init_status = Command::new(bin)
-        .args(["project", "init", &proj.path().to_string_lossy(), "--type", "node"])
+        .args([
+            "project",
+            "init",
+            &proj.path().to_string_lossy(),
+            "--type",
+            "node",
+        ])
         .status()
         .expect("ude project init execution");
     assert!(init_status.success(), "ude project init must succeed");
@@ -154,7 +181,10 @@ fn test_cli_project_init_and_doctor_host_flags() {
         .expect("ude doctor --host execution");
     let code = doctor_output.status.code().unwrap_or(-1);
     // Exit code must be either 0, 1 (warnings), or 2 (critical security failed)
-    assert!(code == 0 || code == 1 || code == 2, "doctor --host returned unexpected exit code {code}");
+    assert!(
+        code == 0 || code == 1 || code == 2,
+        "doctor --host returned unexpected exit code {code}"
+    );
 }
 
 #[test]
@@ -181,7 +211,11 @@ fn test_doctor_critical_security_exit_code_2_and_negative_control() {
     // Negative control: satisfy the critical security invariants
     let config_dir = fake_home.path().join(".config");
     fs::create_dir_all(config_dir.join("git")).unwrap();
-    fs::write(config_dir.join("git/allowed_signers"), "alice@example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI...\n").unwrap();
+    fs::write(
+        config_dir.join("git/allowed_signers"),
+        "alice@example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI...\n",
+    )
+    .unwrap();
 
     // Configure git signing in isolated environment: the global config the ude
     // binary reads under HOME=<fake home> (pinned below so both sides use one file)
@@ -220,10 +254,19 @@ fn test_init_fails_on_existing_regular_file_and_preserves_custom_gitignore() {
     fs::write(&file_dest, "regular file content").unwrap();
 
     let init_fail = Command::new(bin)
-        .args(["project", "init", &file_dest.to_string_lossy(), "--type", "node"])
+        .args([
+            "project",
+            "init",
+            &file_dest.to_string_lossy(),
+            "--type",
+            "node",
+        ])
         .status()
         .expect("ude init execution");
-    assert!(!init_fail.success(), "init must fail when destination is a regular file");
+    assert!(
+        !init_fail.success(),
+        "init must fail when destination is a regular file"
+    );
 
     // 2. Defect 5 reproduction: re-running initialization must not overwrite custom .gitignore
     let proj_dir = temp.path().join("new_project");
@@ -232,10 +275,19 @@ fn test_init_fails_on_existing_regular_file_and_preserves_custom_gitignore() {
     fs::write(proj_dir.join(".gitignore"), custom_rule).unwrap();
 
     let init_success = Command::new(bin)
-        .args(["project", "init", &proj_dir.to_string_lossy(), "--type", "rust"])
+        .args([
+            "project",
+            "init",
+            &proj_dir.to_string_lossy(),
+            "--type",
+            "rust",
+        ])
         .status()
         .expect("ude init execution");
-    assert!(init_success.success(), "init must succeed for directory destination");
+    assert!(
+        init_success.success(),
+        "init must succeed for directory destination"
+    );
 
     let gitignore_after = fs::read_to_string(proj_dir.join(".gitignore")).unwrap();
     assert!(
@@ -255,7 +307,11 @@ fn test_doctor_empty_allowed_signers_exits_code_2() {
     let config_dir = fake_home.path().join(".config");
     fs::create_dir_all(config_dir.join("git")).unwrap();
     // Empty signers file (comments only)
-    fs::write(config_dir.join("git/allowed_signers"), "# Only a comment\n\n").unwrap();
+    fs::write(
+        config_dir.join("git/allowed_signers"),
+        "# Only a comment\n\n",
+    )
+    .unwrap();
 
     let doctor_output = Command::new(bin)
         .args(["doctor", "--host"])
@@ -286,7 +342,13 @@ fn test_doctor_repo_assertions_detect_unconfigured_include_and_hooks() {
     let fake_home = temp.path().join("home");
     fs::create_dir_all(&fake_home).unwrap();
     let doctor_out = Command::new(bin)
-        .args(["doctor", "--repo", &repo_dir.to_string_lossy(), "--format", "json"])
+        .args([
+            "doctor",
+            "--repo",
+            &repo_dir.to_string_lossy(),
+            "--format",
+            "json",
+        ])
         .env("HOME", &fake_home)
         .env("XDG_CONFIG_HOME", fake_home.join(".config"))
         .env("GIT_CONFIG_GLOBAL", fake_home.join(".gitconfig"))
@@ -294,7 +356,10 @@ fn test_doctor_repo_assertions_detect_unconfigured_include_and_hooks() {
         .expect("ude doctor execution");
 
     let stdout = String::from_utf8_lossy(&doctor_out.stdout);
-    assert!(stdout.contains("Missing root .gitconfig template") || stdout.contains("does not include root .gitconfig"));
+    assert!(
+        stdout.contains("Missing root .gitconfig template")
+            || stdout.contains("does not include root .gitconfig")
+    );
     assert!(stdout.contains("Repository core.hooksPath is unset"));
 
     // Case 2: inert files (empty .gitconfig, hooksPath=/dev/null, empty hook)
@@ -308,14 +373,22 @@ fn test_doctor_repo_assertions_detect_unconfigured_include_and_hooks() {
     fs::write(hooks_dir.join("pre-commit"), "").unwrap();
 
     let doctor_out2 = Command::new(bin)
-        .args(["doctor", "--repo", &repo_dir.to_string_lossy(), "--format", "json"])
+        .args([
+            "doctor",
+            "--repo",
+            &repo_dir.to_string_lossy(),
+            "--format",
+            "json",
+        ])
         .env("HOME", &fake_home)
         .env("XDG_CONFIG_HOME", fake_home.join(".config"))
         .env("GIT_CONFIG_GLOBAL", fake_home.join(".gitconfig"))
         .output()
         .expect("ude doctor execution");
     let stdout2 = String::from_utf8_lossy(&doctor_out2.stdout);
-    assert!(stdout2.contains("empty (0 bytes)") || stdout2.contains("does not include root .gitconfig"));
+    assert!(
+        stdout2.contains("empty (0 bytes)") || stdout2.contains("does not include root .gitconfig")
+    );
     assert!(stdout2.contains("expected 'scripts/hooks'"));
 }
 
@@ -328,15 +401,25 @@ fn test_sync_push_pr_does_not_advance_ancestor_state() {
 
     // 1. Initialize project with ude init
     let init_status = Command::new(bin)
-        .args(["init", "--path", &local_proj.to_string_lossy(), "--type", "rust"])
+        .args([
+            "init",
+            "--path",
+            &local_proj.to_string_lossy(),
+            "--type",
+            "rust",
+        ])
         .status()
         .expect("ude init execution");
     assert!(init_status.success());
 
     // 2. Read baseline ancestor hash of mise.toml
     let state_file = local_proj.join(".ude/state.json");
-    let state_before: serde_json::Value = serde_json::from_str(&fs::read_to_string(&state_file).unwrap()).unwrap();
-    let mise_hash_before = state_before["files"]["mise.toml"]["ancestor_hash"].as_str().unwrap().to_string();
+    let state_before: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&state_file).unwrap()).unwrap();
+    let mise_hash_before = state_before["files"]["mise.toml"]["ancestor_hash"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // 3. Capture baseline content and edit local mise.toml
     let loc_mise = local_proj.join("mise.toml");
@@ -369,7 +452,13 @@ fn test_sync_push_pr_does_not_advance_ancestor_state() {
 
     let push_pr_out = Command::new(bin)
         .current_dir(&local_proj)
-        .args(["sync", "push", "--remote", &remote_dir.to_string_lossy(), "--pr"])
+        .args([
+            "sync",
+            "push",
+            "--remote",
+            &remote_dir.to_string_lossy(),
+            "--pr",
+        ])
         .env("HOME", &fake_home)
         .env("XDG_CONFIG_HOME", &fake_config)
         .env("GIT_CONFIG_GLOBAL", &gitconfig)
@@ -384,11 +473,13 @@ fn test_sync_push_pr_does_not_advance_ancestor_state() {
     );
 
     // 6. Verify: Canonical ancestor state in .ude/state.json must NOT advance to local edit!
-    let state_after: serde_json::Value = serde_json::from_str(&fs::read_to_string(&state_file).unwrap()).unwrap();
-    let mise_hash_after = state_after["files"]["mise.toml"]["ancestor_hash"].as_str().unwrap();
+    let state_after: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&state_file).unwrap()).unwrap();
+    let mise_hash_after = state_after["files"]["mise.toml"]["ancestor_hash"]
+        .as_str()
+        .unwrap();
     assert_eq!(
-        mise_hash_after,
-        mise_hash_before,
+        mise_hash_after, mise_hash_before,
         "PR push must NOT advance canonical ancestor state before PR merge!"
     );
 }
@@ -402,7 +493,13 @@ fn test_sync_push_remote_failure_does_not_advance_ancestor_state() {
 
     // 1. Initialize project
     let init_status = Command::new(bin)
-        .args(["init", "--path", &local_proj.to_string_lossy(), "--type", "rust"])
+        .args([
+            "init",
+            "--path",
+            &local_proj.to_string_lossy(),
+            "--type",
+            "rust",
+        ])
         .status()
         .expect("ude init execution");
     assert!(init_status.success());
@@ -496,10 +593,11 @@ fn test_sync_push_remote_failure_does_not_advance_ancestor_state() {
     // 6. Verify ancestor state in .ude/state.json did NOT advance!
     let state_after: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&state_file).unwrap()).unwrap();
-    let mise_hash_after = state_after["files"]["mise.toml"]["ancestor_hash"].as_str().unwrap();
+    let mise_hash_after = state_after["files"]["mise.toml"]["ancestor_hash"]
+        .as_str()
+        .unwrap();
     assert_eq!(
-        mise_hash_after,
-        mise_hash_before,
+        mise_hash_after, mise_hash_before,
         "Failed remote push must NOT advance canonical ancestor state!"
     );
 
@@ -538,10 +636,11 @@ fn test_sync_push_remote_failure_does_not_advance_ancestor_state() {
 
     let state_final: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&state_file).unwrap()).unwrap();
-    let mise_hash_final = state_final["files"]["mise.toml"]["ancestor_hash"].as_str().unwrap();
+    let mise_hash_final = state_final["files"]["mise.toml"]["ancestor_hash"]
+        .as_str()
+        .unwrap();
     assert_ne!(
-        mise_hash_final,
-        mise_hash_before,
+        mise_hash_final, mise_hash_before,
         "Successful push MUST advance ancestor state to the newly synchronized hash!"
     );
 }

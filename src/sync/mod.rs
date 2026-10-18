@@ -36,11 +36,23 @@ pub enum PushResult {
         staged_files: Vec<PathBuf>,
         updated_records: Vec<(PathBuf, String, Option<String>)>,
     },
-    SecretBlocked { path: PathBuf, reason: String },
-    ConflictBlocked { path: PathBuf },
-    BoundaryBlocked { path: PathBuf },
-    IoFailed { path: PathBuf, reason: String },
-    GitRemoteFailed { reason: String },
+    SecretBlocked {
+        path: PathBuf,
+        reason: String,
+    },
+    ConflictBlocked {
+        path: PathBuf,
+    },
+    BoundaryBlocked {
+        path: PathBuf,
+    },
+    IoFailed {
+        path: PathBuf,
+        reason: String,
+    },
+    GitRemoteFailed {
+        reason: String,
+    },
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -287,7 +299,13 @@ impl SyncEngine {
         upstream_content: Option<&str>,
         has_local_override: bool,
     ) -> SyncStatus {
-        Self::compare_3way_with_merge(ancestor_content, local_content, upstream_content, has_local_override).0
+        Self::compare_3way_with_merge(
+            ancestor_content,
+            local_content,
+            upstream_content,
+            has_local_override,
+        )
+        .0
     }
 
     /// Detects sync status between a local file and upstream content (delegates to 3-way comparison with no ancestor).
@@ -340,7 +358,8 @@ impl SyncEngine {
                     if let Ok(bytes) = fs::read(p) {
                         if let Ok(raw_str) = std::str::from_utf8(&bytes) {
                             let raw_string = raw_str.to_string();
-                            let should_render = p.extension().and_then(|e| e.to_str()) == Some("jinja")
+                            let should_render = p.extension().and_then(|e| e.to_str())
+                                == Some("jinja")
                                 || raw_string.contains("{{");
                             if should_render {
                                 if let Some(c) = ctx {
@@ -380,7 +399,10 @@ impl SyncEngine {
                     upstream_content.as_deref(),
                     has_local_override,
                 )
-            } else if local_content.is_some() && upstream_content.is_some() && ancestor_hash.is_none() {
+            } else if local_content.is_some()
+                && upstream_content.is_some()
+                && ancestor_hash.is_none()
+            {
                 Self::compare_3way_with_merge(
                     None,
                     local_content.as_deref(),
@@ -441,7 +463,10 @@ impl SyncEngine {
                 .map_err(|e| format!("Failed to execute git clone: {e}"))?;
 
             if !status.success() {
-                return Err(format!("git clone failed with exit status {:?}", status.code()));
+                return Err(format!(
+                    "git clone failed with exit status {:?}",
+                    status.code()
+                ));
             }
         } else {
             // Fetch latest branch
@@ -452,7 +477,10 @@ impl SyncEngine {
                 .map_err(|e| format!("Failed to execute git fetch: {e}"))?;
 
             if !status.success() {
-                return Err(format!("git fetch failed with exit status {:?}", status.code()));
+                return Err(format!(
+                    "git fetch failed with exit status {:?}",
+                    status.code()
+                ));
             }
 
             let status = Command::new("git")
@@ -462,7 +490,10 @@ impl SyncEngine {
                 .map_err(|e| format!("Failed to checkout target branch: {e}"))?;
 
             if !status.success() {
-                return Err(format!("git checkout -B {branch} failed with exit status {:?}", status.code()));
+                return Err(format!(
+                    "git checkout -B {branch} failed with exit status {:?}",
+                    status.code()
+                ));
             }
 
             let status = Command::new("git")
@@ -472,7 +503,10 @@ impl SyncEngine {
                 .map_err(|e| format!("Failed to execute git reset: {e}"))?;
 
             if !status.success() {
-                return Err(format!("git reset failed with exit status {:?}", status.code()));
+                return Err(format!(
+                    "git reset failed with exit status {:?}",
+                    status.code()
+                ));
             }
 
             let _ = Command::new("git")
@@ -553,30 +587,32 @@ impl SyncEngine {
                     }
                 };
 
-                let (content_bytes, ancestor_content) = if let Ok(raw_str) = std::str::from_utf8(&upstream_bytes) {
-                    let should_render = upstream_path.extension().and_then(|e| e.to_str()) == Some("jinja")
-                        || raw_str.contains("{{");
-                    let rendered = if should_render {
-                        match renderer.render_str(raw_str, ctx) {
-                            Ok(r) => r,
-                            Err(e) => {
-                                return PullResult::IoFailed {
-                                    path: s.relative_path.clone(),
-                                    reason: format!(
-                                        "Failed to render template {}: {e}",
-                                        upstream_path.display()
-                                    ),
-                                };
+                let (content_bytes, ancestor_content) =
+                    if let Ok(raw_str) = std::str::from_utf8(&upstream_bytes) {
+                        let should_render = upstream_path.extension().and_then(|e| e.to_str())
+                            == Some("jinja")
+                            || raw_str.contains("{{");
+                        let rendered = if should_render {
+                            match renderer.render_str(raw_str, ctx) {
+                                Ok(r) => r,
+                                Err(e) => {
+                                    return PullResult::IoFailed {
+                                        path: s.relative_path.clone(),
+                                        reason: format!(
+                                            "Failed to render template {}: {e}",
+                                            upstream_path.display()
+                                        ),
+                                    };
+                                }
                             }
-                        }
+                        } else {
+                            raw_str.to_string()
+                        };
+                        let b = rendered.as_bytes().to_vec();
+                        (b, Some(rendered))
                     } else {
-                        raw_str.to_string()
+                        (upstream_bytes, None)
                     };
-                    let b = rendered.as_bytes().to_vec();
-                    (b, Some(rendered))
-                } else {
-                    (upstream_bytes, None)
-                };
 
                 let new_hash = Self::compute_hash(&content_bytes);
                 candidates_to_write.push((
@@ -698,7 +734,9 @@ impl SyncEngine {
             };
         }
 
-        PullResult::Success { applied_files: applied }
+        PullResult::Success {
+            applied_files: applied,
+        }
     }
 
     /// Pre-validates and pushes locally modified files to upstream template directory.
@@ -713,11 +751,8 @@ impl SyncEngine {
         allow_agent_rules: bool,
         persist_ancestor_immediately: bool,
     ) -> PushResult {
-        let dummy_ctx = crate::template::TemplateContext::detect_for_project(
-            local_root,
-            "project",
-            "generic",
-        );
+        let dummy_ctx =
+            crate::template::TemplateContext::detect_for_project(local_root, "project", "generic");
         let states = self.scan_project(local_root, upstream_root, Some(&dummy_ctx));
         let mut candidates_to_write = Vec::new();
 
@@ -758,29 +793,31 @@ impl SyncEngine {
                     }
                 };
 
-                let (parameterized_bytes, raw_local_str) = if let Ok(content) = std::str::from_utf8(&raw_bytes) {
-                    // Gate 2: Secret check (reject credentials)
-                    match self.sanitizer.check_secrets(content) {
-                        SanitizationResult::SecretDetected { reason, .. } => {
-                            return PushResult::SecretBlocked {
-                                path: state.relative_path.clone(),
-                                reason,
-                            };
+                let (parameterized_bytes, raw_local_str) =
+                    if let Ok(content) = std::str::from_utf8(&raw_bytes) {
+                        // Gate 2: Secret check (reject credentials)
+                        match self.sanitizer.check_secrets(content) {
+                            SanitizationResult::SecretDetected { reason, .. } => {
+                                return PushResult::SecretBlocked {
+                                    path: state.relative_path.clone(),
+                                    reason,
+                                };
+                            }
+                            SanitizationResult::Clean(_) => {}
                         }
-                        SanitizationResult::Clean(_) => {}
-                    }
 
-                    // Gate 3: Path parameterization
-                    let parameterized = self
-                        .sanitizer
-                        .parameterize_paths(content, user_home, xdg_config);
-                    (parameterized.into_bytes(), Some(content.to_string()))
-                } else {
-                    (raw_bytes.clone(), None)
-                };
+                        // Gate 3: Path parameterization
+                        let parameterized = self
+                            .sanitizer
+                            .parameterize_paths(content, user_home, xdg_config);
+                        (parameterized.into_bytes(), Some(content.to_string()))
+                    } else {
+                        (raw_bytes.clone(), None)
+                    };
 
                 // Stage into candidates list
-                if let Some(target_upstream) = map_to_upstream(upstream_root, &state.relative_path) {
+                if let Some(target_upstream) = map_to_upstream(upstream_root, &state.relative_path)
+                {
                     candidates_to_write.push((
                         state.relative_path.clone(),
                         target_upstream,
@@ -797,7 +834,9 @@ impl SyncEngine {
         let mut staged_files = Vec::new();
         let mut updated_records = Vec::new();
 
-        for (rel_path, target_upstream, parameterized_bytes, raw_bytes, raw_local_str) in candidates_to_write {
+        for (rel_path, target_upstream, parameterized_bytes, raw_bytes, raw_local_str) in
+            candidates_to_write
+        {
             if let Some(parent) = target_upstream.parent()
                 && let Err(err) = fs::create_dir_all(parent)
             {
@@ -873,8 +912,14 @@ impl SyncEngine {
                 .map_err(|e| format!("Failed to stage {}: {e}", rel_p.display()))?;
 
             if !add_status.success() {
-                let _ = Command::new("git").current_dir(remote_checkout).args(["reset", "HEAD", "--"]).status();
-                return Err(format!("git add failed in remote checkout for {}", rel_p.display()));
+                let _ = Command::new("git")
+                    .current_dir(remote_checkout)
+                    .args(["reset", "HEAD", "--"])
+                    .status();
+                return Err(format!(
+                    "git add failed in remote checkout for {}",
+                    rel_p.display()
+                ));
             }
         }
 
@@ -886,7 +931,8 @@ impl SyncEngine {
             .map_err(|e| format!("Failed to inspect staged diff in remote checkout: {e}"))?;
 
         let staged_output = String::from_utf8_lossy(&diff_cached.stdout);
-        let expected_set: std::collections::HashSet<PathBuf> = rel_staged_paths.into_iter().collect();
+        let expected_set: std::collections::HashSet<PathBuf> =
+            rel_staged_paths.into_iter().collect();
 
         for line in staged_output.lines() {
             let trimmed = line.trim();
@@ -895,7 +941,10 @@ impl SyncEngine {
             }
             let p = PathBuf::from(trimmed);
             if !expected_set.contains(&p) {
-                let _ = Command::new("git").current_dir(remote_checkout).args(["reset", "HEAD", "--"]).status();
+                let _ = Command::new("git")
+                    .current_dir(remote_checkout)
+                    .args(["reset", "HEAD", "--"])
+                    .status();
                 return Err(format!(
                     "Publication gate violation: unvalidated file staged in remote checkout: {}",
                     p.display()
@@ -911,7 +960,10 @@ impl SyncEngine {
                 .map_err(|e| format!("Failed to read staged git blob for {}: {e}", p.display()))?;
 
             if !blob_res.status.success() {
-                let _ = Command::new("git").current_dir(remote_checkout).args(["reset", "HEAD", "--"]).status();
+                let _ = Command::new("git")
+                    .current_dir(remote_checkout)
+                    .args(["reset", "HEAD", "--"])
+                    .status();
                 return Err(format!(
                     "Publication gate violation: failed to inspect staged git blob for {}",
                     p.display()
@@ -919,8 +971,13 @@ impl SyncEngine {
             }
 
             let blob_content = String::from_utf8_lossy(&blob_res.stdout);
-            if let SanitizationResult::SecretDetected { reason, .. } = self.sanitizer.check_secrets(&blob_content) {
-                let _ = Command::new("git").current_dir(remote_checkout).args(["reset", "HEAD", "--"]).status();
+            if let SanitizationResult::SecretDetected { reason, .. } =
+                self.sanitizer.check_secrets(&blob_content)
+            {
+                let _ = Command::new("git")
+                    .current_dir(remote_checkout)
+                    .args(["reset", "HEAD", "--"])
+                    .status();
                 return Err(format!(
                     "Publication gate violation: secret detected in staged index blob {}: {reason}",
                     p.display()
@@ -957,15 +1014,29 @@ impl SyncEngine {
                 .map_err(|e| format!("Failed to commit in remote checkout: {e}"))?;
 
             if !commit_status.success() {
-                let _ = Command::new("git").current_dir(remote_checkout).args(["checkout", branch]).status();
-                let _ = Command::new("git").current_dir(remote_checkout).args(["branch", "-D", &sync_branch]).status();
+                let _ = Command::new("git")
+                    .current_dir(remote_checkout)
+                    .args(["checkout", branch])
+                    .status();
+                let _ = Command::new("git")
+                    .current_dir(remote_checkout)
+                    .args(["branch", "-D", &sync_branch])
+                    .status();
                 return Err("git commit failed in remote checkout".to_string());
             }
 
-            if let Err(err) = validate_committed_tree(&self.sanitizer, remote_checkout, &expected_set) {
+            if let Err(err) =
+                validate_committed_tree(&self.sanitizer, remote_checkout, &expected_set)
+            {
                 rollback_commit(remote_checkout);
-                let _ = Command::new("git").current_dir(remote_checkout).args(["checkout", branch]).status();
-                let _ = Command::new("git").current_dir(remote_checkout).args(["branch", "-D", &sync_branch]).status();
+                let _ = Command::new("git")
+                    .current_dir(remote_checkout)
+                    .args(["checkout", branch])
+                    .status();
+                let _ = Command::new("git")
+                    .current_dir(remote_checkout)
+                    .args(["branch", "-D", &sync_branch])
+                    .status();
                 return Err(err);
             }
 
@@ -976,7 +1047,10 @@ impl SyncEngine {
                 .map_err(|e| format!("Failed to push sync branch: {e}"))?;
 
             // Return working tree to canonical branch
-            let _ = Command::new("git").current_dir(remote_checkout).args(["checkout", branch]).status();
+            let _ = Command::new("git")
+                .current_dir(remote_checkout)
+                .args(["checkout", branch])
+                .status();
 
             if !push_status.success() {
                 return Err(format!("git push failed for branch {sync_branch}"));
@@ -1019,7 +1093,9 @@ impl SyncEngine {
                 return Err("git commit failed in remote checkout".to_string());
             }
 
-            if let Err(err) = validate_committed_tree(&self.sanitizer, remote_checkout, &expected_set) {
+            if let Err(err) =
+                validate_committed_tree(&self.sanitizer, remote_checkout, &expected_set)
+            {
                 rollback_commit(remote_checkout);
                 return Err(err);
             }
@@ -1034,7 +1110,9 @@ impl SyncEngine {
                 return Err(format!("git push origin {branch} failed"));
             }
 
-            Ok(format!("Directly pushed changes to remote branch '{branch}'."))
+            Ok(format!(
+                "Directly pushed changes to remote branch '{branch}'."
+            ))
         }
     }
 }
@@ -1065,7 +1143,12 @@ fn validate_safe_write_target(local_root: &Path, rel_path: &Path) -> Result<Path
     for comp in rel_path.components() {
         match comp {
             std::path::Component::Normal(_) => {}
-            _ => return Err(format!("Unsafe path component in relative path: {}", rel_path.display())),
+            _ => {
+                return Err(format!(
+                    "Unsafe path component in relative path: {}",
+                    rel_path.display()
+                ));
+            }
         }
     }
 
@@ -1116,11 +1199,23 @@ fn rollback_commit(repo: &Path) {
         .unwrap_or(false);
 
     if has_parent {
-        let _ = Command::new("git").current_dir(repo).args(["reset", "--hard", "HEAD~1"]).status();
+        let _ = Command::new("git")
+            .current_dir(repo)
+            .args(["reset", "--hard", "HEAD~1"])
+            .status();
     } else {
-        let _ = Command::new("git").current_dir(repo).args(["update-ref", "-d", "HEAD"]).status();
-        let _ = Command::new("git").current_dir(repo).args(["reset", "--hard"]).status();
-        let _ = Command::new("git").current_dir(repo).args(["clean", "-fd"]).status();
+        let _ = Command::new("git")
+            .current_dir(repo)
+            .args(["update-ref", "-d", "HEAD"])
+            .status();
+        let _ = Command::new("git")
+            .current_dir(repo)
+            .args(["reset", "--hard"])
+            .status();
+        let _ = Command::new("git")
+            .current_dir(repo)
+            .args(["clean", "-fd"])
+            .status();
     }
 }
 
@@ -1133,7 +1228,14 @@ fn validate_committed_tree(
 ) -> Result<(), String> {
     let diff_tree = Command::new("git")
         .current_dir(remote_checkout)
-        .args(["diff-tree", "--root", "--no-commit-id", "--name-only", "-r", "HEAD"])
+        .args([
+            "diff-tree",
+            "--root",
+            "--no-commit-id",
+            "--name-only",
+            "-r",
+            "HEAD",
+        ])
         .output()
         .map_err(|e| format!("Failed to inspect committed diff-tree in remote checkout: {e}"))?;
 
@@ -1170,7 +1272,9 @@ fn validate_committed_tree(
         }
 
         let blob_content = String::from_utf8_lossy(&blob_res.stdout);
-        if let SanitizationResult::SecretDetected { reason, .. } = sanitizer.check_secrets(&blob_content) {
+        if let SanitizationResult::SecretDetected { reason, .. } =
+            sanitizer.check_secrets(&blob_content)
+        {
             return Err(format!(
                 "Post-commit publication gate violation: secret detected in committed HEAD blob {}: {reason}",
                 p.display()
@@ -1423,12 +1527,7 @@ mod tests {
     #[test]
     fn test_sync_status_no_ancestor_divergent() {
         assert_eq!(
-            SyncEngine::compare_3way(
-                None,
-                Some("local edit"),
-                Some("upstream edit"),
-                false,
-            ),
+            SyncEngine::compare_3way(None, Some("local edit"), Some("upstream edit"), false,),
             SyncStatus::Conflicted
         );
     }
@@ -1450,34 +1549,19 @@ mod tests {
     fn test_sync_status_deletions() {
         // Local deleted, upstream untouched
         assert_eq!(
-            SyncEngine::compare_3way(
-                Some("base version"),
-                None,
-                Some("base version"),
-                false,
-            ),
+            SyncEngine::compare_3way(Some("base version"), None, Some("base version"), false,),
             SyncStatus::LocallyModified
         );
 
         // Upstream deleted, local untouched
         assert_eq!(
-            SyncEngine::compare_3way(
-                Some("base version"),
-                Some("base version"),
-                None,
-                false,
-            ),
+            SyncEngine::compare_3way(Some("base version"), Some("base version"), None, false,),
             SyncStatus::UpstreamModified
         );
 
         // Conflicting deletion: local deleted, upstream modified
         assert_eq!(
-            SyncEngine::compare_3way(
-                Some("base version"),
-                None,
-                Some("upstream modified"),
-                false,
-            ),
+            SyncEngine::compare_3way(Some("base version"), None, Some("upstream modified"), false,),
             SyncStatus::Conflicted
         );
     }
@@ -1506,13 +1590,19 @@ mod tests {
         fs::create_dir_all(up_gitconfig.parent().unwrap()).unwrap();
         fs::write(&up_gitconfig, "[core]\n  autocrlf = input\n").unwrap();
 
-        let up_hook = upstream_dir.path().join("projects/generic/hooks/pre-commit");
+        let up_hook = upstream_dir
+            .path()
+            .join("projects/generic/hooks/pre-commit");
         fs::create_dir_all(up_hook.parent().unwrap()).unwrap();
         fs::write(&up_hook, "#!/bin/sh\nexit 0\n").unwrap();
 
         let up_mise = upstream_dir.path().join("projects/agents/mise.toml.jinja");
         fs::create_dir_all(up_mise.parent().unwrap()).unwrap();
-        fs::write(&up_mise, "[tools]\nrust = \"1.85.0\"\nhome = \"{{ user.home }}\"\n").unwrap();
+        fs::write(
+            &up_mise,
+            "[tools]\nrust = \"1.85.0\"\nhome = \"{{ user.home }}\"\n",
+        )
+        .unwrap();
 
         let ctx = crate::template::TemplateContext::detect_for_project(
             local_dir.path(),
@@ -1526,7 +1616,10 @@ mod tests {
         // Verify files materialized locally
         let loc_gitconfig = local_dir.path().join(".gitconfig");
         assert!(loc_gitconfig.exists());
-        assert_eq!(fs::read_to_string(&loc_gitconfig).unwrap(), "[core]\n  autocrlf = input\n");
+        assert_eq!(
+            fs::read_to_string(&loc_gitconfig).unwrap(),
+            "[core]\n  autocrlf = input\n"
+        );
 
         let loc_hook = local_dir.path().join("scripts/hooks/pre-commit");
         assert!(loc_hook.exists());
@@ -1535,7 +1628,11 @@ mod tests {
         {
             use std::os::unix::fs::PermissionsExt;
             let meta = fs::metadata(&loc_hook).unwrap();
-            assert_eq!(meta.permissions().mode() & 0o111, 0o111, "Hook must be executable");
+            assert_eq!(
+                meta.permissions().mode() & 0o111,
+                0o111,
+                "Hook must be executable"
+            );
         }
 
         let loc_mise = local_dir.path().join("mise.toml");
@@ -1546,7 +1643,11 @@ mod tests {
         // Verify state persistence
         let state = ProjectState::load_from_dir(local_dir.path());
         assert!(state.get_ancestor_hash(Path::new(".gitconfig")).is_some());
-        assert!(state.get_ancestor_hash(Path::new("scripts/hooks/pre-commit")).is_some());
+        assert!(
+            state
+                .get_ancestor_hash(Path::new("scripts/hooks/pre-commit"))
+                .is_some()
+        );
         assert!(state.get_ancestor_hash(Path::new("mise.toml")).is_some());
 
         // Negative control: Re-scanning now must report InSync for all 3 files
@@ -1556,7 +1657,12 @@ mod tests {
                 || s.relative_path == Path::new("scripts/hooks/pre-commit")
                 || s.relative_path == Path::new("mise.toml")
             {
-                assert_eq!(s.status, SyncStatus::InSync, "File {:?} must be InSync after pull", s.relative_path);
+                assert_eq!(
+                    s.status,
+                    SyncStatus::InSync,
+                    "File {:?} must be InSync after pull",
+                    s.relative_path
+                );
             }
         }
     }
@@ -1577,7 +1683,11 @@ mod tests {
         let mut state = ProjectState::default();
         let base_content = "[core]\n  autocrlf = false\n";
         let base_hash = SyncEngine::compute_hash(base_content.as_bytes());
-        state.record_file(Path::new(".gitconfig"), base_hash, Some(base_content.to_string()));
+        state.record_file(
+            Path::new(".gitconfig"),
+            base_hash,
+            Some(base_content.to_string()),
+        );
         state.save_to_dir(local_dir.path()).unwrap();
 
         // Local has modified .gitconfig
@@ -1590,7 +1700,9 @@ mod tests {
         fs::write(&up_gitconfig, "[core]\n  autocrlf = upstream_divergence\n").unwrap();
 
         // Upstream also has a clean file that should NOT be written due to the conflict
-        let up_hook = upstream_dir.path().join("projects/generic/hooks/pre-commit");
+        let up_hook = upstream_dir
+            .path()
+            .join("projects/generic/hooks/pre-commit");
         fs::create_dir_all(up_hook.parent().unwrap()).unwrap();
         fs::write(&up_hook, "#!/bin/sh\nexit 0\n").unwrap();
 
@@ -1624,7 +1736,11 @@ mod tests {
         let mut state = ProjectState::default();
         let base_content = "[core]\n  autocrlf = false\n";
         let base_hash = SyncEngine::compute_hash(base_content.as_bytes());
-        state.record_file(Path::new(".gitconfig"), base_hash, Some(base_content.to_string()));
+        state.record_file(
+            Path::new(".gitconfig"),
+            base_hash,
+            Some(base_content.to_string()),
+        );
         state.save_to_dir(local_dir.path()).unwrap();
 
         // Local edit
@@ -1680,9 +1796,7 @@ mod tests {
             _ => panic!("Expected Success on push, got {:?}", res),
         }
 
-        let written_upstream = upstream_dir
-            .path()
-            .join("projects/generic/gitconfig.repo");
+        let written_upstream = upstream_dir.path().join("projects/generic/gitconfig.repo");
         let content = fs::read_to_string(written_upstream).unwrap();
         assert!(content.contains("{{ user.home }}"));
         assert!(!content.contains("/home/denniyahh"));
@@ -1697,11 +1811,7 @@ mod tests {
         let local_gitconfig = local_dir.path().join(".gitconfig");
         let prefix = "ghp_";
         let body = "111122223333444455556666777788889999";
-        fs::write(
-            &local_gitconfig,
-            format!("export TOKEN={prefix}{body}\n"),
-        )
-        .unwrap();
+        fs::write(&local_gitconfig, format!("export TOKEN={prefix}{body}\n")).unwrap();
 
         let res = engine.push_updates(
             local_dir.path(),
@@ -1754,7 +1864,8 @@ mod tests {
         }
 
         // Negative control: Assert that .gitconfig upstream was NOT created / written
-        let upstream_gitconfig = map_to_upstream(upstream_dir.path(), Path::new(".gitconfig")).unwrap();
+        let upstream_gitconfig =
+            map_to_upstream(upstream_dir.path(), Path::new(".gitconfig")).unwrap();
         assert!(
             !upstream_gitconfig.exists(),
             "Atomicity violation: upstream file was written before pre-validation completed!"
@@ -1844,7 +1955,11 @@ mod tests {
 
         // Test branch switching isolation: create develop branch with distinct file
         git.run(fake_remote.path(), &["checkout", "-b", "develop"]);
-        fs::write(fake_templates.join("develop.txt"), "develop branch template").unwrap();
+        fs::write(
+            fake_templates.join("develop.txt"),
+            "develop branch template",
+        )
+        .unwrap();
         git.run(fake_remote.path(), &["add", "-A"]);
         git.run(fake_remote.path(), &["commit", "-m", "develop commit"]);
         git.run(fake_remote.path(), &["checkout", "main"]);
@@ -1875,7 +1990,10 @@ mod tests {
         // 2. Contended lock acquisition with zero-second / fast timeout -> MUST fail with timeout!
         let start = std::time::Instant::now();
         let err2 = RemoteLockGuard::acquire(&lock_path, 0);
-        assert!(err2.is_err(), "Contended lock acquisition must fail when locked by another thread!");
+        assert!(
+            err2.is_err(),
+            "Contended lock acquisition must fail when locked by another thread!"
+        );
         let err_msg = err2.unwrap_err();
         assert!(
             err_msg.contains("Timed out") || err_msg.contains("waiting for remote cache lock"),
@@ -1886,7 +2004,10 @@ mod tests {
         // 3. Drop guard1, then acquire again -> MUST succeed
         drop(guard1);
         let guard3 = RemoteLockGuard::acquire(&lock_path, 1);
-        assert!(guard3.is_ok(), "Lock acquisition must succeed after prior guard is dropped!");
+        assert!(
+            guard3.is_ok(),
+            "Lock acquisition must succeed after prior guard is dropped!"
+        );
     }
 
     #[test]
@@ -1899,7 +2020,11 @@ mod tests {
         let mut state = ProjectState::default();
         let base_content = "[core]\n  autocrlf = input\n";
         let base_hash = SyncEngine::compute_hash(base_content.as_bytes());
-        state.record_file(Path::new(".gitconfig"), base_hash.clone(), Some(base_content.to_string()));
+        state.record_file(
+            Path::new(".gitconfig"),
+            base_hash.clone(),
+            Some(base_content.to_string()),
+        );
         state.save_to_dir(local_dir.path()).unwrap();
 
         // 2. Local edit
@@ -2022,12 +2147,21 @@ mod tests {
             false,
             true,
         );
-        assert!(matches!(push_res, PushResult::Success { synced_files: 1, .. }));
+        assert!(matches!(
+            push_res,
+            PushResult::Success {
+                synced_files: 1,
+                ..
+            }
+        ));
 
         // Verify upstream gitconfig.repo has {{ user.home }}
         let up_gitconfig = upstream_dir.path().join("projects/generic/gitconfig.repo");
         let up_content = fs::read_to_string(&up_gitconfig).unwrap();
-        assert_eq!(up_content, "[core]\n  excludesfile = {{ user.home }}/.gitignore\n");
+        assert_eq!(
+            up_content,
+            "[core]\n  excludesfile = {{ user.home }}/.gitignore\n"
+        );
 
         // 2. Scan: must render {{ user.home }} back to /home/fixture even though extension is .repo, reporting InSync!
         let mut ctx = crate::template::TemplateContext::detect_for_project(
@@ -2037,8 +2171,15 @@ mod tests {
         );
         ctx.user.home = user_home.to_string();
         let states = engine.scan_project(local_dir.path(), upstream_dir.path(), Some(&ctx));
-        let gitconfig_state = states.iter().find(|s| s.relative_path == Path::new(".gitconfig")).unwrap();
-        assert_eq!(gitconfig_state.status, SyncStatus::InSync, "Static template with {{ user.home }} must render to InSync");
+        let gitconfig_state = states
+            .iter()
+            .find(|s| s.relative_path == Path::new(".gitconfig"))
+            .unwrap();
+        assert_eq!(
+            gitconfig_state.status,
+            SyncStatus::InSync,
+            "Static template with {{ user.home }} must render to InSync"
+        );
     }
 
     #[test]
@@ -2051,7 +2192,11 @@ mod tests {
         let mut state = ProjectState::default();
         let base_mise = "[tools]\nrust = \"1.85.0\"\n";
         let base_hash = SyncEngine::compute_hash(base_mise.as_bytes());
-        state.record_file(Path::new("mise.toml"), base_hash, Some(base_mise.to_string()));
+        state.record_file(
+            Path::new("mise.toml"),
+            base_hash,
+            Some(base_mise.to_string()),
+        );
         state.save_to_dir(local_dir.path()).unwrap();
 
         // Local has base mise.toml AND a layered override mise.local.toml
@@ -2074,7 +2219,10 @@ mod tests {
 
         // Scan project: must report UpstreamModified, NOT frozen in Overridden!
         let states = engine.scan_project(local_dir.path(), upstream_dir.path(), Some(&ctx));
-        let mise_state = states.iter().find(|s| s.relative_path == Path::new("mise.toml")).unwrap();
+        let mise_state = states
+            .iter()
+            .find(|s| s.relative_path == Path::new("mise.toml"))
+            .unwrap();
         assert_eq!(
             mise_state.status,
             SyncStatus::UpstreamModified,
@@ -2085,7 +2233,10 @@ mod tests {
         let pull_res = engine.pull_updates(local_dir.path(), upstream_dir.path(), &ctx);
         assert_eq!(pull_res, PullResult::Success { applied_files: 1 });
         assert_eq!(fs::read_to_string(&loc_mise).unwrap(), updated_upstream);
-        assert_eq!(fs::read_to_string(&loc_override).unwrap(), "[tools]\nrust = \"nightly\"\n");
+        assert_eq!(
+            fs::read_to_string(&loc_override).unwrap(),
+            "[tools]\nrust = \"nightly\"\n"
+        );
     }
 
     #[test]
@@ -2111,7 +2262,11 @@ mod tests {
         let prefix = "ghp_";
         let body = "999988887777666655554444333322221111";
         let script = remote_repo.path().join("inject_secret.sh");
-        fs::write(&script, format!("#!/bin/sh\ncat\necho \"secret = {prefix}{body}\"\n")).unwrap();
+        fs::write(
+            &script,
+            format!("#!/bin/sh\ncat\necho \"secret = {prefix}{body}\"\n"),
+        )
+        .unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -2137,7 +2292,10 @@ mod tests {
         let res = engine.push_to_remote(remote_repo.path(), "main", false, &staged_allowlist);
 
         // Publication gate must detect secret in the staged blob and reject!
-        assert!(res.is_err(), "Publication gate must fail when staged blob contains secret!");
+        assert!(
+            res.is_err(),
+            "Publication gate must fail when staged blob contains secret!"
+        );
         let err_msg = res.unwrap_err();
         assert!(
             err_msg.contains("Publication gate violation: secret detected in staged index blob"),
@@ -2162,7 +2320,11 @@ mod tests {
         let base_content = "a=1\nb=1\n";
         let base_hash = SyncEngine::compute_hash(base_content.as_bytes());
         let mut state = ProjectState::default();
-        state.record_file(Path::new("mise.toml"), base_hash, Some(base_content.to_string()));
+        state.record_file(
+            Path::new("mise.toml"),
+            base_hash,
+            Some(base_content.to_string()),
+        );
         state.save_to_dir(local_dir.path()).unwrap();
 
         // 2. Local has line 1 edited: a=2, b=1
@@ -2213,10 +2375,19 @@ mod tests {
 
     #[test]
     fn test_slash_branch_name_lock_and_cache() {
-        assert_eq!(sanitize_branch_slug("feature/custom-task"), "feature-custom-task");
-        assert_eq!(sanitize_branch_slug("release/v1.0.0-rc1"), "release-v1-0-0-rc1");
+        assert_eq!(
+            sanitize_branch_slug("feature/custom-task"),
+            "feature-custom-task"
+        );
+        assert_eq!(
+            sanitize_branch_slug("release/v1.0.0-rc1"),
+            "release-v1-0-0-rc1"
+        );
         assert_eq!(sanitize_branch_slug("///"), "default");
-        assert_eq!(sanitize_branch_slug("fix/issue#42/sub_dir"), "fix-issue-42-sub_dir");
+        assert_eq!(
+            sanitize_branch_slug("fix/issue#42/sub_dir"),
+            "fix-issue-42-sub_dir"
+        );
 
         let engine = SyncEngine::new();
         let git = GitFixture::new();
@@ -2239,7 +2410,11 @@ mod tests {
             "feature/custom-task",
             cache_dir.path(),
         );
-        assert!(res.is_ok(), "ensure_remote_repo must succeed for slash branch: {:?}", res.err());
+        assert!(
+            res.is_ok(),
+            "ensure_remote_repo must succeed for slash branch: {:?}",
+            res.err()
+        );
         let (checkout_tmpl, _lock) = res.unwrap();
         assert!(checkout_tmpl.exists());
     }
@@ -2257,7 +2432,9 @@ mod tests {
         // Seed initial commit into bare remote
         let seed_dir = tempdir().unwrap();
         git.run(seed_dir.path(), &["init", "-b", "main"]);
-        let seed_tmpl = seed_dir.path().join("templates/projects/generic/gitconfig.repo");
+        let seed_tmpl = seed_dir
+            .path()
+            .join("templates/projects/generic/gitconfig.repo");
         fs::create_dir_all(seed_tmpl.parent().unwrap()).unwrap();
         fs::write(&seed_tmpl, "[core]\n  autocrlf = true\n").unwrap();
         git.run(seed_dir.path(), &["add", "-A"]);
@@ -2268,13 +2445,21 @@ mod tests {
 
         // Step 1: Ensure cache checkout of main
         let (tmpl_dir, lock) = engine
-            .ensure_remote_repo(bare_remote.path().to_str().unwrap(), "main", cache_dir.path())
+            .ensure_remote_repo(
+                bare_remote.path().to_str().unwrap(),
+                "main",
+                cache_dir.path(),
+            )
             .unwrap();
         let remote_checkout = tmpl_dir.parent().unwrap();
 
         // Step 2: Push changes in PR mode (open_pr: true)
         let managed_gitconfig = tmpl_dir.join("projects/generic/gitconfig.repo");
-        fs::write(&managed_gitconfig, "[core]\n  autocrlf = false\n# pr edit\n").unwrap();
+        fs::write(
+            &managed_gitconfig,
+            "[core]\n  autocrlf = false\n# pr edit\n",
+        )
+        .unwrap();
         let staged = vec![managed_gitconfig.clone()];
         let pr_res = engine.push_to_remote(remote_checkout, "main", true, &staged);
         assert!(pr_res.is_ok(), "PR push must succeed: {:?}", pr_res.err());
@@ -2284,19 +2469,34 @@ mod tests {
 
         // Verify remote has a ude-sync branch
         let branch_out = git.output(bare_remote.path(), &["branch", "--list"]);
-        assert!(branch_out.contains("ude-sync-"), "PR branch must be pushed to bare remote: {branch_out}");
+        assert!(
+            branch_out.contains("ude-sync-"),
+            "PR branch must be pushed to bare remote: {branch_out}"
+        );
 
         // Step 3: Now run direct push on main (open_pr: false)
         // ensure_remote_repo must cleanly reset the working tree back to main
         let (tmpl_dir_2, _lock_2) = engine
-            .ensure_remote_repo(bare_remote.path().to_str().unwrap(), "main", cache_dir.path())
+            .ensure_remote_repo(
+                bare_remote.path().to_str().unwrap(),
+                "main",
+                cache_dir.path(),
+            )
             .unwrap();
         let remote_checkout_2 = tmpl_dir_2.parent().unwrap();
         let managed_gitconfig_2 = tmpl_dir_2.join("projects/generic/gitconfig.repo");
-        fs::write(&managed_gitconfig_2, "[core]\n  autocrlf = input\n# direct edit\n").unwrap();
+        fs::write(
+            &managed_gitconfig_2,
+            "[core]\n  autocrlf = input\n# direct edit\n",
+        )
+        .unwrap();
         let staged_2 = vec![managed_gitconfig_2.clone()];
         let direct_res = engine.push_to_remote(remote_checkout_2, "main", false, &staged_2);
-        assert!(direct_res.is_ok(), "Direct push must succeed: {:?}", direct_res.err());
+        assert!(
+            direct_res.is_ok(),
+            "Direct push must succeed: {:?}",
+            direct_res.err()
+        );
 
         // Step 4: Verify bare remote's `main` branch HEAD has the direct edit!
         let main_content = git.output(
@@ -2326,14 +2526,19 @@ mod tests {
         let base_head_sha = git.output(remote_repo.path(), &["rev-parse", "HEAD"]);
 
         // Staged allowlist has only base.txt
-        let expected_set: std::collections::HashSet<PathBuf> = [PathBuf::from("base.txt")].into_iter().collect();
+        let expected_set: std::collections::HashSet<PathBuf> =
+            [PathBuf::from("base.txt")].into_iter().collect();
 
         // 1. Clean commit validation
         fs::write(&base_file, "updated benign content").unwrap();
         git.run(remote_repo.path(), &["add", "base.txt"]);
         git.run(remote_repo.path(), &["commit", "-m", "benign update"]);
-        let clean_check = validate_committed_tree(&engine.sanitizer, remote_repo.path(), &expected_set);
-        assert!(clean_check.is_ok(), "Clean commit must pass validate_committed_tree");
+        let clean_check =
+            validate_committed_tree(&engine.sanitizer, remote_repo.path(), &expected_set);
+        assert!(
+            clean_check.is_ok(),
+            "Clean commit must pass validate_committed_tree"
+        );
 
         // 2. Secret in committed tree: simulate secret injected into HEAD
         let prefix = "ghp_";
@@ -2343,17 +2548,31 @@ mod tests {
         git.run(remote_repo.path(), &["add", "base.txt"]);
         git.run(remote_repo.path(), &["commit", "-m", "injected secret"]);
 
-        let secret_check = validate_committed_tree(&engine.sanitizer, remote_repo.path(), &expected_set);
-        assert!(secret_check.is_err(), "Committed secret must fail validate_committed_tree");
-        assert!(secret_check.unwrap_err().contains("secret detected in committed HEAD blob"));
+        let secret_check =
+            validate_committed_tree(&engine.sanitizer, remote_repo.path(), &expected_set);
+        assert!(
+            secret_check.is_err(),
+            "Committed secret must fail validate_committed_tree"
+        );
+        assert!(
+            secret_check
+                .unwrap_err()
+                .contains("secret detected in committed HEAD blob")
+        );
 
         // Rollback commit and assert HEAD was restored to the parent
         rollback_commit(remote_repo.path());
         let head_after_sha = git.output(remote_repo.path(), &["rev-parse", "HEAD"]);
-        assert_ne!(head_after_sha, base_head_sha, "HEAD should be at benign commit, not base");
+        assert_ne!(
+            head_after_sha, base_head_sha,
+            "HEAD should be at benign commit, not base"
+        );
 
         let head_content = git.output(remote_repo.path(), &["show", "HEAD:base.txt"]);
-        assert!(!head_content.contains("ghp_"), "HEAD must not contain secret after rollback: {head_content}");
+        assert!(
+            !head_content.contains("ghp_"),
+            "HEAD must not contain secret after rollback: {head_content}"
+        );
     }
 
     #[test]
@@ -2370,7 +2589,11 @@ mod tests {
 
         let mut state = ProjectState::default();
         let anc_hash = SyncEngine::compute_hash(initial_content.as_bytes());
-        state.record_file(Path::new("mise.toml"), anc_hash, Some(initial_content.to_string()));
+        state.record_file(
+            Path::new("mise.toml"),
+            anc_hash,
+            Some(initial_content.to_string()),
+        );
         state.save_to_dir(local_dir.path()).unwrap();
 
         // Upstream has mise.toml.jinja update
@@ -2419,7 +2642,11 @@ mod tests {
         let v1_content = "[tools]\nrust = \"1.80.0\"\n";
         let v1_hash = SyncEngine::compute_hash(v1_content.as_bytes());
         let mut state = ProjectState::default();
-        state.record_file(Path::new("mise.toml"), v1_hash, Some(v1_content.to_string()));
+        state.record_file(
+            Path::new("mise.toml"),
+            v1_hash,
+            Some(v1_content.to_string()),
+        );
         state.save_to_dir(local_dir.path()).unwrap();
 
         // 2. Both local and upstream converged to version 2
@@ -2439,7 +2666,10 @@ mod tests {
 
         // 3. Scan: reports InSync
         let states = engine.scan_project(local_dir.path(), upstream_dir.path(), Some(&ctx));
-        let mise_st = states.iter().find(|s| s.relative_path == Path::new("mise.toml")).unwrap();
+        let mise_st = states
+            .iter()
+            .find(|s| s.relative_path == Path::new("mise.toml"))
+            .unwrap();
         assert_eq!(mise_st.status, SyncStatus::InSync);
 
         // 4. Pull updates: reconciles ancestor state in .ude/state.json
@@ -2460,7 +2690,10 @@ mod tests {
 
         // 6. Scan: must report UpstreamModified, NOT Conflicted!
         let states2 = engine.scan_project(local_dir.path(), upstream_dir.path(), Some(&ctx));
-        let mise_st2 = states2.iter().find(|s| s.relative_path == Path::new("mise.toml")).unwrap();
+        let mise_st2 = states2
+            .iter()
+            .find(|s| s.relative_path == Path::new("mise.toml"))
+            .unwrap();
         assert_eq!(
             mise_st2.status,
             SyncStatus::UpstreamModified,
@@ -2492,7 +2725,10 @@ mod tests {
 
         // Scan: must detect identical hashes and report InSync without failing UTF-8 decode
         let states = engine.scan_project(local_dir.path(), upstream_dir.path(), Some(&ctx));
-        let hook_st = states.iter().find(|s| s.relative_path == Path::new("scripts/hooks/pre-push")).unwrap();
+        let hook_st = states
+            .iter()
+            .find(|s| s.relative_path == Path::new("scripts/hooks/pre-push"))
+            .unwrap();
         assert_eq!(hook_st.status, SyncStatus::InSync);
         assert!(hook_st.local_hash.is_some());
         assert_eq!(hook_st.local_hash, hook_st.upstream_hash);
@@ -2503,7 +2739,10 @@ mod tests {
         fs::write(&loc_hook, &modified_bytes).unwrap();
 
         let states2 = engine.scan_project(local_dir.path(), upstream_dir.path(), Some(&ctx));
-        let hook_st2 = states2.iter().find(|s| s.relative_path == Path::new("scripts/hooks/pre-push")).unwrap();
+        let hook_st2 = states2
+            .iter()
+            .find(|s| s.relative_path == Path::new("scripts/hooks/pre-push"))
+            .unwrap();
         assert_eq!(hook_st2.status, SyncStatus::Conflicted); // no ancestor recorded, so divergent hashes = Conflicted
     }
 }

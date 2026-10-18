@@ -78,7 +78,13 @@ fn main() {
                         println!("  {} [{}] {}: {}", "✗".red(), r.category, r.name, f);
                     }
                     audit::CheckStatus::Critical(c) => {
-                        println!("  {} [{}] {}: {}", "CRITICAL".red().bold(), r.category, r.name, c);
+                        println!(
+                            "  {} [{}] {}: {}",
+                            "CRITICAL".red().bold(),
+                            r.category,
+                            r.name,
+                            c
+                        );
                     }
                 }
             }
@@ -100,23 +106,45 @@ fn main() {
                             println!("  {} [{}] {}: {}", "✗".red(), r.category, r.name, f);
                         }
                         audit::CheckStatus::Critical(c) => {
-                            println!("  {} [{}] {}: {}", "CRITICAL".red().bold(), r.category, r.name, c);
+                            println!(
+                                "  {} [{}] {}: {}",
+                                "CRITICAL".red().bold(),
+                                r.category,
+                                r.name,
+                                c
+                            );
                         }
                     }
                 }
             }
 
             if has_critical {
-                eprintln!("\n{}", "Doctor detected critical security invariant failure(s). Exit code 2.".red().bold());
+                eprintln!(
+                    "\n{}",
+                    "Doctor detected critical security invariant failure(s). Exit code 2."
+                        .red()
+                        .bold()
+                );
                 std::process::exit(2);
             } else if has_failures {
-                eprintln!("\n{}", "Doctor detected failing checks. Remediation required.".red().bold());
+                eprintln!(
+                    "\n{}",
+                    "Doctor detected failing checks. Remediation required."
+                        .red()
+                        .bold()
+                );
                 std::process::exit(1);
             } else {
-                println!("\n{}", "==> Doctor check completed. All required baselines verified.".bold());
+                println!(
+                    "\n{}",
+                    "==> Doctor check completed. All required baselines verified.".bold()
+                );
             }
         }
-        cli::Commands::Init(init_args) | cli::Commands::Project(cli::ProjectCommands { action: cli::ProjectAction::Init(init_args) }) => {
+        cli::Commands::Init(init_args)
+        | cli::Commands::Project(cli::ProjectCommands {
+            action: cli::ProjectAction::Init(init_args),
+        }) => {
             let project_path = init_args.resolved_path();
             if project_path.is_file() {
                 eprintln!(
@@ -128,7 +156,11 @@ fn main() {
             }
 
             if let Err(e) = fs::create_dir_all(&project_path) {
-                eprintln!("  {} Failed to create project directory {}: {e}", "✗".red(), project_path.display());
+                eprintln!(
+                    "  {} Failed to create project directory {}: {e}",
+                    "✗".red(),
+                    project_path.display()
+                );
                 std::process::exit(1);
             }
 
@@ -147,7 +179,11 @@ fn main() {
                 .bold()
             );
 
-            let ctx = template::TemplateContext::detect_for_project(&project_path, &project_name, &init_args.project_type);
+            let ctx = template::TemplateContext::detect_for_project(
+                &project_path,
+                &project_name,
+                &init_args.project_type,
+            );
             let renderer = template::TemplateRenderer::new();
 
             // Locate canonical templates directory
@@ -158,10 +194,22 @@ fn main() {
             let scratch_dir = project_path.join("scratch");
             let agents_dir = project_path.join(".agents");
             let container_dir = project_path.join("scripts");
-            if let Err(e) = fs::create_dir_all(&hooks_dir) { eprintln!("  {} Initialization failed: {e}", "✗".red()); std::process::exit(1); }
-            if let Err(e) = fs::create_dir_all(&scratch_dir) { eprintln!("  {} Initialization failed: {e}", "✗".red()); std::process::exit(1); }
-            if let Err(e) = fs::create_dir_all(&agents_dir) { eprintln!("  {} Initialization failed: {e}", "✗".red()); std::process::exit(1); }
-            if let Err(e) = fs::create_dir_all(&container_dir) { eprintln!("  {} Initialization failed: {e}", "✗".red()); std::process::exit(1); }
+            if let Err(e) = fs::create_dir_all(&hooks_dir) {
+                eprintln!("  {} Initialization failed: {e}", "✗".red());
+                std::process::exit(1);
+            }
+            if let Err(e) = fs::create_dir_all(&scratch_dir) {
+                eprintln!("  {} Initialization failed: {e}", "✗".red());
+                std::process::exit(1);
+            }
+            if let Err(e) = fs::create_dir_all(&agents_dir) {
+                eprintln!("  {} Initialization failed: {e}", "✗".red());
+                std::process::exit(1);
+            }
+            if let Err(e) = fs::create_dir_all(&container_dir) {
+                eprintln!("  {} Initialization failed: {e}", "✗".red());
+                std::process::exit(1);
+            }
 
             // 2. Materialize .gitconfig include & .gitignore
             if let Some(ref tdir) = root_template_dir {
@@ -218,7 +266,11 @@ fn main() {
                 set_executable(&dst_cont);
 
                 // Materialize scratch scripts
-                for s in &["check-publish-boundary.sh", "new-worktree.sh", "sync-personal-env.sh"] {
+                for s in &[
+                    "check-publish-boundary.sh",
+                    "new-worktree.sh",
+                    "sync-personal-env.sh",
+                ] {
                     let src_s = tdir.join(format!("projects/agents/scratch/{s}"));
                     let dst_s = scratch_dir.join(s);
                     if let Err(e) = copy_template_file(&src_s, &dst_s) {
@@ -353,14 +405,29 @@ fn main() {
                 }
             }
             if let Err(e) = project_state.save_to_dir(&project_path) {
-                eprintln!("  {} Warning: Failed to persist ancestor state: {e}", "!".yellow());
+                eprintln!(
+                    "  {} Warning: Failed to persist ancestor state: {e}",
+                    "!".yellow()
+                );
             } else {
-                println!("  {} Recorded baseline ancestor state in .ude/state.json", "✓".green());
+                println!(
+                    "  {} Recorded baseline ancestor state in .ude/state.json",
+                    "✓".green()
+                );
             }
 
-            println!("  {} Created project directories and scaffolding", "✓".green());
-            println!("  {} Configured tracked .gitconfig & chained scripts/hooks", "✓".green());
-            println!("  {} Initialized workflow tasks (mise.toml, scratch/)", "✓".green());
+            println!(
+                "  {} Created project directories and scaffolding",
+                "✓".green()
+            );
+            println!(
+                "  {} Configured tracked .gitconfig & chained scripts/hooks",
+                "✓".green()
+            );
+            println!(
+                "  {} Initialized workflow tasks (mise.toml, scratch/)",
+                "✓".green()
+            );
             println!("{}", "==> Project initialization complete.".bold());
         }
         cli::Commands::Sync(sync_args) => {
@@ -384,13 +451,18 @@ fn main() {
                 .ok()
                 .and_then(|c| manifest::UdeManifest::parse_str(&c).ok());
 
-            let remote_url = sync_args
-                .remote
-                .or_else(|| local_manifest.as_ref().and_then(|m| m.sync.central_repo.clone()));
+            let remote_url = sync_args.remote.or_else(|| {
+                local_manifest
+                    .as_ref()
+                    .and_then(|m| m.sync.central_repo.clone())
+            });
 
-            let branch = sync_args
-                .branch
-                .unwrap_or_else(|| local_manifest.as_ref().map(|m| m.sync.branch.clone()).unwrap_or_else(|| "main".to_string()));
+            let branch = sync_args.branch.unwrap_or_else(|| {
+                local_manifest
+                    .as_ref()
+                    .map(|m| m.sync.branch.clone())
+                    .unwrap_or_else(|| "main".to_string())
+            });
 
             let (root_template_dir, remote_checkout_root, _remote_lock): (
                 PathBuf,
@@ -403,12 +475,21 @@ fn main() {
                         (tmpl_dir, Some(checkout_dir), Some(lock_guard))
                     }
                     Err(e) => {
-                        eprintln!("  {} Failed to sync with remote {}: {}", "✗".red(), r_url, e);
+                        eprintln!(
+                            "  {} Failed to sync with remote {}: {}",
+                            "✗".red(),
+                            r_url,
+                            e
+                        );
                         std::process::exit(1);
                     }
                 }
             } else {
-                (find_templates_dir().unwrap_or_else(|| PathBuf::from("templates")), None, None)
+                (
+                    find_templates_dir().unwrap_or_else(|| PathBuf::from("templates")),
+                    None,
+                    None,
+                )
             };
 
             let local_project = PathBuf::from(".");
@@ -419,52 +500,103 @@ fn main() {
                     if let Some(ref r_url) = remote_url {
                         println!("  {} Remote Upstream: {} ({})", "ℹ".blue(), r_url, branch);
                     }
-                    let sync_ctx = template::TemplateContext::detect_for_project(&local_project, "project", "generic");
-                    let states = engine.scan_project(&local_project, &root_template_dir, Some(&sync_ctx));
+                    let sync_ctx = template::TemplateContext::detect_for_project(
+                        &local_project,
+                        "project",
+                        "generic",
+                    );
+                    let states =
+                        engine.scan_project(&local_project, &root_template_dir, Some(&sync_ctx));
                     for s in states {
                         match s.status {
                             sync::SyncStatus::InSync => {
-                                println!("  {} {}: In Sync", "✓".green(), s.relative_path.display());
+                                println!(
+                                    "  {} {}: In Sync",
+                                    "✓".green(),
+                                    s.relative_path.display()
+                                );
                             }
                             sync::SyncStatus::LocallyModified => {
-                                println!("  {} {}: Locally Modified (ready to push)", "!".yellow(), s.relative_path.display());
+                                println!(
+                                    "  {} {}: Locally Modified (ready to push)",
+                                    "!".yellow(),
+                                    s.relative_path.display()
+                                );
                             }
                             sync::SyncStatus::UpstreamModified => {
-                                println!("  {} {}: Upstream Updated (ready to pull)", "↓".cyan(), s.relative_path.display());
+                                println!(
+                                    "  {} {}: Upstream Updated (ready to pull)",
+                                    "↓".cyan(),
+                                    s.relative_path.display()
+                                );
                             }
                             sync::SyncStatus::Merged => {
-                                println!("  {} {}: Merged Cleanly (3-way text merge ready to pull)", "⚡".magenta(), s.relative_path.display());
+                                println!(
+                                    "  {} {}: Merged Cleanly (3-way text merge ready to pull)",
+                                    "⚡".magenta(),
+                                    s.relative_path.display()
+                                );
                             }
                             sync::SyncStatus::Conflicted => {
-                                println!("  {} {}: Conflicted (requires manual resolution)", "✗".red(), s.relative_path.display());
+                                println!(
+                                    "  {} {}: Conflicted (requires manual resolution)",
+                                    "✗".red(),
+                                    s.relative_path.display()
+                                );
                             }
                             sync::SyncStatus::Overridden => {
-                                println!("  {} {}: Layered Override Active (*.local)", "ℹ".blue(), s.relative_path.display());
+                                println!(
+                                    "  {} {}: Layered Override Active (*.local)",
+                                    "ℹ".blue(),
+                                    s.relative_path.display()
+                                );
                             }
                         }
                     }
                 }
                 cli::SyncAction::Pull => {
-                    println!("{}", "==> Pulling updates from central configuration store...".bold());
+                    println!(
+                        "{}",
+                        "==> Pulling updates from central configuration store...".bold()
+                    );
                     if let Some(ref r_url) = remote_url {
                         println!("  {} Remote Upstream: {} ({})", "ℹ".blue(), r_url, branch);
                     }
-                    let sync_ctx = template::TemplateContext::detect_for_project(&local_project, "project", "generic");
+                    let sync_ctx = template::TemplateContext::detect_for_project(
+                        &local_project,
+                        "project",
+                        "generic",
+                    );
                     match engine.pull_updates(&local_project, &root_template_dir, &sync_ctx) {
                         sync::PullResult::Success { applied_files } => {
                             if applied_files == 0 {
                                 println!("  {} No pending upstream updates to apply.", "✓".green());
                             } else {
-                                println!("  {} Successfully pulled and materialized {} upstream update(s).", "✓".green(), applied_files);
+                                println!(
+                                    "  {} Successfully pulled and materialized {} upstream update(s).",
+                                    "✓".green(),
+                                    applied_files
+                                );
                             }
                         }
                         sync::PullResult::ConflictBlocked { path } => {
-                            eprintln!("  {} Pull aborted: {} has conflicting local and upstream modifications.", "✗".red(), path.display());
-                            eprintln!("     Resolve local modifications or create a .local override before pulling.");
+                            eprintln!(
+                                "  {} Pull aborted: {} has conflicting local and upstream modifications.",
+                                "✗".red(),
+                                path.display()
+                            );
+                            eprintln!(
+                                "     Resolve local modifications or create a .local override before pulling."
+                            );
                             std::process::exit(1);
                         }
                         sync::PullResult::IoFailed { path, reason } => {
-                            eprintln!("  {} Pull failed due to I/O error on {}: {}", "✗".red(), path.display(), reason);
+                            eprintln!(
+                                "  {} Pull failed due to I/O error on {}: {}",
+                                "✗".red(),
+                                path.display(),
+                                reason
+                            );
                             std::process::exit(1);
                         }
                     }
@@ -476,44 +608,81 @@ fn main() {
                     let mut allow_agent_rules = force;
                     let typesafe = semantic::TypeSafeClient::new();
                     if typesafe.is_available() {
-                        println!("  {} TypeSafe System One (Jev) enabled for semantic drift auditing", "✓".green());
+                        println!(
+                            "  {} TypeSafe System One (Jev) enabled for semantic drift auditing",
+                            "✓".green()
+                        );
                         let candidate_rules = local_project.join(".agents/AGENTS.md");
-                        let upstream_rules = root_template_dir.join("projects/agents/agents.md.jinja");
+                        let upstream_rules =
+                            root_template_dir.join("projects/agents/agents.md.jinja");
                         if candidate_rules.exists()
                             && upstream_rules.exists()
-                            && let (Ok(local_txt), Ok(up_txt)) = (fs::read_to_string(&candidate_rules), fs::read_to_string(&upstream_rules))
+                            && let (Ok(local_txt), Ok(up_txt)) = (
+                                fs::read_to_string(&candidate_rules),
+                                fs::read_to_string(&upstream_rules),
+                            )
                             && local_txt != up_txt
                         {
                             // Pre-scan secrets locally BEFORE sending candidate text to any external API
                             let pre_sanitizer = sanitizer::Sanitizer::new();
-                            if let sanitizer::SanitizationResult::SecretDetected { reason, .. } = pre_sanitizer.check_secrets(&local_txt) {
-                                eprintln!("  {} Security Gate: Secret detected in {} before API transmission: {}", "✗".red(), candidate_rules.display(), reason);
+                            if let sanitizer::SanitizationResult::SecretDetected {
+                                reason, ..
+                            } = pre_sanitizer.check_secrets(&local_txt)
+                            {
+                                eprintln!(
+                                    "  {} Security Gate: Secret detected in {} before API transmission: {}",
+                                    "✗".red(),
+                                    candidate_rules.display(),
+                                    reason
+                                );
                                 std::process::exit(1);
                             }
 
                             match typesafe.evaluate_drift("AGENTS.md", &up_txt, &local_txt) {
                                 Ok(semantic::SemanticDriftVerdict::PolicyShift) => {
                                     if !force {
-                                        eprintln!("  {} TypeSafe Verdict: [policy_shift] Staged rule modification alters or weakens core governance policies.", "✗".red());
-                                        eprintln!("     Use --force to override if this policy change is intentional.");
+                                        eprintln!(
+                                            "  {} TypeSafe Verdict: [policy_shift] Staged rule modification alters or weakens core governance policies.",
+                                            "✗".red()
+                                        );
+                                        eprintln!(
+                                            "     Use --force to override if this policy change is intentional."
+                                        );
                                         std::process::exit(1);
                                     } else {
-                                        println!("  {} TypeSafe Warning: [policy_shift] Overriding policy change due to --force flag.", "!".yellow());
+                                        println!(
+                                            "  {} TypeSafe Warning: [policy_shift] Overriding policy change due to --force flag.",
+                                            "!".yellow()
+                                        );
                                         allow_agent_rules = true;
                                     }
                                 }
                                 Ok(semantic::SemanticDriftVerdict::ProjectException) => {
-                                    println!("  {} TypeSafe Notice: [project_exception] Local rule additions detected. Ensure repository-specific quirks belong in *.local rather than universal baseline.", "ℹ".blue());
+                                    println!(
+                                        "  {} TypeSafe Notice: [project_exception] Local rule additions detected. Ensure repository-specific quirks belong in *.local rather than universal baseline.",
+                                        "ℹ".blue()
+                                    );
                                 }
                                 Ok(semantic::SemanticDriftVerdict::BenignRephrase) => {
-                                    println!("  {} TypeSafe Verdict: [benign_rephrase] Clear phrasing / stylistic refinement.", "✓".green());
+                                    println!(
+                                        "  {} TypeSafe Verdict: [benign_rephrase] Clear phrasing / stylistic refinement.",
+                                        "✓".green()
+                                    );
                                     allow_agent_rules = true;
                                 }
                                 Ok(semantic::SemanticDriftVerdict::Uncertain(u)) => {
-                                    println!("  {} TypeSafe Notice: Semantic verdict: {}", "ℹ".blue(), u);
+                                    println!(
+                                        "  {} TypeSafe Notice: Semantic verdict: {}",
+                                        "ℹ".blue(),
+                                        u
+                                    );
                                 }
                                 Err(e) => {
-                                    println!("  {} TypeSafe semantic evaluation bypassed: {}", "!".yellow(), e);
+                                    println!(
+                                        "  {} TypeSafe semantic evaluation bypassed: {}",
+                                        "!".yellow(),
+                                        e
+                                    );
                                 }
                             }
                         }
@@ -533,21 +702,42 @@ fn main() {
                             staged_files,
                             updated_records,
                         } => {
-                            println!("  {} Sanitization gate passed: clean of secrets & parameters applied.", "✓".green());
-                            println!("  {} Successfully synchronized {} file(s) into upstream template store.", "✓".green(), synced_files);
+                            println!(
+                                "  {} Sanitization gate passed: clean of secrets & parameters applied.",
+                                "✓".green()
+                            );
+                            println!(
+                                "  {} Successfully synchronized {} file(s) into upstream template store.",
+                                "✓".green(),
+                                synced_files
+                            );
 
                             if let Some(ref remote_checkout) = remote_checkout_root {
-                                println!("  {} Pushing synchronized templates to remote repository...", "==>".cyan());
-                                match engine.push_to_remote(remote_checkout, &branch, pr, &staged_files) {
+                                println!(
+                                    "  {} Pushing synchronized templates to remote repository...",
+                                    "==>".cyan()
+                                );
+                                match engine.push_to_remote(
+                                    remote_checkout,
+                                    &branch,
+                                    pr,
+                                    &staged_files,
+                                ) {
                                     Ok(msg) => {
                                         println!("  {} {msg}", "✓".green());
                                         if !pr {
-                                            let mut project_state = sync::ProjectState::load_from_dir(&local_project);
+                                            let mut project_state =
+                                                sync::ProjectState::load_from_dir(&local_project);
                                             for (rel, hash, content) in updated_records {
                                                 project_state.record_file(&rel, hash, content);
                                             }
-                                            if let Err(e) = project_state.save_to_dir(&local_project) {
-                                                eprintln!("  {} Warning: Failed to save updated ancestor state: {e}", "!".yellow());
+                                            if let Err(e) =
+                                                project_state.save_to_dir(&local_project)
+                                            {
+                                                eprintln!(
+                                                    "  {} Warning: Failed to save updated ancestor state: {e}",
+                                                    "!".yellow()
+                                                );
                                             }
                                         } else {
                                             println!(
@@ -558,26 +748,47 @@ fn main() {
                                         }
                                     }
                                     Err(err) => {
-                                        eprintln!("  {} Failed to push to remote: {err}", "✗".red());
+                                        eprintln!(
+                                            "  {} Failed to push to remote: {err}",
+                                            "✗".red()
+                                        );
                                         std::process::exit(1);
                                     }
                                 }
                             }
                         }
                         sync::PushResult::SecretBlocked { path, reason } => {
-                            eprintln!("  {} Push rejected on {}: {}", "✗".red(), path.display(), reason);
+                            eprintln!(
+                                "  {} Push rejected on {}: {}",
+                                "✗".red(),
+                                path.display(),
+                                reason
+                            );
                             std::process::exit(1);
                         }
                         sync::PushResult::BoundaryBlocked { path } => {
-                            eprintln!("  {} Push rejected: {} is within private publish boundary.", "✗".red(), path.display());
+                            eprintln!(
+                                "  {} Push rejected: {} is within private publish boundary.",
+                                "✗".red(),
+                                path.display()
+                            );
                             std::process::exit(1);
                         }
                         sync::PushResult::ConflictBlocked { path } => {
-                            eprintln!("  {} Push rejected: {} conflicts with upstream.", "✗".red(), path.display());
+                            eprintln!(
+                                "  {} Push rejected: {} conflicts with upstream.",
+                                "✗".red(),
+                                path.display()
+                            );
                             std::process::exit(1);
                         }
                         sync::PushResult::IoFailed { path, reason } => {
-                            eprintln!("  {} Push failed due to I/O error on {}: {}", "✗".red(), path.display(), reason);
+                            eprintln!(
+                                "  {} Push failed due to I/O error on {}: {}",
+                                "✗".red(),
+                                path.display(),
+                                reason
+                            );
                             std::process::exit(1);
                         }
                         sync::PushResult::GitRemoteFailed { reason } => {
@@ -628,8 +839,12 @@ fn find_templates_dir() -> Option<PathBuf> {
 fn copy_template_file(src: &Path, dst: &Path) -> Result<(), String> {
     if src.exists() {
         if let Some(parent) = dst.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|e| format!("Failed to create parent directory {}: {e}", parent.display()))?;
+            fs::create_dir_all(parent).map_err(|e| {
+                format!(
+                    "Failed to create parent directory {}: {e}",
+                    parent.display()
+                )
+            })?;
         }
         fs::copy(src, dst)
             .map_err(|e| format!("Failed to copy {} to {}: {e}", src.display(), dst.display()))?;
@@ -650,11 +865,14 @@ fn render_and_write(
             .render_str(&content, ctx)
             .map_err(|e| format!("Failed to render template {}: {e}", src.display()))?;
         if let Some(parent) = dst.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|e| format!("Failed to create parent directory {}: {e}", parent.display()))?;
+            fs::create_dir_all(parent).map_err(|e| {
+                format!(
+                    "Failed to create parent directory {}: {e}",
+                    parent.display()
+                )
+            })?;
         }
-        fs::write(dst, rendered)
-            .map_err(|e| format!("Failed to write {}: {e}", dst.display()))?;
+        fs::write(dst, rendered).map_err(|e| format!("Failed to write {}: {e}", dst.display()))?;
     }
     Ok(())
 }
