@@ -133,21 +133,16 @@ impl StagedTransaction {
     }
 
     /// Creates `dir` and any missing ancestors one level at a time, recording each
-    /// directory it created.
+    /// directory it created. A path that cannot be inspected is treated as missing;
+    /// creating it then reports the real error (for example ENOTDIR under a file).
     fn create_missing_dirs(&mut self, dir: &Path) -> Result<(), String> {
         let mut missing = Vec::new();
         let mut current = Some(dir);
         while let Some(path) = current {
-            match fs::symlink_metadata(path) {
-                Ok(_) => break,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => missing.push(path),
-                Err(e) => {
-                    return Err(format!(
-                        "Failed to inspect directory {}: {e}",
-                        path.display()
-                    ));
-                }
+            if fs::symlink_metadata(path).is_ok() {
+                break;
             }
+            missing.push(path);
             current = path.parent();
         }
         for path in missing.into_iter().rev() {
