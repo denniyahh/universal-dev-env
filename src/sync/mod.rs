@@ -1,4 +1,5 @@
 pub mod merge;
+pub mod staging;
 pub mod state;
 use state::STATE_FILE_REL;
 pub use state::{FileStateRecord, ProjectState};
@@ -777,67 +778,48 @@ impl SyncEngine {
             return PullResult::Success { applied_files: 0 };
         }
 
-        // Pass 2: Write files and update ancestor state
+        // Pass 2: stage every file and the new state before replacing anything (D-05).
+        // Any staging error returns here; dropping `transaction` deletes the temps and
+        // the directories staging created, so nothing in the project changes.
         let mut project_state = match ProjectState::load_from_dir(local_root) {
             Ok(state) => state,
             Err(reason) => return state_pull_failure(reason),
         };
-        let mut applied = 0;
+        let mut transaction = staging::StagedTransaction::new(local_root);
 
         for (rel, target, content_bytes, ancestor_hash, ancestor_content) in candidates_to_write {
-            if let Err(reason) = validate_safe_write_target(local_root, &rel) {
+            let mode = pull_file_mode(&rel, &target);
+            if let Err(reason) = transaction.stage_write(&rel, &content_bytes, mode) {
                 return PullResult::IoFailed { path: rel, reason };
             }
-
-            if let Some(parent) = target.parent()
-                && let Err(e) = fs::create_dir_all(parent)
-            {
-                return PullResult::IoFailed {
-                    path: rel,
-                    reason: format!("Failed to create parent directory: {e}"),
-                };
-            }
-
-            if let Err(e) = fs::write(&target, &content_bytes) {
-                return PullResult::IoFailed {
-                    path: rel,
-                    reason: format!("Failed to write local file: {e}"),
-                };
-            }
-
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let rel_str = rel.to_string_lossy();
-                if rel_str.starts_with("scripts/hooks/")
-                    || rel_str.starts_with("scratch/")
-                    || rel_str == "scripts/check-in-container.sh"
-                {
-                    let _ = fs::set_permissions(&target, fs::Permissions::from_mode(0o755));
-                }
-            }
-
             project_state.record_file(&rel, ancestor_hash, ancestor_content);
-            applied += 1;
         }
 
-        let mut reconciled = false;
         for (rel, hash, content) in converged_to_record {
             project_state.record_file(&rel, hash, content);
-            reconciled = true;
         }
 
-        if (applied > 0 || reconciled)
-            && let Err(e) = project_state.save_to_dir(local_root)
-        {
-            return PullResult::IoFailed {
-                path: PathBuf::from(".ude/state.json"),
-                reason: format!("Failed to persist state: {e}"),
-            };
+        let staged_state = match project_state.stage_to_dir(local_root) {
+            Ok(staged) => staged,
+            Err(reason) => return state_pull_failure(format!("Failed to stage state: {reason}")),
+        };
+
+        // Commit phase: files first, state.json last.
+        let applied = match transaction.commit() {
+            Ok(applied) => applied,
+            Err(reason) => {
+                return PullResult::IoFailed {
+                    path: PathBuf::from(STATE_FILE_REL),
+                    reason: format!("rename phase failed, state not updated: {reason}"),
+                };
+            }
+        };
+        if let Err(e) = staged_state.commit() {
+            return state_pull_failure(format!("Failed to persist state: {e}"));
         }
 
         PullResult::Success {
-            applied_files: applied,
+            applied_files: applied.len(),
         }
     }
 
@@ -1359,6 +1341,28 @@ fn state_pull_failure(reason: String) -> PullResult {
         path: PathBuf::from(STATE_FILE_REL),
         reason,
     }
+}
+
+/// Mode for a file pull writes: 0o755 for hook and script paths, otherwise the
+/// existing target's mode, or 0o644 for a new file.
+fn pull_file_mode(rel: &Path, target: &Path) -> u32 {
+    let rel_str = rel.to_string_lossy();
+    if rel_str.starts_with("scripts/hooks/")
+        || rel_str.starts_with("scratch/")
+        || rel_str == "scripts/check-in-container.sh"
+    {
+        return 0o755;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = fs::symlink_metadata(target) {
+            return meta.permissions().mode() & 0o7777;
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = target;
+    0o644
 }
 
 /// Push outcome for an error loading or saving `.ude/state.json`.

@@ -1,0 +1,140 @@
+//! Stage-then-commit transaction for multi-file writes (SYNC-02, D-05).
+//!
+//! Every file is first written to a temp file in its target's own directory and
+//! validated. Only after all staging succeeded are the temps renamed over their
+//! targets. No fsync and no on-disk journal (D-01): a failure during the rename phase
+//! can leave a partial update, and the error says how many files were replaced.
+
+use std::fs;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+
+/// One staged file: its project-relative path, absolute target and temp file.
+struct StagedWrite {
+    rel: PathBuf,
+    target: PathBuf,
+    temp: tempfile::NamedTempFile,
+}
+
+/// A set of staged file writes under one root, applied together by [`Self::commit`].
+///
+/// Dropping the transaction without a successful commit deletes every staged temp
+/// file and removes the directories staging created (when they are empty), so a
+/// staging failure leaves the tree as it was.
+pub struct StagedTransaction {
+    root: PathBuf,
+    writes: Vec<StagedWrite>,
+    created_dirs: Vec<PathBuf>,
+}
+
+impl StagedTransaction {
+    /// Starts an empty transaction whose paths are relative to `root`.
+    pub fn new(root: &Path) -> Self {
+        Self {
+            root: root.to_path_buf(),
+            writes: Vec::new(),
+            created_dirs: Vec::new(),
+        }
+    }
+
+    /// Stages `bytes` for `rel` with permission bits `mode` (Unix only) without
+    /// touching the target. Refuses unsafe paths, symlinked targets or parents, and
+    /// targets that are directories. Missing parent directories are created and
+    /// recorded so an abort can remove them.
+    pub fn stage_write(&mut self, rel: &Path, bytes: &[u8], mode: u32) -> Result<(), String> {
+        let target = super::validate_safe_write_target(&self.root, rel)?;
+        if fs::symlink_metadata(&target).is_ok_and(|meta| meta.is_dir()) {
+            return Err(format!("Target path is a directory: {}", target.display()));
+        }
+        let parent = target
+            .parent()
+            .ok_or_else(|| format!("Target path has no parent: {}", target.display()))?
+            .to_path_buf();
+        self.create_missing_dirs(&parent)?;
+        let stage_err = |e: std::io::Error| format!("Failed to stage {}: {e}", rel.display());
+        let mut temp = tempfile::NamedTempFile::new_in(&parent).map_err(stage_err)?;
+        temp.write_all(bytes).map_err(stage_err)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            temp.as_file()
+                .set_permissions(fs::Permissions::from_mode(mode))
+                .map_err(stage_err)?;
+        }
+        #[cfg(not(unix))]
+        let _ = mode;
+        self.writes.push(StagedWrite {
+            rel: rel.to_path_buf(),
+            target,
+            temp,
+        });
+        Ok(())
+    }
+
+    /// Creates `dir` and any missing ancestors one level at a time, recording each
+    /// directory it created.
+    fn create_missing_dirs(&mut self, dir: &Path) -> Result<(), String> {
+        let mut missing = Vec::new();
+        let mut current = Some(dir);
+        while let Some(path) = current {
+            match fs::symlink_metadata(path) {
+                Ok(_) => break,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => missing.push(path),
+                Err(e) => {
+                    return Err(format!(
+                        "Failed to inspect directory {}: {e}",
+                        path.display()
+                    ));
+                }
+            }
+            current = path.parent();
+        }
+        for path in missing.into_iter().rev() {
+            fs::create_dir(path)
+                .map_err(|e| format!("Failed to create directory {}: {e}", path.display()))?;
+            self.created_dirs.push(path.to_path_buf());
+        }
+        Ok(())
+    }
+
+    /// Renames every staged temp over its target, in staging order, re-validating each
+    /// target immediately before its rename. Returns the applied relative paths.
+    ///
+    /// On an error the temps not yet renamed are deleted; files already renamed stay
+    /// replaced (D-01) and the error names how many there were.
+    pub fn commit(mut self) -> Result<Vec<PathBuf>, String> {
+        let writes = std::mem::take(&mut self.writes);
+        let total = writes.len();
+        let mut applied = Vec::with_capacity(total);
+        for StagedWrite { rel, target, temp } in writes {
+            let replaced = applied.len();
+            super::validate_safe_write_target(&self.root, &rel).map_err(|reason| {
+                format!(
+                    "Refusing to replace {}: {reason} ({replaced} of {total} files were already replaced)",
+                    rel.display()
+                )
+            })?;
+            temp.persist(&target).map_err(|e| {
+                format!(
+                    "Failed to replace {}: {} ({replaced} of {total} files were already replaced)",
+                    rel.display(),
+                    e.error
+                )
+            })?;
+            applied.push(rel);
+        }
+        self.created_dirs.clear();
+        Ok(applied)
+    }
+}
+
+impl Drop for StagedTransaction {
+    /// Deletes staged temps first, then removes the directories this transaction
+    /// created, deepest first. A directory that still holds a file stays.
+    fn drop(&mut self) {
+        self.writes.clear();
+        for dir in self.created_dirs.iter().rev() {
+            let _ = fs::remove_dir(dir);
+        }
+    }
+}
