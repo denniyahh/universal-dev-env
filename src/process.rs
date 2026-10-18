@@ -39,6 +39,19 @@ pub const GIT_LOCAL_ENV_VARS: [&str; 15] = [
     "GIT_COMMON_DIR",
 ];
 
+/// Number of trailing non-empty stderr lines that [`stderr_excerpt`] keeps.
+pub const STDERR_EXCERPT_LINES: usize = 5;
+
+/// RED stub (plan 01-03 Task 1): returns the text unchanged.
+pub fn redact_userinfo(text: &str) -> String {
+    text.to_string()
+}
+
+/// RED stub (plan 01-03 Task 1): returns nothing.
+pub fn stderr_excerpt(_out: &RunOutput) -> String {
+    String::new()
+}
+
 /// Exit status and captured output of a child run through [`run_bounded`].
 #[derive(Debug)]
 pub struct RunOutput {
@@ -269,6 +282,49 @@ mod tests {
     #[cfg(target_os = "linux")]
     fn setsid_path() -> std::path::PathBuf {
         which::which("setsid").expect("setsid (util-linux) not found on PATH")
+    }
+
+    #[test]
+    fn test_redact_userinfo() {
+        assert_eq!(
+            redact_userinfo(
+                "fatal: unable to access 'https://x-access-token:ghp_abc@github.com/o/r.git/': 403"
+            ),
+            "fatal: unable to access 'https://***@github.com/o/r.git/': 403"
+        );
+        assert_eq!(redact_userinfo("ssh://git@host/r"), "ssh://***@host/r");
+        assert_eq!(
+            redact_userinfo("from https://a:b@one.example/x to https://c@two.example/y"),
+            "from https://***@one.example/x to https://***@two.example/y"
+        );
+
+        // Negative controls: no userinfo, no scheme, or an `@` after the first `/`.
+        for unchanged in [
+            "https://github.com/o/r.git",
+            "plain text naming user@example.com without a scheme",
+            "https://host.example/path@not-userinfo",
+        ] {
+            assert_eq!(redact_userinfo(unchanged), unchanged);
+        }
+    }
+
+    #[test]
+    fn test_stderr_excerpt_redacts_and_truncates() {
+        let output = |stderr: &str| RunOutput {
+            status: ExitStatus::default(),
+            stdout: Vec::new(),
+            stderr: stderr.as_bytes().to_vec(),
+        };
+        // 8 lines, one of them empty: the last 5 non-empty lines start at line3.
+        let stderr = "line1\nline2\nline3\n\nline4\nfatal: unable to access 'https://user:tok@host/r.git/'\nline6\nline7\n";
+        assert_eq!(STDERR_EXCERPT_LINES, 5);
+        assert_eq!(
+            stderr_excerpt(&output(stderr)),
+            "line3 | line4 | fatal: unable to access 'https://***@host/r.git/' | line6 | line7"
+        );
+
+        // Negative control: no stderr, no excerpt.
+        assert_eq!(stderr_excerpt(&output("")), "");
     }
 
     #[test]
