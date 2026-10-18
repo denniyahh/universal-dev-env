@@ -2037,6 +2037,96 @@ mod tests {
         assert_eq!(template, crlf(edited).as_bytes());
     }
 
+    /// Asserts that the recorded `.gitconfig` ancestor is the fingerprint and text of
+    /// `text_lf`, not a raw hash or CRLF content.
+    fn assert_gitconfig_ancestor(local: &Path, text_lf: &str, case: &str) {
+        let state = ProjectState::load_from_dir(local).unwrap();
+        let rel = Path::new(".gitconfig");
+        assert_eq!(
+            state.get_ancestor_hash(rel),
+            Some(SyncEngine::fingerprint(text_lf.as_bytes()).as_str()),
+            "{case}: ancestor hash"
+        );
+        assert_eq!(
+            state.get_ancestor_content(rel),
+            Some(text_lf),
+            "{case}: ancestor content"
+        );
+    }
+
+    #[test]
+    fn test_ancestor_writers_record_fingerprint_and_lf_content() {
+        let engine = SyncEngine::new();
+        let base = "line1\nline2\nline3\nline4\nline5\n";
+        let local_edit = "LOCAL1\nline2\nline3\nline4\nline5\n";
+        let upstream_edit = "line1\nline2\nline3\nUPSTREAM4\nline5\n";
+        // Every case writes CRLF bytes, so a raw hash or unnormalized content differs.
+        let setup = |ancestor: &str, local: &str, upstream: &str| {
+            let local_dir = tempdir().unwrap();
+            let upstream_dir = tempdir().unwrap();
+            let mut state = ProjectState::default();
+            state.record_file(
+                Path::new(".gitconfig"),
+                SyncEngine::fingerprint(ancestor.as_bytes()),
+                Some(ancestor.to_string()),
+            );
+            state.save_to_dir(local_dir.path()).unwrap();
+            fs::write(local_dir.path().join(".gitconfig"), local).unwrap();
+            write_upstream_gitconfig(upstream_dir.path(), upstream.as_bytes());
+            (local_dir, upstream_dir)
+        };
+        let pull = |local: &Path, upstream: &Path| {
+            let ctx = crate::template::TemplateContext::detect_for_project(local, "p", "rust");
+            engine.pull_updates(local, upstream, &ctx)
+        };
+
+        // Pull, applied upstream change.
+        let (local, upstream) = setup(base, &crlf(base), &crlf(upstream_edit));
+        assert_eq!(
+            pull(local.path(), upstream.path()),
+            PullResult::Success { applied_files: 1 }
+        );
+        assert_gitconfig_ancestor(local.path(), upstream_edit, "pull applied");
+
+        // Pull, clean merge: the upstream version becomes the ancestor.
+        let (local, upstream) = setup(base, &crlf(local_edit), &crlf(upstream_edit));
+        assert_eq!(
+            pull(local.path(), upstream.path()),
+            PullResult::Success { applied_files: 1 }
+        );
+        assert_gitconfig_ancestor(local.path(), upstream_edit, "pull merged");
+
+        // Pull, converged copies with a stale ancestor are reconciled.
+        let (local, upstream) = setup(base, &crlf(upstream_edit), &crlf(upstream_edit));
+        assert_eq!(
+            pull(local.path(), upstream.path()),
+            PullResult::Success { applied_files: 0 }
+        );
+        assert_gitconfig_ancestor(local.path(), upstream_edit, "pull converged");
+
+        // Push with immediate persistence records the published local version.
+        let (local, upstream) = setup(base, &crlf(local_edit), base);
+        let res = engine.push_updates(
+            local.path(),
+            upstream.path(),
+            "/home/alice",
+            "/home/alice/.config",
+            false,
+            true,
+        );
+        assert!(
+            matches!(
+                res,
+                PushResult::Success {
+                    synced_files: 1,
+                    ..
+                }
+            ),
+            "push: {res:?}"
+        );
+        assert_gitconfig_ancestor(local.path(), local_edit, "push");
+    }
+
     #[test]
     fn test_pull_updates_materializes_files_and_updates_state() {
         let engine = SyncEngine::new();
