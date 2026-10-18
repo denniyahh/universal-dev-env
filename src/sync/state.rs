@@ -193,6 +193,7 @@ impl ProjectState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sync::SyncEngine;
     use tempfile::tempdir;
 
     #[test]
@@ -295,6 +296,123 @@ mod tests {
         write_state_file(dir.path(), current.as_bytes());
         let loaded = ProjectState::load_from_dir(dir.path()).unwrap();
         assert_eq!(loaded.version, CURRENT_STATE_VERSION);
+    }
+
+    /// Writes a version 1 state.json holding `(key, ancestor_hash, ancestor_content)` records.
+    fn write_v1_state(dir: &Path, records: &[(&str, &str, Option<&str>)]) -> PathBuf {
+        let mut files = serde_json::Map::new();
+        for (key, hash, content) in records {
+            let mut record = serde_json::json!({ "ancestor_hash": hash, "last_synced_at": null });
+            if let Some(content) = content {
+                record["ancestor_content"] = (*content).into();
+            }
+            files.insert((*key).to_string(), record);
+        }
+        let state = serde_json::json!({ "version": 1, "files": files });
+        write_state_file(dir, state.to_string().as_bytes())
+    }
+
+    #[test]
+    fn test_migrate_v1_content_record() {
+        let dir = tempdir().unwrap();
+        let crlf = "a\r\nb\r\n";
+        let old_hash = SyncEngine::compute_hash(crlf.as_bytes());
+        let path = write_v1_state(dir.path(), &[(".gitconfig", &old_hash, Some(crlf))]);
+        let before = fs::read(&path).unwrap();
+
+        let loaded = ProjectState::load_from_dir(dir.path()).unwrap();
+        let rel = Path::new(".gitconfig");
+        assert_eq!(
+            loaded.get_ancestor_hash(rel),
+            Some(SyncEngine::fingerprint(b"a\nb\n").as_str()),
+            "a content record is re-hashed from its stored content"
+        );
+        assert_eq!(loaded.get_ancestor_content(rel), Some("a\nb\n"));
+        assert_eq!(loaded.version, 2);
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            before,
+            "a load rewrote state.json"
+        );
+    }
+
+    #[test]
+    fn test_migrate_v1_hash_only_record() {
+        let dir = tempdir().unwrap();
+        let local = b"a\r\nb\r\n";
+        fs::write(dir.path().join(".gitconfig"), local).unwrap();
+        let old_hash = SyncEngine::compute_hash(local);
+        assert_ne!(old_hash, SyncEngine::fingerprint(local), "precondition");
+        write_v1_state(dir.path(), &[(".gitconfig", &old_hash, None)]);
+
+        let loaded = ProjectState::load_from_dir(dir.path()).unwrap();
+        let rel = Path::new(".gitconfig");
+        assert_eq!(
+            loaded.get_ancestor_hash(rel),
+            Some(SyncEngine::fingerprint(local).as_str()),
+            "a hash-only record matching the local file adopts its fingerprint"
+        );
+        assert_eq!(loaded.get_ancestor_content(rel), None);
+        assert_eq!(loaded.version, 2);
+    }
+
+    #[test]
+    fn test_migrate_v1_mismatch_unchanged() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join(".gitconfig"), b"a\r\nb\r\n").unwrap();
+        let old_hash = SyncEngine::compute_hash(b"a\r\nedited\r\n");
+        write_v1_state(dir.path(), &[(".gitconfig", &old_hash, None)]);
+
+        let loaded = ProjectState::load_from_dir(dir.path()).unwrap();
+        assert_eq!(
+            loaded.get_ancestor_hash(Path::new(".gitconfig")),
+            Some(old_hash.as_str()),
+            "a record that does not match the local file must keep its old hash"
+        );
+        assert_eq!(loaded.version, 2);
+    }
+
+    #[test]
+    fn test_migrate_v1_unsafe_key_ignored() {
+        let root = tempdir().unwrap();
+        let project = root.path().join("project");
+        fs::create_dir(&project).unwrap();
+        // Outside files whose raw hash matches their records: adopting them would mean
+        // the migration read outside the project.
+        let outside = b"outside\r\n";
+        fs::write(root.path().join("outside.txt"), outside).unwrap();
+        let outside_hash = SyncEngine::compute_hash(outside);
+        let absolute_key = root
+            .path()
+            .join("outside.txt")
+            .to_string_lossy()
+            .to_string();
+        // Positive control in the same state: a safe key matching its local file migrates.
+        let local = b"local\r\n";
+        fs::write(project.join("mise.toml"), local).unwrap();
+        let local_hash = SyncEngine::compute_hash(local);
+        write_v1_state(
+            &project,
+            &[
+                ("../outside.txt", &outside_hash, None),
+                (&absolute_key, &outside_hash, None),
+                ("mise.toml", &local_hash, None),
+            ],
+        );
+
+        let loaded = ProjectState::load_from_dir(&project).unwrap();
+        assert_eq!(loaded.version, 2);
+        for key in ["../outside.txt", absolute_key.as_str()] {
+            assert_eq!(
+                loaded.get_ancestor_hash(Path::new(key)),
+                Some(outside_hash.as_str()),
+                "unsafe key {key} must be left unchanged"
+            );
+        }
+        assert_eq!(
+            loaded.get_ancestor_hash(Path::new("mise.toml")),
+            Some(SyncEngine::fingerprint(local).as_str())
+        );
     }
 
     /// A state with one recorded file whose hash is `hash`.
