@@ -20,6 +20,7 @@ colored = "3.0"
 tempfile = "3.17"
 directories = "6.0"
 similar = "2.7"
+process-wrap = { version = "10.0.1", default-features = false, features = ["std", "process-group", "job-object"] }
 
 [dev-dependencies]
 proptest = "1.6"
