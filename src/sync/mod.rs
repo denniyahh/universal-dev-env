@@ -50,6 +50,25 @@ impl<'a> FileVersion<'a> {
     }
 }
 
+/// Line-ending style of a text file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EolStyle {
+    /// `\n` line endings.
+    Lf,
+    /// `\r\n` line endings.
+    Crlf,
+}
+
+/// Dominant line-ending style of `bytes`.
+pub fn detect_eol_style(_bytes: &[u8]) -> EolStyle {
+    EolStyle::Lf
+}
+
+/// Renders LF-normalized `text_lf` with `style` line endings.
+pub fn apply_eol_style(text_lf: &str, _style: EolStyle) -> String {
+    text_lf.to_string()
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum PushResult {
     Success {
@@ -1783,6 +1802,204 @@ mod tests {
             saved.contains(&SyncEngine::fingerprint(lf.as_bytes())),
             "saved state was: {saved}"
         );
+    }
+
+    #[test]
+    fn test_eol_detection() {
+        assert_eq!(detect_eol_style(b"a\r\nb\r\n"), EolStyle::Crlf);
+        assert_eq!(detect_eol_style(b"\r\n"), EolStyle::Crlf);
+        assert_eq!(
+            detect_eol_style(b"a\r\nb\r\nc\n"),
+            EolStyle::Crlf,
+            "CRLF pairs outnumber bare LF"
+        );
+
+        assert_eq!(detect_eol_style(b"a\nb\n"), EolStyle::Lf);
+        assert_eq!(detect_eol_style(b"a\r\nb\n"), EolStyle::Lf, "a tie is LF");
+        assert_eq!(detect_eol_style(b"no newline"), EolStyle::Lf);
+        assert_eq!(detect_eol_style(b""), EolStyle::Lf);
+        assert_eq!(detect_eol_style(b"\n"), EolStyle::Lf);
+        assert_eq!(
+            detect_eol_style(b"a\rb\r"),
+            EolStyle::Lf,
+            "lone CRs are not line endings"
+        );
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn test_eol_style_roundtrip_prop(
+            lines in proptest::collection::vec(r"[^\r\n]{0,16}", 0..=8)
+        ) {
+            let text = lines.join("\n");
+            let crlf = apply_eol_style(&text, EolStyle::Crlf);
+            let lf = apply_eol_style(&text, EolStyle::Lf);
+            proptest::prop_assert_eq!(SyncEngine::normalize_eol(&crlf), text.clone());
+            proptest::prop_assert_eq!(&lf, &text);
+            proptest::prop_assert!(!lf.contains('\r'), "an LF file gained a CR");
+            if text.contains('\n') {
+                proptest::prop_assert_eq!(detect_eol_style(crlf.as_bytes()), EolStyle::Crlf);
+                // Negative control: the LF rendering is detected as LF.
+                proptest::prop_assert_eq!(detect_eol_style(text.as_bytes()), EolStyle::Lf);
+            }
+        }
+    }
+
+    /// `text` with every LF turned into CRLF.
+    fn crlf(text: &str) -> String {
+        text.replace('\n', "\r\n")
+    }
+
+    /// Pulls `.gitconfig` with the given ancestor (recorded LF), local copy and upstream
+    /// template, asserts the status that follows, and returns the local file's bytes.
+    fn pull_gitconfig(
+        ancestor: Option<&str>,
+        local: Option<&str>,
+        upstream: &str,
+        status_after: SyncStatus,
+    ) -> Vec<u8> {
+        let engine = SyncEngine::new();
+        let local_dir = tempdir().unwrap();
+        let upstream_dir = tempdir().unwrap();
+        if let Some(base) = ancestor {
+            let mut state = ProjectState::default();
+            state.record_file(
+                Path::new(".gitconfig"),
+                SyncEngine::fingerprint(base.as_bytes()),
+                Some(base.to_string()),
+            );
+            state.save_to_dir(local_dir.path()).unwrap();
+        }
+        let local_path = local_dir.path().join(".gitconfig");
+        if let Some(text) = local {
+            fs::write(&local_path, text).unwrap();
+        }
+        write_upstream_gitconfig(upstream_dir.path(), upstream.as_bytes());
+        let ctx = crate::template::TemplateContext::detect_for_project(
+            local_dir.path(),
+            "test-proj",
+            "rust",
+        );
+
+        assert_eq!(
+            engine.pull_updates(local_dir.path(), upstream_dir.path(), &ctx),
+            PullResult::Success { applied_files: 1 }
+        );
+        assert_eq!(
+            scan_status(&engine, local_dir.path(), upstream_dir.path(), ".gitconfig"),
+            status_after
+        );
+        fs::read(&local_path).unwrap()
+    }
+
+    #[test]
+    fn test_pull_preserves_eol_style() {
+        let base = "[core]\n  autocrlf = input\n  editor = vim\n";
+        let new = "[core]\n  autocrlf = input\n  editor = nano\n";
+
+        let written = pull_gitconfig(Some(base), Some(&crlf(base)), new, SyncStatus::InSync);
+        assert_eq!(
+            String::from_utf8(written).unwrap(),
+            crlf(new),
+            "pull into a CRLF file must write CRLF"
+        );
+
+        // Negative control: an LF local file never gains a CR.
+        let written = pull_gitconfig(Some(base), Some(base), new, SyncStatus::InSync);
+        assert!(!written.contains(&b'\r'), "an LF file gained a CR");
+        assert_eq!(written, new.as_bytes());
+
+        // A file absent locally is written exactly as upstream renders it.
+        let written = pull_gitconfig(None, None, &crlf(new), SyncStatus::InSync);
+        assert_eq!(written, crlf(new).as_bytes());
+    }
+
+    #[test]
+    fn test_pull_merged_crlf_keeps_crlf() {
+        let base = "line1\nline2\nline3\nline4\nline5\n";
+        let local = "LOCAL1\nline2\nline3\nline4\nline5\n";
+        let upstream = "line1\nline2\nline3\nUPSTREAM4\nline5\n";
+        let merged = "LOCAL1\nline2\nline3\nUPSTREAM4\nline5\n";
+
+        // A merged file keeps the local edit, so it reads as locally modified afterwards.
+        let written = pull_gitconfig(
+            Some(base),
+            Some(&crlf(local)),
+            upstream,
+            SyncStatus::LocallyModified,
+        );
+        assert_eq!(
+            String::from_utf8(written).unwrap(),
+            crlf(merged),
+            "a merge into a CRLF file must write CRLF"
+        );
+
+        // Negative control: an LF local file gets the merge with LF only.
+        let written = pull_gitconfig(
+            Some(base),
+            Some(local),
+            upstream,
+            SyncStatus::LocallyModified,
+        );
+        assert!(!written.contains(&b'\r'), "an LF file gained a CR");
+        assert_eq!(written, merged.as_bytes());
+    }
+
+    /// Pushes a locally edited `.gitconfig` (`ancestor` recorded LF when given) over
+    /// the upstream template `template` (absent when `None`) and returns the template.
+    fn push_gitconfig(ancestor: Option<&str>, template: Option<&str>, local: &str) -> Vec<u8> {
+        let engine = SyncEngine::new();
+        let local_dir = tempdir().unwrap();
+        let upstream_dir = tempdir().unwrap();
+        if let Some(base) = ancestor {
+            let mut state = ProjectState::default();
+            state.record_file(
+                Path::new(".gitconfig"),
+                SyncEngine::fingerprint(base.as_bytes()),
+                Some(base.to_string()),
+            );
+            state.save_to_dir(local_dir.path()).unwrap();
+        }
+        if let Some(text) = template {
+            write_upstream_gitconfig(upstream_dir.path(), text.as_bytes());
+        }
+        fs::write(local_dir.path().join(".gitconfig"), local).unwrap();
+
+        let res = engine.push_updates(
+            local_dir.path(),
+            upstream_dir.path(),
+            "/home/alice",
+            "/home/alice/.config",
+            false,
+            true,
+        );
+        match res {
+            PushResult::Success { synced_files, .. } => assert_eq!(synced_files, 1),
+            other => panic!("Expected Success on push, got {other:?}"),
+        }
+        fs::read(upstream_dir.path().join("projects/generic/gitconfig.repo")).unwrap()
+    }
+
+    #[test]
+    fn test_push_preserves_upstream_eol_style() {
+        let base = "[core]\n  autocrlf = input\n  editor = vim\n";
+        let edited = "[core]\n  autocrlf = input\n  editor = nano\n";
+
+        let template = push_gitconfig(Some(base), Some(base), &crlf(edited));
+        assert!(!template.contains(&b'\r'), "an LF template gained a CR");
+        assert_eq!(template, edited.as_bytes());
+
+        // Negative control: a CRLF template stays CRLF when an LF local edit is pushed.
+        let template = push_gitconfig(Some(base), Some(&crlf(base)), edited);
+        assert_eq!(
+            String::from_utf8(template).unwrap(),
+            crlf(edited),
+            "a CRLF template must stay CRLF"
+        );
+
+        // A template absent upstream is published as the local text is.
+        let template = push_gitconfig(None, None, &crlf(edited));
+        assert_eq!(template, crlf(edited).as_bytes());
     }
 
     #[test]
