@@ -2767,6 +2767,94 @@ mod tests {
         );
     }
 
+    /// Project with a locally modified `.gitconfig` (ancestor = the upstream template)
+    /// and a new `scripts/hooks/pre-commit`. With `collide`, the upstream
+    /// `projects/generic/hooks` is a regular file, so staging the hook template fails
+    /// after `gitconfig.repo` was staged.
+    fn push_staging_fixture(collide: bool) -> (tempfile::TempDir, tempfile::TempDir) {
+        let local = tempdir().unwrap();
+        let upstream = tempdir().unwrap();
+        let old = "[core]\n  autocrlf = false\n";
+        let up_gitconfig = upstream.path().join("projects/generic/gitconfig.repo");
+        fs::create_dir_all(up_gitconfig.parent().unwrap()).unwrap();
+        fs::write(&up_gitconfig, old).unwrap();
+        if collide {
+            fs::write(
+                upstream.path().join("projects/generic/hooks"),
+                "not a directory\n",
+            )
+            .unwrap();
+        }
+        let mut state = ProjectState::default();
+        state.record_file(
+            Path::new(".gitconfig"),
+            SyncEngine::fingerprint(old.as_bytes()),
+            Some(old.to_string()),
+        );
+        state.save_to_dir(local.path()).unwrap();
+        fs::write(
+            local.path().join(".gitconfig"),
+            "[core]\n  autocrlf = input\n",
+        )
+        .unwrap();
+        let hook = local.path().join("scripts/hooks/pre-commit");
+        fs::create_dir_all(hook.parent().unwrap()).unwrap();
+        fs::write(&hook, "#!/bin/sh\nexit 0\n").unwrap();
+        (local, upstream)
+    }
+
+    #[test]
+    fn test_push_staging_failure_no_partial_writes() {
+        let engine = SyncEngine::new();
+        let push = |local: &Path, upstream: &Path| {
+            engine.push_updates(
+                local,
+                upstream,
+                "/home/alice",
+                "/home/alice/.config",
+                false,
+                true,
+            )
+        };
+        let (local, upstream) = push_staging_fixture(true);
+        let up_gitconfig = upstream.path().join("projects/generic/gitconfig.repo");
+        let template_before = fs::read(&up_gitconfig).unwrap();
+        let state_before = fs::read(local.path().join(STATE_FILE_REL)).unwrap();
+
+        let res = push(local.path(), upstream.path());
+        assert!(
+            matches!(&res, PushResult::IoFailed { path, .. } if path == Path::new("scripts/hooks/pre-commit")),
+            "staging failure must name the hook: {res:?}"
+        );
+        assert_eq!(
+            fs::read(&up_gitconfig).unwrap(),
+            template_before,
+            "gitconfig.repo was changed by a push whose staging failed"
+        );
+        assert_eq!(
+            fs::read(local.path().join(STATE_FILE_REL)).unwrap(),
+            state_before
+        );
+        assert_eq!(tmp_leftovers(upstream.path()), Vec::<PathBuf>::new());
+        assert_eq!(tmp_leftovers(local.path()), Vec::<PathBuf>::new());
+
+        // Negative control: without the collision both templates are written.
+        let (local, upstream) = push_staging_fixture(false);
+        match push(local.path(), upstream.path()) {
+            PushResult::Success { synced_files, .. } => assert_eq!(synced_files, 2),
+            other => panic!("Expected Success, got {other:?}"),
+        }
+        assert_eq!(
+            fs::read_to_string(upstream.path().join("projects/generic/gitconfig.repo")).unwrap(),
+            "[core]\n  autocrlf = input\n"
+        );
+        assert_eq!(
+            fs::read_to_string(upstream.path().join("projects/generic/hooks/pre-commit")).unwrap(),
+            "#!/bin/sh\nexit 0\n"
+        );
+        assert_eq!(tmp_leftovers(upstream.path()), Vec::<PathBuf>::new());
+    }
+
     #[test]
     fn test_push_updates_blocked_on_publish_boundary() {
         let engine = SyncEngine::new();
