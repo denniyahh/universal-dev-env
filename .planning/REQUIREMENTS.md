@@ -11,7 +11,7 @@ Requirements for initial release, mapping directly to remediation tracks from [`
 
 - [ ] **SYNC-01**: `pull_updates` tracks deletion tombstones in `.ude/state.json` to propagate upstream deletions cleanly without resurrecting deleted files.
 - [ ] **SYNC-02**: Synchronization materialization uses a two-phase transactional staging directory before atomically updating project working trees.
-- [ ] **SYNC-03**: All subprocess executions (`git`, `gh`) enforce bounded timeouts (30s-60s) with active process cancellation to prevent hangs.
+- [x] **SYNC-03**: All subprocess executions (`git`, `gh`) enforce bounded timeouts (30s-60s) with active process cancellation to prevent hangs.
 - [ ] **SYNC-04**: Cryptographic SHA-256 ancestor hash calculation normalizes CRLF line endings to prevent false drift detection across platforms.
 - [ ] **SYNC-05**: Divergent 3-way conflicts generate structured `.conflict` files with standard Myers conflict markers while preserving user modifications.
 - [ ] **SYNC-06**: `push_to_remote` reconciles push candidates safely and verifies branch head continuity before publishing.
@@ -42,10 +42,12 @@ Requirements for initial release, mapping directly to remediation tracks from [`
 Deferred to future releases.
 
 ### Advanced Sync & Mesh
+
 - **SYNC-V2-01**: Multi-remote mesh synchronization across distributed developer forks.
 - **SYNC-V2-02**: Sparse checkout synchronization for monorepo environments.
 
 ### Advanced Security
+
 - **SEC-V2-01**: Hardware security key (FIDO2/YubiKey) touch-policy enforcement in doctor checks.
 - **SEC-V2-02**: Automatic pre-receive hook installation on remote Git servers.
 
@@ -67,7 +69,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 |-------------|-------|--------|
 | SYNC-01 | Phase 1 | Pending |
 | SYNC-02 | Phase 1 | Pending |
-| SYNC-03 | Phase 1 | Pending |
+| SYNC-03 | Phase 1 | Complete |
 | SYNC-04 | Phase 1 | Pending |
 | SYNC-05 | Phase 1 | Pending |
 | SYNC-06 | Phase 1 | Pending |
