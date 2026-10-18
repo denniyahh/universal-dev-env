@@ -644,3 +644,145 @@ fn test_sync_push_remote_failure_does_not_advance_ancestor_state() {
         "Successful push MUST advance ancestor state to the newly synchronized hash!"
     );
 }
+
+/// Every path under `root` (relative) with the bytes of each file; directories map to None.
+fn snapshot_tree(root: &Path) -> std::collections::BTreeMap<PathBuf, Option<Vec<u8>>> {
+    walkdir::WalkDir::new(root)
+        .into_iter()
+        .map(|entry| {
+            let entry = entry.expect("walk decoy repository");
+            let rel = entry.path().strip_prefix(root).unwrap().to_path_buf();
+            let bytes = entry
+                .file_type()
+                .is_file()
+                .then(|| fs::read(entry.path()).expect("read decoy file"));
+            (rel, bytes)
+        })
+        .collect()
+}
+
+#[test]
+fn test_sync_ignores_inherited_git_dir() {
+    let bin = env!("CARGO_BIN_EXE_ude");
+    let temp = tempdir().unwrap();
+    let git = GitFixture::new();
+
+    // Project created with ude init; its mise.toml seeds the remote template.
+    let local_proj = temp.path().join("local_proj");
+    fs::create_dir_all(&local_proj).unwrap();
+    let init = Command::new(bin)
+        .args([
+            "init",
+            "--path",
+            &local_proj.to_string_lossy(),
+            "--type",
+            "rust",
+        ])
+        .output()
+        .expect("ude init execution");
+    assert!(
+        init.status.success(),
+        "ude init failed: {}",
+        String::from_utf8_lossy(&init.stderr)
+    );
+    let init_content = fs::read_to_string(local_proj.join("mise.toml")).unwrap();
+
+    // Bare remote seeded with templates/projects/agents/mise.toml.jinja.
+    let bare_remote = temp.path().join("bare_remote.git");
+    let bare_url = bare_remote.to_string_lossy().to_string();
+    git.run(temp.path(), &["init", "--bare", "-b", "main", &bare_url]);
+    let seed_dir = temp.path().join("seed_repo");
+    git.run(
+        temp.path(),
+        &["init", "-b", "main", &seed_dir.to_string_lossy()],
+    );
+    let tdir = seed_dir.join("templates/projects/agents");
+    fs::create_dir_all(&tdir).unwrap();
+    fs::write(tdir.join("mise.toml.jinja"), &init_content).unwrap();
+    git.run(&seed_dir, &["add", "-A"]);
+    git.run(&seed_dir, &["commit", "-m", "seed commit"]);
+    git.run(&seed_dir, &["remote", "add", "origin", &bare_url]);
+    git.run(&seed_dir, &["push", "origin", "main"]);
+
+    // Decoy repository that an inherited GIT_DIR points at.
+    let decoy = temp.path().join("decoy.git");
+    git.run(
+        temp.path(),
+        &["init", "--bare", "-q", &decoy.to_string_lossy()],
+    );
+    let decoy_before = snapshot_tree(&decoy);
+
+    // Negative control: plain git honours the inherited GIT_DIR and lands in the decoy.
+    let probe = run_checked(
+        {
+            let mut cmd = git.cmd(temp.path());
+            cmd.env("GIT_DIR", &decoy);
+            cmd
+        },
+        &["rev-parse", "--absolute-git-dir"],
+    );
+    assert_eq!(
+        PathBuf::from(String::from_utf8_lossy(&probe.stdout).trim()),
+        fs::canonicalize(&decoy).unwrap(),
+        "negative control: git with GIT_DIR set must resolve the decoy"
+    );
+
+    let fake_home = temp.path().join("fake_home");
+    let fake_config = fake_home.join(".config");
+    fs::create_dir_all(fake_config.join("git")).unwrap();
+    let gitconfig = fake_config.join("git/config");
+    fs::write(
+        &gitconfig,
+        "[user]\n  name = UDE Tester\n  email = tester@example.com\n[commit]\n  gpgsign = false\n",
+    )
+    .unwrap();
+    let cache_dir = temp.path().join("cache");
+    fs::create_dir_all(&cache_dir).unwrap();
+    let ude_with_decoy = |args: &[&str]| {
+        Command::new(bin)
+            .current_dir(&local_proj)
+            .args(args)
+            .env("GIT_DIR", &decoy)
+            .env("HOME", &fake_home)
+            .env("XDG_CONFIG_HOME", &fake_config)
+            .env("GIT_CONFIG_GLOBAL", &gitconfig)
+            .env("XDG_CACHE_HOME", &cache_dir)
+            .output()
+            .expect("ude execution")
+    };
+
+    // sync status against the real remote while GIT_DIR points at the decoy. The first
+    // run clones into an empty cache; the second takes the existing-cache path (fetch,
+    // checkout -B, reset --hard, clean), where an inherited GIT_DIR redirects git.
+    for run in ["clone", "fetch"] {
+        let status = ude_with_decoy(&["sync", "status", "--remote", &bare_url]);
+        let status_stdout = String::from_utf8_lossy(&status.stdout);
+        assert!(
+            status.status.success(),
+            "ude sync status ({run} run) must succeed with an inherited GIT_DIR. Out: {status_stdout}\nErr: {}",
+            String::from_utf8_lossy(&status.stderr)
+        );
+        assert!(
+            status_stdout.contains("Remote Upstream"),
+            "status output ({run} run) lacks the remote line: {status_stdout}"
+        );
+        let cache_checkouts: Vec<PathBuf> = fs::read_dir(cache_dir.join("ude"))
+            .expect("ude cache dir exists")
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                let name = path.file_name().unwrap().to_string_lossy();
+                name.starts_with("remote-") && name.ends_with("-main") && path.join(".git").is_dir()
+            })
+            .collect();
+        assert_eq!(
+            cache_checkouts.len(),
+            1,
+            "expected one cache checkout with its own .git ({run} run): {cache_checkouts:?}"
+        );
+        assert_eq!(
+            snapshot_tree(&decoy),
+            decoy_before,
+            "ude sync status ({run} run) modified the decoy repository named by GIT_DIR"
+        );
+    }
+}
