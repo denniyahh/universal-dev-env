@@ -2276,6 +2276,121 @@ mod tests {
         );
     }
 
+    /// Upstream versions written by [`staging_failure_fixture`], as (upstream path,
+    /// local path, content).
+    const STAGING_UPSTREAM: [(&str, &str, &str); 3] = [
+        (
+            "projects/generic/gitconfig.repo",
+            ".gitconfig",
+            "[core]\n  autocrlf = input\n",
+        ),
+        (
+            "projects/generic/gitignore.repo",
+            ".gitignore",
+            "target/\n*.log\n",
+        ),
+        (
+            "projects/generic/hooks/pre-commit",
+            "scripts/hooks/pre-commit",
+            "#!/bin/sh\nexit 0\n",
+        ),
+    ];
+
+    /// Local project whose `.gitconfig` and `.gitignore` sit at their recorded ancestor
+    /// while upstream changed both and adds `scripts/hooks/pre-commit`. With `collide`,
+    /// `scripts` is a regular file, so staging the hook fails with ENOTDIR (whatever the
+    /// uid) after `.gitconfig` and `.gitignore` were already staged.
+    fn staging_failure_fixture(collide: bool) -> (tempfile::TempDir, tempfile::TempDir) {
+        let local = tempdir().unwrap();
+        let upstream = tempdir().unwrap();
+        let mut state = ProjectState::default();
+        for (rel, text) in [
+            (".gitconfig", "[core]\n  autocrlf = false\n"),
+            (".gitignore", "target/\n"),
+        ] {
+            fs::write(local.path().join(rel), text).unwrap();
+            state.record_file(
+                Path::new(rel),
+                SyncEngine::fingerprint(text.as_bytes()),
+                Some(text.to_string()),
+            );
+        }
+        state.save_to_dir(local.path()).unwrap();
+        if collide {
+            fs::write(local.path().join("scripts"), "not a directory\n").unwrap();
+        }
+        for (up_rel, _, text) in STAGING_UPSTREAM {
+            let path = upstream.path().join(up_rel);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, text).unwrap();
+        }
+        (local, upstream)
+    }
+
+    /// Every entry under `root` whose name starts with `.tmp` (tempfile's staging prefix).
+    fn tmp_leftovers(root: &Path) -> Vec<PathBuf> {
+        let mut found = Vec::new();
+        let mut pending = vec![root.to_path_buf()];
+        while let Some(dir) = pending.pop() {
+            for entry in fs::read_dir(&dir).unwrap() {
+                let entry = entry.unwrap();
+                if entry.file_name().to_string_lossy().starts_with(".tmp") {
+                    found.push(entry.path());
+                }
+                if entry.file_type().unwrap().is_dir() {
+                    pending.push(entry.path());
+                }
+            }
+        }
+        found
+    }
+
+    #[test]
+    fn test_pull_staging_failure_no_partial_writes() {
+        let engine = SyncEngine::new();
+        let (local, upstream) = staging_failure_fixture(true);
+        let ctx =
+            crate::template::TemplateContext::detect_for_project(local.path(), "test-proj", "rust");
+        let watched = [".gitconfig", ".gitignore", STATE_FILE_REL];
+        let before: Vec<Vec<u8>> = watched
+            .iter()
+            .map(|rel| fs::read(local.path().join(rel)).unwrap())
+            .collect();
+
+        let res = engine.pull_updates(local.path(), upstream.path(), &ctx);
+        assert!(
+            matches!(&res, PullResult::IoFailed { path, .. } if path == Path::new("scripts/hooks/pre-commit")),
+            "staging failure must name the hook: {res:?}"
+        );
+        for (rel, bytes) in watched.iter().zip(&before) {
+            assert_eq!(
+                &fs::read(local.path().join(rel)).unwrap(),
+                bytes,
+                "{rel} was changed by a pull whose staging failed"
+            );
+        }
+        assert_eq!(tmp_leftovers(local.path()), Vec::<PathBuf>::new());
+        // Positive control for the leftover walker: a planted nested temp is found.
+        fs::create_dir_all(local.path().join(".ude/probe")).unwrap();
+        fs::write(local.path().join(".ude/probe/.tmpPROBE"), "x").unwrap();
+        assert_eq!(tmp_leftovers(local.path()).len(), 1);
+
+        // Negative control: without the collision all three files and the state apply.
+        let (local, upstream) = staging_failure_fixture(false);
+        let res = engine.pull_updates(local.path(), upstream.path(), &ctx);
+        assert_eq!(res, PullResult::Success { applied_files: 3 });
+        let state = ProjectState::load_from_dir(local.path()).unwrap();
+        for (_, rel, text) in STAGING_UPSTREAM {
+            assert_eq!(fs::read_to_string(local.path().join(rel)).unwrap(), text);
+            assert_eq!(
+                state.get_ancestor_hash(Path::new(rel)),
+                Some(SyncEngine::fingerprint(text.as_bytes()).as_str()),
+                "{rel} ancestor not updated"
+            );
+        }
+        assert_eq!(tmp_leftovers(local.path()), Vec::<PathBuf>::new());
+    }
+
     #[test]
     fn test_push_updates_blocked_on_conflict() {
         let engine = SyncEngine::new();
