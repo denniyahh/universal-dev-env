@@ -382,13 +382,13 @@ impl SyncEngine {
         ) else {
             return (status, None);
         };
-        match merge::merge_3way_text(
+        match merge::merge_texts(
             &Self::normalize_eol(base),
             &Self::normalize_eol(local),
             &Self::normalize_eol(upstream),
         ) {
-            merge::MergeResult::Clean(merged) => (SyncStatus::Merged, Some(merged)),
-            merge::MergeResult::Conflict => (SyncStatus::Conflicted, None),
+            merge::MergeOutcome::Clean(merged) => (SyncStatus::Merged, Some(merged)),
+            merge::MergeOutcome::Conflict(_) => (SyncStatus::Conflicted, None),
         }
     }
 
