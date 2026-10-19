@@ -480,7 +480,7 @@ fn main() {
                     run_sync_resolve(&engine, &local_project, &file);
                 }
                 cli::SyncAction::Status => {
-                    let (root_template_dir, _remote_checkout_root, _remote_lock) =
+                    let (root_template_dir, _remote_checkout_root, _remote_cache) =
                         open_sync_templates(&engine, remote_url.as_deref(), &branch, &cache_dir);
                     println!("{}", "==> Checking UDE environment sync status...".bold());
                     if let Some(ref r_url) = remote_url {
@@ -599,7 +599,7 @@ fn main() {
                     }
                 }
                 cli::SyncAction::Pull => {
-                    let (root_template_dir, _remote_checkout_root, _remote_lock) =
+                    let (root_template_dir, _remote_checkout_root, _remote_cache) =
                         open_sync_templates(&engine, remote_url.as_deref(), &branch, &cache_dir);
                     println!(
                         "{}",
@@ -679,7 +679,7 @@ fn main() {
                     }
                 }
                 cli::SyncAction::Push { force, pr } => {
-                    let (root_template_dir, remote_checkout_root, _remote_lock) =
+                    let (root_template_dir, remote_checkout_root, remote_cache) =
                         open_sync_templates(&engine, remote_url.as_deref(), &branch, &cache_dir);
                     println!("{}", "==> Running Sanitization Gate & Sync Push...".bold());
 
@@ -821,11 +821,15 @@ fn main() {
                                     "  {} Pushing synchronized templates to remote repository...",
                                     "==>".cyan()
                                 );
+                                let fetched_sha = remote_cache
+                                    .as_ref()
+                                    .map_or("", |cache| cache.fetched_sha.as_str());
                                 match engine.push_to_remote(
                                     remote_checkout,
                                     &branch,
                                     pr,
                                     &staged_files,
+                                    fetched_sha,
                                 ) {
                                     Ok(msg) => {
                                         println!("  {} {msg}", "✓".green());
@@ -865,9 +869,16 @@ fn main() {
                                             );
                                         }
                                     }
-                                    Err(err) => {
+                                    Err(sync::PushRemoteError::Failed(err)) => {
                                         eprintln!(
                                             "  {} Failed to push to remote: {err}",
+                                            "✗".red()
+                                        );
+                                        std::process::exit(EXIT_HARD_FAILURE);
+                                    }
+                                    Err(sync::PushRemoteError::UpstreamMoved { branch }) => {
+                                        eprintln!(
+                                            "  {} Failed to push to remote: upstream branch {branch} moved",
                                             "✗".red()
                                         );
                                         std::process::exit(EXIT_HARD_FAILURE);
@@ -918,15 +929,16 @@ fn main() {
 }
 
 /// Template root for a sync action: the cached checkout of `remote_url` (with its
-/// checkout root and the remote cache lock, held by the caller for the whole action),
-/// or the local templates directory. Exits with [`EXIT_HARD_FAILURE`] when the remote
-/// cannot be synchronized.
+/// checkout root and the [`sync::RemoteCache`], whose lock the caller holds for the
+/// whole action and whose fetched head a direct push must build on), or the local
+/// templates directory. Exits with [`EXIT_HARD_FAILURE`] when the remote cannot be
+/// synchronized.
 fn open_sync_templates(
     engine: &sync::SyncEngine,
     remote_url: Option<&str>,
     branch: &str,
     cache_dir: &Path,
-) -> (PathBuf, Option<PathBuf>, Option<sync::RemoteLockGuard>) {
+) -> (PathBuf, Option<PathBuf>, Option<sync::RemoteCache>) {
     let Some(r_url) = remote_url else {
         return (
             find_templates_dir().unwrap_or_else(|| PathBuf::from("templates")),
@@ -935,9 +947,10 @@ fn open_sync_templates(
         );
     };
     match engine.ensure_remote_repo(r_url, branch, cache_dir) {
-        Ok((tmpl_dir, lock_guard)) => {
+        Ok(cache) => {
+            let tmpl_dir = cache.templates_dir.clone();
             let checkout_dir = tmpl_dir.parent().unwrap_or(&tmpl_dir).to_path_buf();
-            (tmpl_dir, Some(checkout_dir), Some(lock_guard))
+            (tmpl_dir, Some(checkout_dir), Some(cache))
         }
         Err(e) => {
             eprintln!(
