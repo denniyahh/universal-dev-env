@@ -2077,7 +2077,7 @@ const PARAMETERIZED_PLACEHOLDERS: [&str; 2] = ["{{ user.home }}", "{{ user.xdg_c
 /// Whether `template` is a `.jinja` file with template constructs (other than the
 /// parameterized path placeholders) that publishing rendered text would erase (CR-02).
 /// An absent template has none.
-fn template_has_logic(template: &Path) -> Result<bool, String> {
+pub fn template_has_logic(template: &Path) -> Result<bool, String> {
     if template.extension().is_none_or(|ext| ext != "jinja") {
         return Ok(false);
     }
@@ -2125,19 +2125,22 @@ pub fn map_to_upstream(upstream_root: &Path, rel: &Path) -> Option<PathBuf> {
     }
 }
 
-fn check_for_override(local_root: &Path, rel: &Path) -> bool {
-    // Check .local extension (e.g. mise.local.toml, AGENTS.local.md)
+/// The `.local` override of the managed path `rel`, relative to the project root
+/// (e.g. `mise.local.toml`, `.agents/AGENTS.local.md`, `.gitignore.local`).
+pub fn local_override_path(rel: &Path) -> PathBuf {
     let file_name = rel.file_name().and_then(|n| n.to_str()).unwrap_or("");
     let parent = rel.parent().unwrap_or_else(|| Path::new(""));
-
-    let local_variant = if let Some(ext) = rel.extension().and_then(|e| e.to_str()) {
+    if let Some(ext) = rel.extension().and_then(|e| e.to_str()) {
         let stem = rel.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-        local_root.join(parent).join(format!("{stem}.local.{ext}"))
+        parent.join(format!("{stem}.local.{ext}"))
     } else {
-        local_root.join(parent).join(format!("{file_name}.local"))
-    };
+        parent.join(format!("{file_name}.local"))
+    }
+}
 
-    if local_variant.exists() {
+fn check_for_override(local_root: &Path, rel: &Path) -> bool {
+    // Check .local extension (e.g. mise.local.toml, AGENTS.local.md)
+    if local_root.join(local_override_path(rel)).exists() {
         return true;
     }
 
