@@ -20,7 +20,9 @@
   rustfmt.toml matching the existing width and re-measure.
 
 - e2e tests inherit the host TYPESAFE_API_KEY
-  status: open
+  status: resolved (2026-10-19, e285689 — operator chose fix-before-verification;
+  every e2e ude spawn goes through ude_command, pinned by
+  test_ude_command_drops_host_typesafe_key, negative-controlled)
   **Found during:** 01-10 Task 2 RED (the push output showed `TypeSafe System
   One (Jev) enabled`, so the test binary saw the operator's key)
   **What:** `src/semantic/mod.rs` reads `TYPESAFE_API_KEY` from the process env,
