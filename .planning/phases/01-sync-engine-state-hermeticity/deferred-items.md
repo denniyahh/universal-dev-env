@@ -18,3 +18,17 @@
   **Options:** one `style:` commit running `cargo fmt` repo-wide (touches files
   that plans 01-02..01-11 edit, so do it between waves or before 01-03), or add a
   rustfmt.toml matching the existing width and re-measure.
+
+- e2e tests inherit the host TYPESAFE_API_KEY
+  status: open
+  **Found during:** 01-10 Task 2 RED (the push output showed `TypeSafe System
+  One (Jev) enabled`, so the test binary saw the operator's key)
+  **What:** `src/semantic/mod.rs` reads `TYPESAFE_API_KEY` from the process env,
+  and every `Command::new(bin)` in tests/e2e_lifecycle.rs except the new
+  `sync_cli` helper (01-10) inherits it. A push whose project and upstream both
+  have AGENTS.md rules that differ would send the local rules text to the
+  TypeSafe API from a test run, and the verdict could change the exit code.
+  No current test has both files, so no call was observed; that is unverified
+  for runs on hosts with other fixtures.
+  **Fix:** `env_remove("TYPESAFE_API_KEY")` on every e2e spawn (or route them all
+  through `sync_cli`). 01-10 fixed only its own helper (scope boundary).
