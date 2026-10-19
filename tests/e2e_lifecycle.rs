@@ -1691,3 +1691,56 @@ fn test_sync_push_skips_boundary_deletion_and_publishes_rest() {
     let restored = ude(&project, &["sync", "push", "--remote", &bare_url]);
     assert_eq!(restored.status.code(), Some(0), "{}", outputs(&restored));
 }
+
+#[test]
+fn test_sync_push_refuses_to_overwrite_template_logic() {
+    let bin = env!("CARGO_BIN_EXE_ude");
+    let temp = tempdir().unwrap();
+    let git = GitFixture::new();
+    let ude = sync_cli(temp.path());
+
+    let project = temp.path().join("project");
+    let init_mise = init_rust_project(bin, &project);
+    let bare = seed_full_template_remote(&git, temp.path(), "remote");
+    let bare_url = bare.to_string_lossy().to_string();
+    let template_before = remote_file(&git, &bare, MISE_TEMPLATE);
+    assert!(
+        template_before.contains("{%"),
+        "the seeded template has logic"
+    );
+
+    fs::write(
+        project.join("mise.toml"),
+        format!("{init_mise}[env]\nFOO = \"1\"\n"),
+    )
+    .unwrap();
+    let local_gitconfig = format!(
+        "{}# local edit\n",
+        fs::read_to_string(project.join(".gitconfig")).unwrap()
+    );
+    fs::write(project.join(".gitconfig"), &local_gitconfig).unwrap();
+
+    let push = ude(&project, &["sync", "push", "--remote", &bare_url]);
+    let push_text = outputs(&push);
+    assert_eq!(
+        push.status.code(),
+        Some(1),
+        "a push that skipped a template must exit 1. {push_text}"
+    );
+    assert!(
+        push_text.contains("mise.toml: upstream template")
+            && push_text.contains("mise.toml.jinja contains template logic"),
+        "{push_text}"
+    );
+    assert_eq!(
+        remote_file(&git, &bare, MISE_TEMPLATE),
+        template_before,
+        "the template must stay byte-identical. {push_text}"
+    );
+    // Negative control: the non-template .gitconfig edit is published.
+    assert_eq!(
+        format!("{}\n", remote_file(&git, &bare, GITCONFIG_TEMPLATE)),
+        local_gitconfig,
+        "{push_text}"
+    );
+}

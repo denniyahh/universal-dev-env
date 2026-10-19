@@ -4439,6 +4439,68 @@ mod tests {
     }
 
     #[test]
+    fn test_push_never_overwrites_template_logic() {
+        let engine = SyncEngine::new();
+        let local = tempdir().unwrap();
+        let upstream = tempdir().unwrap();
+        let template_text = "[tools]\n{% if true %}rust = \"latest\"\n{% endif %}\n";
+        let template = upstream.path().join("projects/agents/mise.toml.jinja");
+        fs::create_dir_all(template.parent().unwrap()).unwrap();
+        fs::write(&template, template_text).unwrap();
+        // The ancestor is the template as push's scan renders it.
+        let ctx = crate::template::TemplateContext::detect_for_project(
+            local.path(),
+            "project",
+            "generic",
+        );
+        let rendered = crate::template::TemplateRenderer::new()
+            .render_str(template_text, &ctx)
+            .unwrap();
+        let gitconfig = "[core]\n\tautocrlf = input\n";
+        write_upstream_gitconfig(upstream.path(), gitconfig.as_bytes());
+        let mut state = ProjectState::default();
+        for (rel, text) in [("mise.toml", rendered.as_str()), (".gitconfig", gitconfig)] {
+            state.record_file(
+                Path::new(rel),
+                SyncEngine::fingerprint(text.as_bytes()),
+                Some(text.into()),
+            );
+        }
+        state.save_to_dir(local.path()).unwrap();
+        fs::write(
+            local.path().join("mise.toml"),
+            format!("{rendered}[env]\nFOO = \"1\"\n"),
+        )
+        .unwrap();
+        let edited_gitconfig = format!("{gitconfig}\tfsmonitor = false\n");
+        fs::write(local.path().join(".gitconfig"), &edited_gitconfig).unwrap();
+        let mise_status = engine
+            .scan_project(local.path(), upstream.path(), Some(&ctx))
+            .unwrap()
+            .into_iter()
+            .find(|s| s.relative_path == Path::new("mise.toml"))
+            .unwrap()
+            .status;
+        assert_eq!(mise_status, SyncStatus::LocallyModified);
+
+        let result = push_dirs(&engine, local.path(), upstream.path());
+        assert!(
+            matches!(result, PushResult::Success { .. }),
+            "push: {result:?}"
+        );
+        assert_eq!(
+            fs::read_to_string(&template).unwrap(),
+            template_text,
+            "push must not replace template logic with rendered text"
+        );
+        // Negative control: the non-template file in the same push is published.
+        assert_eq!(
+            fs::read_to_string(upstream.path().join("projects/generic/gitconfig.repo")).unwrap(),
+            edited_gitconfig
+        );
+    }
+
+    #[test]
     fn test_push_local_deletion_respects_publish_boundary() {
         let engine = SyncEngine::new();
         let local = tempdir().unwrap();
