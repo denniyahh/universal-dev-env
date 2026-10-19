@@ -633,10 +633,12 @@ fn test_sync_push_remote_failure_does_not_advance_ancestor_state() {
         .output()
         .expect("ude sync push execution");
 
-    // Must exit non-zero
-    assert!(
-        !push_fail.status.success(),
-        "ude sync push must fail when remote git push is rejected!"
+    // A remote hook rejection is a hard failure (exit 2), unlike an upstream race (1).
+    assert_eq!(
+        push_fail.status.code(),
+        Some(2),
+        "ude sync push must exit 2 when the remote rejects the push! Err: {}",
+        String::from_utf8_lossy(&push_fail.stderr)
     );
     let stderr = String::from_utf8_lossy(&push_fail.stderr);
     let stdout = String::from_utf8_lossy(&push_fail.stdout);
@@ -1164,7 +1166,8 @@ fn test_sync_pull_conflict_exits_1_and_writes_sidecar() {
 }
 
 /// A `ude` runner for sync tests: fake HOME / XDG dirs under `root`, the fixture
-/// gitconfig as the only global config, inherited repo-local git variables removed.
+/// gitconfig as the only global config (no system config), inherited repo-local git
+/// variables removed.
 fn sync_cli(root: &Path) -> impl Fn(&Path, &[&str]) -> Output {
     let bin = env!("CARGO_BIN_EXE_ude");
     let fake_home = root.join("fake_home");
@@ -1185,6 +1188,7 @@ fn sync_cli(root: &Path) -> impl Fn(&Path, &[&str]) -> Output {
             .env("HOME", &fake_home)
             .env("XDG_CONFIG_HOME", &fake_config)
             .env("GIT_CONFIG_GLOBAL", &gitconfig)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("XDG_CACHE_HOME", &cache_dir)
             .stdin(Stdio::null())
             .output()
@@ -1393,4 +1397,119 @@ fn test_sync_push_skips_unresolved_conflict_exit_1() {
         format!("{}\n", remote_file(&git, &bare, MISE_TEMPLATE)),
         local_mise
     );
+}
+
+/// The single remote cache checkout under `<cache>/ude` (named `remote-*`, not the
+/// `.lock` file).
+fn remote_cache_checkout(cache: &Path) -> PathBuf {
+    let checkouts: Vec<PathBuf> = fs::read_dir(cache.join("ude"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            let name = path.file_name().unwrap().to_string_lossy();
+            name.starts_with("remote-") && !name.ends_with(".lock")
+        })
+        .collect();
+    assert_eq!(
+        checkouts.len(),
+        1,
+        "expected one cache checkout: {checkouts:?}"
+    );
+    checkouts.into_iter().next().unwrap()
+}
+
+/// mise.toml's ancestor hash in the project's state.json.
+fn mise_ancestor(project: &Path) -> String {
+    let state: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(project.join(".ude/state.json")).unwrap())
+            .unwrap();
+    state["files"]["mise.toml"]["ancestor_hash"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+#[test]
+#[cfg(unix)]
+fn test_force_does_not_bypass_upstream_moved() {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = env!("CARGO_BIN_EXE_ude");
+    let temp = tempdir().unwrap();
+    let git = GitFixture::new();
+    let ude = sync_cli(temp.path());
+
+    let project = temp.path().join("project");
+    let init_mise = init_rust_project(bin, &project);
+    let bare = seed_mise_remote(&git, temp.path(), "remote", &init_mise);
+    let bare_url = bare.to_string_lossy().to_string();
+    let local_mise = format!("{init_mise}# local edit\n");
+    fs::write(project.join("mise.toml"), &local_mise).unwrap();
+    let ancestor_before = mise_ancestor(&project);
+
+    let status = ude(&project, &["sync", "status", "--remote", &bare_url]);
+    assert_eq!(status.status.code(), Some(0), "{}", outputs(&status));
+
+    // Another machine publishes between UDE's fetch and its push: the cache's
+    // post-checkout hook (run by ensure_remote_repo's `git checkout -B` after the fetch)
+    // pushes an empty commit from a second clone.
+    let other = temp.path().join("other-clone");
+    git.run(
+        temp.path(),
+        &["clone", "-q", &bare_url, &other.to_string_lossy()],
+    );
+    let marker = temp.path().join("race-injected");
+    let hook = remote_cache_checkout(&temp.path().join("cache")).join(".git/hooks/post-checkout");
+    fs::write(
+        &hook,
+        format!(
+            "#!/bin/sh\nunset $(git rev-parse --local-env-vars)\ncd '{}' && git commit -q --allow-empty -m 'concurrent publish' && git push -q origin main && touch '{}'\nexit 0\n",
+            other.display(),
+            marker.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let raced = ude(
+        &project,
+        &["sync", "push", "--force", "--remote", &bare_url],
+    );
+    let raced_text = outputs(&raced);
+    assert!(
+        marker.exists(),
+        "post-checkout hook did not fire. {raced_text}"
+    );
+    assert_eq!(raced.status.code(), Some(1), "{raced_text}");
+    assert!(
+        raced_text.contains("upstream changed, run ude sync pull"),
+        "{raced_text}"
+    );
+    assert_eq!(
+        git.output(&bare, &["rev-parse", "refs/heads/main"]),
+        git.output(&other, &["rev-parse", "HEAD"]),
+        "the remote branch must keep the other machine's commit. {raced_text}"
+    );
+    assert_eq!(
+        format!("{}\n", remote_file(&git, &bare, MISE_TEMPLATE)),
+        init_mise,
+        "nothing may be published. {raced_text}"
+    );
+    assert_eq!(
+        mise_ancestor(&project),
+        ancestor_before,
+        "an aborted push must not advance ancestor state"
+    );
+
+    // Negative control: without the race the same forced push publishes and exits 0.
+    fs::remove_file(&hook).unwrap();
+    let pushed = ude(
+        &project,
+        &["sync", "push", "--force", "--remote", &bare_url],
+    );
+    assert_eq!(pushed.status.code(), Some(0), "{}", outputs(&pushed));
+    assert_eq!(
+        format!("{}\n", remote_file(&git, &bare, MISE_TEMPLATE)),
+        local_mise
+    );
+    assert_ne!(mise_ancestor(&project), ancestor_before);
 }
