@@ -1744,3 +1744,68 @@ fn test_sync_push_refuses_to_overwrite_template_logic() {
         "{push_text}"
     );
 }
+
+#[test]
+fn test_first_pull_keeps_custom_gitignore_preserved_by_init() {
+    let bin = env!("CARGO_BIN_EXE_ude");
+    let temp = tempdir().unwrap();
+    let git = GitFixture::new();
+    let ude = sync_cli(temp.path());
+    let bare = seed_full_template_remote(&git, temp.path(), "remote");
+    let bare_url = bare.to_string_lossy().to_string();
+
+    // A project that already has its own .gitignore before `ude init`.
+    let project = temp.path().join("project");
+    fs::create_dir_all(&project).unwrap();
+    fs::write(
+        project.join(".gitignore"),
+        "custom_rule_one/\ncustom_rule_two.log\n",
+    )
+    .unwrap();
+    init_rust_project(bin, &project);
+    let kept = fs::read_to_string(project.join(".gitignore")).unwrap();
+    assert!(kept.contains("custom_rule_one/") && kept.contains("custom_rule_two.log"));
+
+    let status = ude(&project, &["sync", "status", "--remote", &bare_url]);
+    let status_text = outputs(&status);
+    let pull = ude(&project, &["sync", "pull", "--remote", &bare_url]);
+    let pull_text = outputs(&pull);
+    let after = fs::read_to_string(project.join(".gitignore")).unwrap();
+    let sidecar = project.join(".gitignore.conflict");
+    assert!(
+        (after.contains("custom_rule_one/") && after.contains("custom_rule_two.log"))
+            || sidecar.is_file(),
+        "the first pull silently dropped the custom rules. {pull_text}\n.gitignore:\n{after}"
+    );
+    assert_eq!(
+        after, kept,
+        "pull must leave the kept .gitignore alone. {pull_text}"
+    );
+    // The kept file reads as a local modification, not as an ancestor the template
+    // updates.
+    assert!(
+        status_text.contains(".gitignore: Locally Modified"),
+        "{status_text}"
+    );
+
+    // Negative control: a project with no .gitignore of its own starts in sync.
+    let fresh = temp.path().join("fresh");
+    init_rust_project(bin, &fresh);
+    let fresh_status = ude(&fresh, &["sync", "status", "--remote", &bare_url]);
+    assert!(
+        outputs(&fresh_status).contains(".gitignore: In Sync"),
+        "{}",
+        outputs(&fresh_status)
+    );
+    let fresh_pull = ude(&fresh, &["sync", "pull", "--remote", &bare_url]);
+    assert_eq!(
+        fresh_pull.status.code(),
+        Some(0),
+        "{}",
+        outputs(&fresh_pull)
+    );
+    assert_eq!(
+        fs::read_to_string(fresh.join(".gitignore")).unwrap(),
+        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(GITIGNORE_TEMPLATE)).unwrap()
+    );
+}
