@@ -553,11 +553,8 @@ fn main() {
                                 );
                             }
                             sync::SyncStatus::LocallyModified => {
-                                let hint = match push_boundary(&s.relative_path) {
-                                    PushBoundary::Publishable => "ready to push",
-                                    PushBoundary::ForceOnly => "push with --force to publish",
-                                    PushBoundary::Never => "local-only path, never pushed",
-                                };
+                                let hint =
+                                    locally_modified_hint(&root_template_dir, &s.relative_path);
                                 println!(
                                     "  {} {}: Locally Modified ({hint})",
                                     "!".yellow(),
@@ -897,10 +894,11 @@ fn main() {
                                 let template = sync::map_to_upstream(&root_template_dir, file)
                                     .unwrap_or_else(|| file.clone());
                                 eprintln!(
-                                    "  {} {}: upstream template {} contains template logic that a push of the rendered file would erase; skipped (edit the template upstream instead)",
+                                    "  {} {}: upstream template {} contains template logic that a push of the rendered file would erase; skipped ({})",
                                     "✗".red(),
                                     file.display(),
-                                    template.display()
+                                    template.display(),
+                                    template_logic_remedy(file, &template)
                                 );
                             }
 
@@ -1034,6 +1032,52 @@ fn push_boundary(path: &Path) -> PushBoundary {
     } else {
         PushBoundary::Never
     }
+}
+
+/// Status hint for a locally modified `file`, matching what `ude sync push` does with
+/// it: the publish boundary first, then the template-logic gate (CR-02).
+fn locally_modified_hint(template_root: &Path, file: &Path) -> String {
+    let boundary = push_boundary(file);
+    if matches!(boundary, PushBoundary::Never) {
+        return "local-only path, never pushed".to_string();
+    }
+    if let Some(template) = sync::map_to_upstream(template_root, file) {
+        match sync::template_has_logic(&template) {
+            Ok(true) => {
+                return format!(
+                    "push skips it: its template has logic; {}",
+                    template_logic_remedy(file, &template)
+                );
+            }
+            Err(reason) => return format!("push cannot check its template: {reason}"),
+            Ok(false) => {}
+        }
+    }
+    match boundary {
+        PushBoundary::ForceOnly => "push with --force to publish".to_string(),
+        _ => "ready to push".to_string(),
+    }
+}
+
+/// Where a local edit of `file` can go when push skips it because its upstream
+/// `template` has template logic.
+fn template_logic_remedy(file: &Path, template: &Path) -> String {
+    let local = sync::local_override_path(file);
+    let project_only = if file == Path::new("mise.toml") {
+        format!(
+            "move the change into {}, which mise loads over mise.toml",
+            local.display()
+        )
+    } else {
+        format!(
+            "keep it as a layered override by creating {}",
+            local.display()
+        )
+    };
+    format!(
+        "for this project only, {project_only}; for every project, edit {} upstream",
+        template.display()
+    )
 }
 
 /// How to clear a local change push will never publish: restore the file to the
