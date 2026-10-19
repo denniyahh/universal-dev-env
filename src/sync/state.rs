@@ -553,6 +553,56 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_conflict_record_roundtrip() {
+        let dir = tempdir().unwrap();
+        let rel = Path::new(".gitconfig");
+        let mut state = ProjectState::default();
+        state.record_file(rel, "ancestor".to_string(), Some("a\n".to_string()));
+        state.record_conflict(rel, Some("up".to_string()), Some("u\n".to_string()));
+        state.record_conflict(Path::new("mise.toml"), None, None);
+        state.save_to_dir(dir.path()).unwrap();
+
+        let loaded = ProjectState::load_from_dir(dir.path()).unwrap();
+        let record = loaded.conflict(rel).expect("conflict record persisted");
+        assert_eq!(record.upstream_hash.as_deref(), Some("up"));
+        assert_eq!(record.upstream_content.as_deref(), Some("u\n"));
+        assert!(record.detected_at.is_some());
+        let deleted = loaded.conflict(Path::new("mise.toml")).expect("record");
+        assert_eq!(
+            (&deleted.upstream_hash, &deleted.upstream_content),
+            (&None, &None)
+        );
+        assert_eq!(
+            loaded.get_ancestor_hash(rel),
+            Some("ancestor"),
+            "recording a conflict must not touch the files record"
+        );
+
+        let mut cleared = loaded.clone();
+        cleared.clear_conflict(rel);
+        cleared.clear_conflict(Path::new("mise.toml"));
+        assert_eq!(cleared.conflict(rel), None);
+        cleared.save_to_dir(dir.path()).unwrap();
+        let json = fs::read_to_string(dir.path().join(STATE_FILE_REL)).unwrap();
+        assert!(
+            !json.contains("conflicts"),
+            "an empty map must not be serialized: {json}"
+        );
+        // Negative control: a state with an open conflict serializes the map.
+        loaded.save_to_dir(dir.path()).unwrap();
+        let json = fs::read_to_string(dir.path().join(STATE_FILE_REL)).unwrap();
+        assert!(json.contains("\"conflicts\""), "{json}");
+        // A state file without the key (written before this field existed) loads empty.
+        write_state_file(dir.path(), br#"{"version": 2, "files": {}}"#);
+        assert!(
+            ProjectState::load_from_dir(dir.path())
+                .unwrap()
+                .conflicts
+                .is_empty()
+        );
+    }
+
     /// A state with one recorded file whose hash is `hash`.
     fn state_with(hash: &str) -> ProjectState {
         let mut state = ProjectState::default();
