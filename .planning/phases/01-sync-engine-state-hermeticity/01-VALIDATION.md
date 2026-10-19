@@ -3,9 +3,9 @@ phase: "01"
 slug: "sync-engine-state-hermeticity"
 # status lifecycle: draft (seeded by plan-phase) → validated (set by validate-phase §6)
 # audit-milestone §5.5 distinguishes NOT-VALIDATED (draft) from PARTIAL (validated + nyquist_compliant: false) (#2117)
-status: draft
-nyquist_compliant: false
-wave_0_complete: false
+status: validated
+nyquist_compliant: true
+wave_0_complete: true
 created: "2026-10-16"
 ---
 
@@ -44,26 +44,26 @@ Seeded at requirement level from RESEARCH.md; task IDs bound from the planner's 
 
 | Task ID | Plan | Wave | Requirement | Threat Ref | Secure Behavior | Test Type | Automated Command | File Exists | Status |
 |---------|------|------|-------------|------------|-----------------|-----------|-------------------|-------------|--------|
-| 01-07-T1 | 07 | 6 | SYNC-01 | — | Upstream delete + unchanged local → removed + tombstone. NC: local edit → Conflicted, bytes unchanged | unit | `cargo test --bin ude sync::tests::test_pull_upstream_deletion` | ❌ W0 | ⬜ pending |
-| 01-07-T3 | 07 | 6 | SYNC-01 | — | Tombstone blocks republish. NC: fresh state → LocallyModified | unit | `cargo test --bin ude sync::tests::test_tombstone_prevents_republish` | ❌ W0 | ⬜ pending |
-| 01-07-T3 | 07 | 6 | SYNC-01 | — | Publication gate accepts `D` entries, still scans blobs. NC: secret-gate tests stay green | unit | `cargo test --bin ude sync::tests::test_push_to_remote_deletion` | ❌ W0 | ⬜ pending |
-| 01-06-T1 | 06 | 5 | SYNC-02 | — | Staging failure → targets + state.json byte-identical, no `.tmp*`. NC: no collision → all applied | unit | `cargo test --bin ude sync::tests::test_pull_staging_failure_no_partial_writes` | ❌ W0 | ⬜ pending |
-| 01-04-T1 | 04 | 3 | SYNC-02 | — | Corrupt/future-version state.json → Err. NC: missing file → Ok(default) | unit | `cargo test --bin ude sync::state::tests::test_load_` | ❌ W0 | ⬜ pending |
-| 01-06-T2 | 06 | 5 | SYNC-02 | — | Staged writes keep modes (0755 hooks, 0644 existing). NC: not 0600 | unit (unix) | `cargo test --bin ude sync::tests::test_staged_write_modes` | ❌ W0 | ⬜ pending |
-| 01-06-T2 (+01-09-T2 sidecar) | 06, 09 | 5, 8 | SYNC-02 | — | Symlinked target/sidecar refused. NC: regular path succeeds | unit | `cargo test --bin ude sync::tests::test_pull_updates_refuses_to_write_through_symlink` | ✅ / ❌ | ⬜ pending |
-| 01-01-T1 | 01 | 1 | SYNC-03 | — | Timeout kills the whole process group (grandchild dead, < 3s; plan 01-01 T1 is authoritative). NC: `echo ok` → Ok | unit | `cargo test --bin ude process::tests::test_timeout_kills_group` | ❌ W0 | ⬜ pending |
-| 01-01-T1 | 01 | 1 | SYNC-03 | — | No pipe deadlock on 1 MiB stdout+stderr. NC: 0-byte case | unit | `cargo test --bin ude process::tests::test_drains_large_output` | ❌ W0 | ⬜ pending |
-| 01-01-T1 | 01 | 1 | SYNC-03 | — | Git env scrubbed, `GIT_TERMINAL_PROMPT=0`. NC: raw Command lacks entries | unit | `cargo test --bin ude process::tests::test_env_scrub` | ❌ W0 | ⬜ pending |
-| 01-03-T2 | 03 | 2 | SYNC-03 | — | Hanging pre-receive hook → timeout, ref unchanged. NC: hook exit 0 → success | unit | `cargo test --bin ude sync::tests::test_push_timeout_hanging_hook` | ❌ W0 | ⬜ pending |
-| 01-03-T1/T2 | 03 | 2 | SYNC-03 | — | Inherited GIT_DIR ignored by `ude`. NC: plain git resolves to decoy | e2e | `cargo test --test e2e_lifecycle test_sync_ignores_inherited_git_dir` | ❌ W0 | ⬜ pending |
-| 01-05-T1 | 05 | 4 | SYNC-04 | — | Fingerprint CRLF == LF. NC: different text differs; invalid UTF-8 untouched | unit | `cargo test --bin ude sync::tests::test_fingerprint` | ❌ W0 | ⬜ pending |
-| 01-05-T1 | 05 | 4 | SYNC-04 | — | CRLF-only difference → InSync. NC: real edit → LocallyModified | unit | `cargo test --bin ude sync::tests::test_scan_crlf_only_difference_in_sync` | ❌ W0 | ⬜ pending |
-| 01-05-T2 | 05 | 4 | SYNC-04 | — | v1 → v2 migration. NC: mismatched old hash stays modified | unit | `cargo test --bin ude sync::state::tests::test_migrate_v1` | ❌ W0 | ⬜ pending |
-| 01-09-T1 | 09 | 8 | SYNC-05 | — | Multiple conflicts → LOCAL/ANCESTOR/UPSTREAM sidecars, clean file applied. NC: clean pull → zero `*.conflict` | unit | `cargo test --bin ude sync::tests::test_pull_multiple_conflicts_sidecars` | ❌ W0 | ⬜ pending |
-| 01-08-T2 | 08 | 7 | SYNC-05 | — | Adjacent edits conflict. NC: one-line separation merges | unit | `cargo test --bin ude sync::merge::tests::test_adjacent_edits_conflict` | ❌ W0 | ⬜ pending |
-| 01-10-T3 | 10 | 9 | SYNC-05 | — | `resolve` clears conflict. NC: hand-deleted sidecar → push still skips | unit | `cargo test --bin ude sync::tests::test_resolve` | ❌ W0 | ⬜ pending |
-| 01-11-T1 | 11 | 10 | SYNC-06 | — | Upstream moved → UpstreamMoved, remote unchanged. NC: no race → success | unit | `cargo test --bin ude sync::tests::test_direct_push_aborts_when_upstream_moved` | ❌ W0 | ⬜ pending |
-| 01-11-T3 | 11 | 10 | SYNC-06 | — | `--force` does not bypass upstream-moved abort. NC: no race → succeeds | e2e | `cargo test --test e2e_lifecycle test_force_does_not_bypass_upstream_moved` | ❌ W0 | ⬜ pending |
+| 01-07-T1 | 07 | 6 | SYNC-01 | — | Upstream delete + unchanged local → removed + tombstone. NC: local edit → Conflicted, bytes unchanged | unit | `cargo test --bin ude sync::tests::test_pull_upstream_deletion` | ✅ | ✅ green |
+| 01-07-T3 | 07 | 6 | SYNC-01 | — | Tombstone blocks republish. NC: fresh state → LocallyModified | unit | `cargo test --bin ude sync::tests::test_tombstone_prevents_republish` | ✅ | ✅ green |
+| 01-07-T3 | 07 | 6 | SYNC-01 | — | Publication gate accepts `D` entries, still scans blobs. NC: secret-gate tests stay green | unit | `cargo test --bin ude sync::tests::test_push_to_remote_deletion` | ✅ | ✅ green |
+| 01-06-T1 | 06 | 5 | SYNC-02 | — | Staging failure → targets + state.json byte-identical, no `.tmp*`. NC: no collision → all applied | unit | `cargo test --bin ude sync::tests::test_pull_staging_failure_no_partial_writes` | ✅ | ✅ green |
+| 01-04-T1 | 04 | 3 | SYNC-02 | — | Corrupt/future-version state.json → Err. NC: missing file → Ok(default) | unit | `cargo test --bin ude sync::state::tests::test_load_` | ✅ | ✅ green |
+| 01-06-T2 | 06 | 5 | SYNC-02 | — | Staged writes keep modes (0755 hooks, 0644 existing). NC: not 0600 | unit (unix) | `cargo test --bin ude sync::tests::test_staged_write_modes` | ✅ | ✅ green |
+| 01-06-T2 (+01-09-T2 sidecar) | 06, 09 | 5, 8 | SYNC-02 | — | Symlinked target/sidecar refused. NC: regular path succeeds | unit | `cargo test --bin ude sync::tests::test_pull_updates_refuses_to_write_through_symlink` | ✅ | ✅ green |
+| 01-01-T1 | 01 | 1 | SYNC-03 | — | Timeout kills the whole process group (grandchild dead, < 3s; plan 01-01 T1 is authoritative). NC: `echo ok` → Ok | unit | `cargo test --bin ude process::tests::test_timeout_kills_group` | ✅ | ✅ green |
+| 01-01-T1 | 01 | 1 | SYNC-03 | — | No pipe deadlock on 1 MiB stdout+stderr. NC: 0-byte case | unit | `cargo test --bin ude process::tests::test_drains_large_output` | ✅ | ✅ green |
+| 01-01-T1 | 01 | 1 | SYNC-03 | — | Git env scrubbed, `GIT_TERMINAL_PROMPT=0`. NC: raw Command lacks entries | unit | `cargo test --bin ude process::tests::test_env_scrub` | ✅ | ✅ green |
+| 01-03-T2 | 03 | 2 | SYNC-03 | — | Hanging pre-receive hook → timeout, ref unchanged. NC: hook exit 0 → success | unit | `cargo test --bin ude sync::tests::test_push_timeout_hanging_hook` | ✅ | ✅ green |
+| 01-03-T1/T2 | 03 | 2 | SYNC-03 | — | Inherited GIT_DIR ignored by `ude`. NC: plain git resolves to decoy | e2e | `cargo test --test e2e_lifecycle test_sync_ignores_inherited_git_dir` | ✅ | ✅ green |
+| 01-05-T1 | 05 | 4 | SYNC-04 | — | Fingerprint CRLF == LF. NC: different text differs; invalid UTF-8 untouched | unit | `cargo test --bin ude sync::tests::test_fingerprint` | ✅ | ✅ green |
+| 01-05-T1 | 05 | 4 | SYNC-04 | — | CRLF-only difference → InSync. NC: real edit → LocallyModified | unit | `cargo test --bin ude sync::tests::test_scan_crlf_only_difference_in_sync` | ✅ | ✅ green |
+| 01-05-T2 | 05 | 4 | SYNC-04 | — | v1 → v2 migration. NC: mismatched old hash stays modified | unit | `cargo test --bin ude sync::state::tests::test_migrate_v1` | ✅ | ✅ green |
+| 01-09-T1 | 09 | 8 | SYNC-05 | — | Multiple conflicts → LOCAL/ANCESTOR/UPSTREAM sidecars, clean file applied. NC: clean pull → zero `*.conflict` | unit | `cargo test --bin ude sync::tests::test_pull_multiple_conflicts_sidecars` | ✅ | ✅ green |
+| 01-08-T2 | 08 | 7 | SYNC-05 | — | Adjacent edits conflict. NC: one-line separation merges | unit | `cargo test --bin ude sync::merge::tests::test_adjacent_edits_conflict` | ✅ | ✅ green |
+| 01-10-T3 | 10 | 9 | SYNC-05 | — | `resolve` clears conflict. NC: hand-deleted sidecar → push still skips | unit | `cargo test --bin ude sync::tests::test_resolve` | ✅ | ✅ green |
+| 01-11-T1 | 11 | 10 | SYNC-06 | — | Upstream moved → UpstreamMoved, remote unchanged. NC: no race → success | unit | `cargo test --bin ude sync::tests::test_direct_push_aborts_when_upstream_moved` | ✅ | ✅ green |
+| 01-11-T3 | 11 | 10 | SYNC-06 | — | `--force` does not bypass upstream-moved abort. NC: no race → succeeds | e2e | `cargo test --test e2e_lifecycle test_force_does_not_bypass_upstream_moved` | ✅ | ✅ green |
 
 *Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
 
@@ -71,11 +71,11 @@ Seeded at requirement level from RESEARCH.md; task IDs bound from the planner's 
 
 ## Wave 0 Requirements
 
-- [ ] `src/sync/mod.rs` tests + `tests/e2e_lifecycle.rs` — `git_fixture(dir)` helper scrubbing the 15 local git env vars, `GIT_CONFIG_GLOBAL=<tempdir>/gitconfig`, `GIT_CONFIG_NOSYSTEM=1`; all existing git-fixture tests use it
-- [ ] `SyncEngine` extra-env injection so in-process tests avoid `std::env::set_var`
-- [ ] `src/process.rs` — new file with `#[cfg(test)]` module
-- [ ] Rewrite the 5 tests encoding replaced behavior (`test_merge_orthogonal_changes_clean`, `test_multi_pull_merge_idempotence`, `test_pull_updates_conflict_blocked_no_partial_writes`, `test_push_updates_blocked_on_conflict`, `test_sync_status_deletions`) as red tests before implementation
-- [ ] No framework install needed
+- [x] `src/sync/mod.rs` tests + `tests/e2e_lifecycle.rs` — `git_fixture(dir)` helper scrubbing the 15 local git env vars, `GIT_CONFIG_GLOBAL=<tempdir>/gitconfig`, `GIT_CONFIG_NOSYSTEM=1`; all existing git-fixture tests use it
+- [x] `SyncEngine` extra-env injection so in-process tests avoid `std::env::set_var`
+- [x] `src/process.rs` — new file with `#[cfg(test)]` module
+- [x] Rewrite the 5 tests encoding replaced behavior (`test_merge_orthogonal_changes_clean`, `test_multi_pull_merge_idempotence`, `test_pull_updates_conflict_blocked_no_partial_writes`, `test_push_updates_blocked_on_conflict`, `test_sync_status_deletions`) as red tests before implementation
+- [x] No framework install needed
 
 ---
 
@@ -89,14 +89,14 @@ Seeded at requirement level from RESEARCH.md; task IDs bound from the planner's 
 
 ## Validation Sign-Off
 
-- [ ] All tasks have `<automated>` verify or Wave 0 dependencies
-- [ ] Sampling continuity: no 3 consecutive tasks without automated verify
-- [ ] Wave 0 covers all MISSING references
-- [ ] No watch-mode flags
-- [ ] Feedback latency < 30s
-- [ ] `nyquist_compliant: true` set in frontmatter
+- [x] All tasks have `<automated>` verify or Wave 0 dependencies
+- [x] Sampling continuity: no 3 consecutive tasks without automated verify
+- [x] Wave 0 covers all MISSING references
+- [x] No watch-mode flags
+- [x] Feedback latency < 30s
+- [x] `nyquist_compliant: true` set in frontmatter
 
-**Approval:** pending
+**Approval:** validated 2026-10-19 (validate-phase audit: 20/20 rows matched to passing tests; hermeticity gate 104/104 with decoy GIT_DIR, decoy untouched; Windows JobObject branch remains manual-only)
 
 ## Validation Audit 2026-10-19
 
