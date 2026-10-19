@@ -85,6 +85,7 @@ struct StagedWrite {
 pub struct StagedTransaction {
     root: PathBuf,
     writes: Vec<StagedWrite>,
+    deletes: Vec<PathBuf>,
     created_dirs: Vec<PathBuf>,
 }
 
@@ -94,6 +95,7 @@ impl StagedTransaction {
         Self {
             root: root.to_path_buf(),
             writes: Vec::new(),
+            deletes: Vec::new(),
             created_dirs: Vec::new(),
         }
     }
@@ -132,6 +134,23 @@ impl StagedTransaction {
         Ok(())
     }
 
+    /// Stages the deletion of `rel` without touching it. Refuses unsafe paths, symlinked
+    /// parents, and anything that is not a regular file (directories, symlinks, missing
+    /// paths). [`Self::commit`] removes staged deletions after all staged writes.
+    pub fn stage_delete(&mut self, rel: &Path) -> Result<(), String> {
+        let target = super::validate_safe_write_target(&self.root, rel)?;
+        let meta = fs::symlink_metadata(&target)
+            .map_err(|e| format!("Failed to stage deletion of {}: {e}", rel.display()))?;
+        if !meta.is_file() {
+            return Err(format!(
+                "Refusing to delete {}: not a regular file",
+                target.display()
+            ));
+        }
+        self.deletes.push(rel.to_path_buf());
+        Ok(())
+    }
+
     /// Creates `dir` and any missing ancestors one level at a time, recording each
     /// directory it created. A path that cannot be inspected is treated as missing;
     /// creating it then reports the real error (for example ENOTDIR under a file).
@@ -154,10 +173,12 @@ impl StagedTransaction {
     }
 
     /// Renames every staged temp over its target, in staging order, re-validating each
-    /// target immediately before its rename. Returns the applied relative paths.
+    /// target immediately before its rename, then removes every staged deletion the
+    /// same way (a deletion target that is already gone counts as removed). Returns the
+    /// applied (written) relative paths.
     ///
-    /// On an error the temps not yet renamed are deleted; files already renamed stay
-    /// replaced (D-01) and the error names how many there were.
+    /// On an error the temps not yet renamed are deleted; files already renamed or
+    /// removed stay so (D-01) and the error names how many writes there were.
     pub fn commit(mut self) -> Result<Vec<PathBuf>, String> {
         let writes = std::mem::take(&mut self.writes);
         let total = writes.len();
@@ -178,6 +199,24 @@ impl StagedTransaction {
                 )
             })?;
             applied.push(rel);
+        }
+        for rel in std::mem::take(&mut self.deletes) {
+            let target = super::validate_safe_write_target(&self.root, &rel).map_err(|reason| {
+                format!(
+                    "Refusing to delete {}: {reason} (all {total} writes were applied)",
+                    rel.display()
+                )
+            })?;
+            match fs::remove_file(&target) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    return Err(format!(
+                        "Failed to delete {}: {e} (all {total} writes were applied)",
+                        rel.display()
+                    ));
+                }
+            }
         }
         self.created_dirs.clear();
         Ok(applied)

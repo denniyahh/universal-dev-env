@@ -215,34 +215,65 @@ impl ProjectState {
             .and_then(|r| r.ancestor_content.as_deref())
     }
 
-    /// Records or updates the ancestor state of a managed file.
+    /// Records or updates the ancestor state of a managed file and clears the path's
+    /// tombstone, so a files record and a tombstone never coexist (invariant I1).
     pub fn record_file(
         &mut self,
         rel_path: &Path,
         ancestor_hash: String,
         ancestor_content: Option<String>,
     ) {
-        let key = rel_path.to_string_lossy().to_string();
-        let timestamp = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .map(|d| d.as_secs().to_string())
-            .ok();
-
+        self.clear_tombstone(rel_path);
         self.files.insert(
-            key,
+            state_key(rel_path),
             FileStateRecord {
                 ancestor_hash,
-                last_synced_at: timestamp,
+                last_synced_at: now_timestamp(),
                 ancestor_content,
             },
         );
     }
 
+    /// Writes a tombstone for `rel_path` whose last tracked fingerprint was
+    /// `deleted_hash`. The caller removes the files record (see [`Self::remove_file`]).
+    pub fn record_tombstone(
+        &mut self,
+        rel_path: &Path,
+        deleted_hash: String,
+        kept_unmanaged: bool,
+    ) {
+        self.tombstones.insert(
+            state_key(rel_path),
+            Tombstone {
+                deleted_hash,
+                deleted_at: now_timestamp(),
+                kept_unmanaged,
+            },
+        );
+    }
+
+    /// Removes the tombstone of `rel_path`, if any.
+    pub fn clear_tombstone(&mut self, rel_path: &Path) {
+        self.tombstones.remove(&state_key(rel_path));
+    }
+
     /// Removes a file record from tracked state.
     pub fn remove_file(&mut self, rel_path: &Path) {
-        let key = rel_path.to_string_lossy().to_string();
-        self.files.remove(&key);
+        self.files.remove(&state_key(rel_path));
     }
+}
+
+/// Key of `rel_path` in the `files` and `tombstones` maps.
+fn state_key(rel_path: &Path) -> String {
+    rel_path.to_string_lossy().to_string()
+}
+
+/// Seconds since the Unix epoch as a string, or `None` if the clock is before it.
+fn now_timestamp() -> Option<String> {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_secs().to_string())
+        .ok()
 }
 
 #[cfg(test)]

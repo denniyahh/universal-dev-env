@@ -23,19 +23,14 @@ pub enum SyncStatus {
     Conflicted,
     Overridden,
     /// Tracked, deleted locally, upstream unchanged: push deletes the template (D-14, D-15).
-    #[allow(dead_code)] // RED scaffold: the GREEN commit makes the classifier produce it
     LocalDeleted,
     /// Tracked, deleted upstream, local copy unchanged: pull deletes it (D-12).
-    #[allow(dead_code)] // RED scaffold: the GREEN commit makes the classifier produce it
     UpstreamDeleted,
     /// Tracked, deleted on both sides: pull drops the record (D-16).
-    #[allow(dead_code)] // RED scaffold: the GREEN commit makes the classifier produce it
     BothDeleted,
     /// Untracked, tombstoned, present locally only: never republished (SYNC-01).
-    #[allow(dead_code)] // RED scaffold: the GREEN commit makes the classifier produce it
     Unmanaged,
     /// Not present locally or upstream and not tracked.
-    #[allow(dead_code)] // RED scaffold: the GREEN commit makes the classifier produce it
     Absent,
 }
 
@@ -306,64 +301,48 @@ impl SyncEngine {
         text.replace("\r\n", "\n")
     }
 
-    /// Detects 3-way sync status using SHA-256 hashes of ancestor (O), local (A), and upstream (B).
+    /// Detects 3-way sync status from the fingerprints of the ancestor record, the local
+    /// file and the upstream template (`None` = absent; an empty file is present).
+    ///
+    /// Implements the C-less rows of the phase sync state table: deletion rows 1-5,
+    /// the all-present rows (6), and the no-ancestor rows 8-11. A local override only
+    /// changes rows where the local file is present, as before (invariant I2).
     pub fn compare_3way_hashes(
         ancestor_hash: Option<&str>,
         local_hash: Option<&str>,
         upstream_hash: Option<&str>,
         has_local_override: bool,
     ) -> SyncStatus {
-        // Clean identical match
-        if local_hash == upstream_hash && local_hash.is_some() {
-            return if has_local_override {
-                SyncStatus::Overridden
-            } else {
-                SyncStatus::InSync
-            };
-        }
-
-        match ancestor_hash {
-            Some(o) => {
-                let local_matches_base = local_hash == Some(o);
-                let upstream_matches_base = upstream_hash == Some(o);
-
-                match (local_matches_base, upstream_matches_base) {
-                    (true, false) => SyncStatus::UpstreamModified,
-                    (false, true) => {
-                        if has_local_override {
-                            SyncStatus::Overridden
-                        } else {
-                            SyncStatus::LocallyModified
-                        }
-                    }
-                    (false, false) => SyncStatus::Conflicted,
-                    (true, true) => {
-                        if has_local_override {
-                            SyncStatus::Overridden
-                        } else {
-                            SyncStatus::InSync
-                        }
-                    }
-                }
-            }
-            None => match (local_hash, upstream_hash) {
-                (Some(_), None) => {
-                    if has_local_override {
-                        SyncStatus::Overridden
-                    } else {
-                        SyncStatus::LocallyModified
-                    }
-                }
-                (None, Some(_)) => SyncStatus::UpstreamModified,
-                (Some(_), Some(_)) => SyncStatus::Conflicted,
-                (None, None) => {
-                    if has_local_override {
-                        SyncStatus::Overridden
-                    } else {
-                        SyncStatus::InSync
-                    }
-                }
-            },
+        let local_change = if has_local_override {
+            SyncStatus::Overridden
+        } else {
+            SyncStatus::LocallyModified
+        };
+        let in_sync = if has_local_override {
+            SyncStatus::Overridden
+        } else {
+            SyncStatus::InSync
+        };
+        match (ancestor_hash, local_hash, upstream_hash) {
+            // Rows 5 and 11: present nowhere.
+            (Some(_), None, None) => SyncStatus::BothDeleted,
+            (None, None, None) => SyncStatus::Absent,
+            // Rows 3 and 4: deleted locally.
+            (Some(o), None, Some(u)) if u == o => SyncStatus::LocalDeleted,
+            (Some(_), None, Some(_)) => SyncStatus::Conflicted,
+            // Rows 1 and 2: deleted upstream.
+            (Some(o), Some(l), None) if l == o => SyncStatus::UpstreamDeleted,
+            (Some(_), Some(_), None) => SyncStatus::Conflicted,
+            // Row 6: present everywhere.
+            (Some(_), Some(l), Some(u)) if l == u => in_sync,
+            (Some(o), Some(l), Some(_)) if l == o => SyncStatus::UpstreamModified,
+            (Some(o), Some(_), Some(u)) if u == o => local_change,
+            (Some(_), Some(_), Some(_)) => SyncStatus::Conflicted,
+            // Rows 8-10: untracked.
+            (None, Some(_), None) => local_change,
+            (None, None, Some(_)) => SyncStatus::UpstreamModified,
+            (None, Some(l), Some(u)) if l == u => in_sync,
+            (None, Some(_), Some(_)) => SyncStatus::Conflicted,
         }
     }
 
@@ -481,7 +460,7 @@ impl SyncEngine {
             let local_path = local_root.join(&rel);
             let upstream_path = map_to_upstream(upstream_root, &rel);
 
-            let local_bytes = fs::read(&local_path).ok();
+            let local_bytes = read_if_present(&local_path)?;
             let local_content = local_bytes
                 .as_ref()
                 .and_then(|b| std::str::from_utf8(b).ok().map(|s| s.to_string()));
@@ -489,7 +468,7 @@ impl SyncEngine {
 
             let (upstream_bytes, upstream_content) = match upstream_path.as_ref() {
                 Some(p) => {
-                    if let Ok(bytes) = fs::read(p) {
+                    if let Some(bytes) = read_if_present(p)? {
                         if let Ok(raw_str) = std::str::from_utf8(&bytes) {
                             let raw_string = raw_str.to_string();
                             let should_render = p.extension().and_then(|e| e.to_str())
@@ -798,8 +777,22 @@ impl SyncEngine {
             }
         }
 
+        // Deleted upstream with an unchanged local copy (D-12): delete it, end tracking.
+        let mut upstream_deleted = Vec::new();
+        for s in &states {
+            if s.status == SyncStatus::UpstreamDeleted
+                && let Some(ancestor) = &s.ancestor_hash
+            {
+                upstream_deleted.push((s.relative_path.clone(), ancestor.clone()));
+            }
+        }
+
         let mut report = PullReport::default();
-        if candidates_to_write.is_empty() && converged_to_record.is_empty() {
+        // Nothing to write, delete or record: skip staging but keep the report built so far.
+        if candidates_to_write.is_empty()
+            && converged_to_record.is_empty()
+            && upstream_deleted.is_empty()
+        {
             return PullResult::Success(report);
         }
 
@@ -822,6 +815,15 @@ impl SyncEngine {
 
         for (rel, hash, content) in converged_to_record {
             project_state.record_file(&rel, hash, content);
+        }
+
+        for (rel, ancestor) in upstream_deleted {
+            if let Err(reason) = transaction.stage_delete(&rel) {
+                return PullResult::IoFailed { path: rel, reason };
+            }
+            project_state.remove_file(&rel);
+            project_state.record_tombstone(&rel, ancestor, false);
+            report.deleted.push(rel);
         }
 
         let staged_state = match project_state.stage_to_dir(local_root) {
@@ -1394,6 +1396,19 @@ fn state_push_failure(reason: String) -> PushResult {
     PushResult::IoFailed {
         path: PathBuf::from(STATE_FILE_REL),
         reason,
+    }
+}
+
+/// Bytes of the file at `path`, `None` when nothing exists there (the path or one of
+/// its parents is missing, or a parent is a regular file). Any other read error
+/// (permissions, a directory at `path`) is an error: an unreadable file must never be
+/// classified as deleted, because deletions are propagated.
+fn read_if_present(path: &Path) -> Result<Option<Vec<u8>>, String> {
+    use std::io::ErrorKind;
+    match fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(e) if matches!(e.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => Ok(None),
+        Err(e) => Err(format!("Failed to read {}: {e}", path.display())),
     }
 }
 
@@ -2748,6 +2763,85 @@ mod tests {
             vec![PathBuf::from(".gitconfig")]
         );
         assert_eq!(fs::read_to_string(&target).unwrap(), "new\n");
+    }
+
+    #[test]
+    fn test_stage_delete_only_removes_regular_files_after_writes() {
+        let root = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        let victim = outside.path().join("victim");
+        fs::write(&victim, "outside\n").unwrap();
+        fs::create_dir(root.path().join("dir")).unwrap();
+        std::os::unix::fs::symlink(&victim, root.path().join("link")).unwrap();
+        let mut transaction = staging::StagedTransaction::new(root.path());
+        for (rel, why) in [
+            ("dir", "a directory"),
+            ("link", "a symlink"),
+            ("missing", "a missing path"),
+            ("../escape", "an escaping path"),
+        ] {
+            assert!(
+                transaction.stage_delete(Path::new(rel)).is_err(),
+                "staging the deletion of {why} must fail"
+            );
+        }
+        assert!(root.path().join("dir").is_dir());
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "outside\n");
+
+        // Negative control: a regular file is deleted, after the staged writes.
+        fs::write(root.path().join("old"), "old\n").unwrap();
+        transaction.stage_delete(Path::new("old")).unwrap();
+        transaction
+            .stage_write(Path::new("new"), b"new\n", 0o644)
+            .unwrap();
+        assert_eq!(transaction.commit().unwrap(), vec![PathBuf::from("new")]);
+        assert!(!root.path().join("old").exists());
+        assert_eq!(
+            fs::read_to_string(root.path().join("new")).unwrap(),
+            "new\n"
+        );
+
+        // A staged deletion swapped for a symlink before commit is refused, and a
+        // target that is already gone counts as deleted.
+        let mut transaction = staging::StagedTransaction::new(root.path());
+        fs::write(root.path().join("swap"), "x\n").unwrap();
+        fs::write(root.path().join("gone"), "x\n").unwrap();
+        transaction.stage_delete(Path::new("gone")).unwrap();
+        transaction.stage_delete(Path::new("swap")).unwrap();
+        fs::remove_file(root.path().join("gone")).unwrap();
+        fs::remove_file(root.path().join("swap")).unwrap();
+        std::os::unix::fs::symlink(&victim, root.path().join("swap")).unwrap();
+        let err = transaction.commit().unwrap_err();
+        assert!(err.contains("symlink"), "{err}");
+        assert!(fs::symlink_metadata(root.path().join("swap")).is_ok());
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "outside\n");
+    }
+
+    #[test]
+    fn test_unreadable_upstream_is_not_a_deletion() {
+        let engine = SyncEngine::new();
+        let base = "[core]\n";
+        let (local, upstream) = upstream_deletion_fixture(base, base);
+        // A directory where the template should be cannot be read as a file.
+        fs::create_dir_all(upstream.path().join("projects/generic/gitconfig.repo")).unwrap();
+        let ctx = crate::template::TemplateContext::detect_for_project(local.path(), "p", "rust");
+
+        let result = engine.pull_updates(local.path(), upstream.path(), &ctx);
+        assert!(
+            matches!(&result, PullResult::IoFailed { reason, .. } if reason.contains("gitconfig.repo")),
+            "{result:?}"
+        );
+        assert_eq!(
+            fs::read_to_string(local.path().join(".gitconfig")).unwrap(),
+            base
+        );
+
+        // Negative control: a missing template is a deletion.
+        fs::remove_dir(upstream.path().join("projects/generic/gitconfig.repo")).unwrap();
+        assert_eq!(
+            scan_status(&engine, local.path(), upstream.path(), ".gitconfig"),
+            SyncStatus::UpstreamDeleted
+        );
     }
 
     #[test]
