@@ -646,6 +646,13 @@ fn main() {
                                     file.display()
                                 );
                             }
+                            for file in &report.locally_deleted_pending {
+                                println!(
+                                    "  {} {}: deleted locally — push to propagate",
+                                    "!".yellow(),
+                                    file.display()
+                                );
+                            }
                         }
                         sync::PullResult::ConflictBlocked { path } => {
                             eprintln!(
