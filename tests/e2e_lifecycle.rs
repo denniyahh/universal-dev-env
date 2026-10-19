@@ -26,6 +26,15 @@ const FIXTURE_GIT_LOCAL_ENV_VARS: [&str; 15] = [
 const FIXTURE_GITCONFIG: &str =
     "[user]\n\tname = UDE Tester\n\temail = tester@example.com\n[commit]\n\tgpgsign = false\n";
 
+/// The only `ude` Command constructor in this file: drops the host
+/// `TYPESAFE_API_KEY` so no test run can reach the TypeSafe API with the
+/// operator's key or have its exit code depend on a remote verdict.
+fn ude_command(bin: &str) -> Command {
+    let mut cmd = Command::new(bin);
+    cmd.env_remove("TYPESAFE_API_KEY");
+    cmd
+}
+
 /// The only git Command constructor in this file: ignores inherited repo-local
 /// variables, reads `global_config` as its only global config, never prompts.
 fn scrubbed_git(dir: &Path, global_config: &Path) -> Command {
@@ -94,7 +103,7 @@ fn test_cli_e2e_init_and_sync_lifecycle() {
     let proj = tempdir().unwrap();
 
     // 1. Run `ude init` with --path
-    let init_status = Command::new(bin)
+    let init_status = ude_command(bin)
         .args([
             "init",
             "--path",
@@ -118,7 +127,7 @@ fn test_cli_e2e_init_and_sync_lifecycle() {
     assert!(state_content.contains("mise.toml"));
 
     // 2. Run `ude sync status` - all managed files must be InSync
-    let status_output = Command::new(bin)
+    let status_output = ude_command(bin)
         .current_dir(proj.path())
         .args(["sync", "status"])
         .output()
@@ -138,7 +147,7 @@ fn test_cli_e2e_init_and_sync_lifecycle() {
     let loc_mise = proj.path().join("mise.toml");
     fs::write(&loc_mise, "# Locally modified\n[tools]\nrust = '1.99'\n").unwrap();
 
-    let status_output2 = Command::new(bin)
+    let status_output2 = ude_command(bin)
         .current_dir(proj.path())
         .args(["sync", "status"])
         .output()
@@ -159,7 +168,7 @@ fn test_sync_status_crlf_only_change_in_sync() {
     let bin = env!("CARGO_BIN_EXE_ude");
     let proj = tempdir().unwrap();
 
-    let init = Command::new(bin)
+    let init = ude_command(bin)
         .args([
             "init",
             "--path",
@@ -176,7 +185,7 @@ fn test_sync_status_crlf_only_change_in_sync() {
     );
 
     let status = || -> String {
-        let mut cmd = Command::new(bin);
+        let mut cmd = ude_command(bin);
         cmd.current_dir(proj.path())
             .args(["sync", "status"])
             .stdin(Stdio::null());
@@ -216,7 +225,7 @@ fn test_cli_project_init_and_doctor_host_flags() {
     let proj = tempdir().unwrap();
 
     // Verify `ude project init <path>` subcommand syntax works
-    let init_status = Command::new(bin)
+    let init_status = ude_command(bin)
         .args([
             "project",
             "init",
@@ -230,7 +239,7 @@ fn test_cli_project_init_and_doctor_host_flags() {
     assert!(proj.path().join(".ude/state.json").exists());
 
     // Verify `ude doctor --host` executes
-    let doctor_output = Command::new(bin)
+    let doctor_output = ude_command(bin)
         .args(["doctor", "--host"])
         .output()
         .expect("ude doctor --host execution");
@@ -248,7 +257,7 @@ fn test_doctor_critical_security_exit_code_2_and_negative_control() {
     let fake_home = tempdir().unwrap();
 
     // Run doctor in an isolated environment missing allowed_signers
-    let doctor_output = Command::new(bin)
+    let doctor_output = ude_command(bin)
         .args(["doctor", "--host"])
         .env("HOME", fake_home.path())
         .env("XDG_CONFIG_HOME", fake_home.path().join(".config"))
@@ -284,7 +293,7 @@ fn test_doctor_critical_security_exit_code_2_and_negative_control() {
         &["config", "--global", "commit.gpgsign", "true"],
     );
 
-    let doctor_fixed = Command::new(bin)
+    let doctor_fixed = ude_command(bin)
         .args(["doctor", "--host"])
         .env("HOME", fake_home.path())
         .env("XDG_CONFIG_HOME", &config_dir)
@@ -308,7 +317,7 @@ fn test_init_fails_on_existing_regular_file_and_preserves_custom_gitignore() {
     let file_dest = temp.path().join("existing_file.txt");
     fs::write(&file_dest, "regular file content").unwrap();
 
-    let init_fail = Command::new(bin)
+    let init_fail = ude_command(bin)
         .args([
             "project",
             "init",
@@ -329,7 +338,7 @@ fn test_init_fails_on_existing_regular_file_and_preserves_custom_gitignore() {
     let custom_rule = "my_custom_secret_build_output/\n";
     fs::write(proj_dir.join(".gitignore"), custom_rule).unwrap();
 
-    let init_success = Command::new(bin)
+    let init_success = ude_command(bin)
         .args([
             "project",
             "init",
@@ -368,7 +377,7 @@ fn test_doctor_empty_allowed_signers_exits_code_2() {
     )
     .unwrap();
 
-    let doctor_output = Command::new(bin)
+    let doctor_output = ude_command(bin)
         .args(["doctor", "--host"])
         .env("HOME", fake_home.path())
         .env("XDG_CONFIG_HOME", &config_dir)
@@ -396,7 +405,7 @@ fn test_doctor_repo_assertions_detect_unconfigured_include_and_hooks() {
     // Case 1: missing .gitconfig and missing hooks
     let fake_home = temp.path().join("home");
     fs::create_dir_all(&fake_home).unwrap();
-    let doctor_out = Command::new(bin)
+    let doctor_out = ude_command(bin)
         .args([
             "doctor",
             "--repo",
@@ -427,7 +436,7 @@ fn test_doctor_repo_assertions_detect_unconfigured_include_and_hooks() {
     fs::create_dir_all(&hooks_dir).unwrap();
     fs::write(hooks_dir.join("pre-commit"), "").unwrap();
 
-    let doctor_out2 = Command::new(bin)
+    let doctor_out2 = ude_command(bin)
         .args([
             "doctor",
             "--repo",
@@ -455,7 +464,7 @@ fn test_sync_push_pr_does_not_advance_ancestor_state() {
     fs::create_dir_all(&local_proj).unwrap();
 
     // 1. Initialize project with ude init
-    let init_status = Command::new(bin)
+    let init_status = ude_command(bin)
         .args([
             "init",
             "--path",
@@ -505,7 +514,7 @@ fn test_sync_push_pr_does_not_advance_ancestor_state() {
     let cache_dir = temp.path().join("cache");
     fs::create_dir_all(&cache_dir).unwrap();
 
-    let push_pr_out = Command::new(bin)
+    let push_pr_out = ude_command(bin)
         .current_dir(&local_proj)
         .args([
             "sync",
@@ -547,7 +556,7 @@ fn test_sync_push_remote_failure_does_not_advance_ancestor_state() {
     fs::create_dir_all(&local_proj).unwrap();
 
     // 1. Initialize project
-    let init_status = Command::new(bin)
+    let init_status = ude_command(bin)
         .args([
             "init",
             "--path",
@@ -623,7 +632,7 @@ fn test_sync_push_remote_failure_does_not_advance_ancestor_state() {
 
     // 5. Run `ude sync push --remote <bare_remote>`
     // Remote git push will fail because of the rejecting pre-receive hook
-    let push_fail = Command::new(bin)
+    let push_fail = ude_command(bin)
         .current_dir(&local_proj)
         .args(["sync", "push", "--remote", &bare_remote.to_string_lossy()])
         .env("HOME", &fake_home)
@@ -659,7 +668,7 @@ fn test_sync_push_remote_failure_does_not_advance_ancestor_state() {
     );
 
     // 7. Verify status still reports file as Locally Modified (ready to push)
-    let status_out = Command::new(bin)
+    let status_out = ude_command(bin)
         .current_dir(&local_proj)
         .args(["sync", "status", "--remote", &bare_remote.to_string_lossy()])
         .env("HOME", &fake_home)
@@ -676,7 +685,7 @@ fn test_sync_push_remote_failure_does_not_advance_ancestor_state() {
 
     // 8. Negative Control: Remove the rejecting hook and push again
     fs::remove_file(&reject_hook).unwrap();
-    let push_success = Command::new(bin)
+    let push_success = ude_command(bin)
         .current_dir(&local_proj)
         .args(["sync", "push", "--remote", &bare_remote.to_string_lossy()])
         .env("HOME", &fake_home)
@@ -727,7 +736,7 @@ fn test_sync_ignores_inherited_git_dir() {
     // Project created with ude init; its mise.toml seeds the remote template.
     let local_proj = temp.path().join("local_proj");
     fs::create_dir_all(&local_proj).unwrap();
-    let init = Command::new(bin)
+    let init = ude_command(bin)
         .args([
             "init",
             "--path",
@@ -796,7 +805,7 @@ fn test_sync_ignores_inherited_git_dir() {
     let cache_dir = temp.path().join("cache");
     fs::create_dir_all(&cache_dir).unwrap();
     let ude_with_decoy = |args: &[&str]| {
-        Command::new(bin)
+        ude_command(bin)
             .current_dir(&local_proj)
             .args(args)
             .env("GIT_DIR", &decoy)
@@ -875,7 +884,7 @@ fn test_sync_corrupt_state_fails_loudly() {
     let bin = env!("CARGO_BIN_EXE_ude");
     let proj = tempdir().unwrap();
 
-    let init = Command::new(bin)
+    let init = ude_command(bin)
         .args([
             "init",
             "--path",
@@ -895,7 +904,7 @@ fn test_sync_corrupt_state_fails_loudly() {
     let original = fs::read(&state_file).expect("init writes .ude/state.json");
 
     let ude = |args: &[&str]| -> Output {
-        let mut cmd = Command::new(bin);
+        let mut cmd = ude_command(bin);
         cmd.current_dir(proj.path()).args(args).stdin(Stdio::null());
         for name in FIXTURE_GIT_LOCAL_ENV_VARS {
             cmd.env_remove(name);
@@ -969,7 +978,7 @@ fn test_sync_corrupt_state_fails_loudly() {
 /// Runs `ude init --type rust` at `path` and returns the generated mise.toml.
 fn init_rust_project(bin: &str, path: &Path) -> String {
     fs::create_dir_all(path).unwrap();
-    let init = Command::new(bin)
+    let init = ude_command(bin)
         .args(["init", "--path", &path.to_string_lossy(), "--type", "rust"])
         .output()
         .expect("ude init execution");
@@ -1025,7 +1034,7 @@ fn test_sync_pull_conflict_exits_1_and_writes_sidecar() {
     let cache_dir = temp.path().join("cache");
     fs::create_dir_all(&cache_dir).unwrap();
     let ude = |project: &Path, args: &[&str]| {
-        let mut cmd = Command::new(bin);
+        let mut cmd = ude_command(bin);
         cmd.current_dir(project).args(args);
         for name in FIXTURE_GIT_LOCAL_ENV_VARS {
             cmd.env_remove(name);
@@ -1178,14 +1187,12 @@ fn sync_cli(root: &Path) -> impl Fn(&Path, &[&str]) -> Output {
     let cache_dir = root.join("cache");
     fs::create_dir_all(&cache_dir).unwrap();
     move |project: &Path, args: &[&str]| {
-        let mut cmd = Command::new(bin);
+        let mut cmd = ude_command(bin);
         cmd.current_dir(project).args(args);
         for name in FIXTURE_GIT_LOCAL_ENV_VARS {
             cmd.env_remove(name);
         }
-        // No host TypeSafe key: push must not reach the semantic drift API.
-        cmd.env_remove("TYPESAFE_API_KEY")
-            .env("HOME", &fake_home)
+        cmd.env("HOME", &fake_home)
             .env("XDG_CONFIG_HOME", &fake_config)
             .env("GIT_CONFIG_GLOBAL", &gitconfig)
             .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -1512,4 +1519,16 @@ fn test_force_does_not_bypass_upstream_moved() {
         local_mise
     );
     assert_ne!(mise_ancestor(&project), ancestor_before);
+}
+
+#[test]
+fn test_ude_command_drops_host_typesafe_key() {
+    let cmd = ude_command(env!("CARGO_BIN_EXE_ude"));
+    let removed = cmd
+        .get_envs()
+        .any(|(name, value)| name == "TYPESAFE_API_KEY" && value.is_none());
+    assert!(
+        removed,
+        "ude_command must env_remove TYPESAFE_API_KEY so tests never use the host key"
+    );
 }
