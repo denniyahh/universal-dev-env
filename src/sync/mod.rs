@@ -1373,7 +1373,7 @@ impl SyncEngine {
         branch: &str,
         open_pr: bool,
         staged_files: &[PathBuf],
-        _fetched_sha: &str,
+        fetched_sha: &str,
     ) -> Result<String, PushRemoteError> {
         let Some(expected_set) = self
             .stage_publication(remote_checkout, staged_files)
@@ -1385,8 +1385,7 @@ impl SyncEngine {
             self.push_pr_branch(remote_checkout, branch, &expected_set)
                 .map_err(PushRemoteError::Failed)
         } else {
-            self.push_direct(remote_checkout, branch, &expected_set)
-                .map_err(PushRemoteError::Failed)
+            self.push_direct(remote_checkout, branch, &expected_set, fetched_sha)
         }
     }
 
@@ -1594,47 +1593,97 @@ impl SyncEngine {
     }
 
     /// Direct mode: commits in the cache checkout and pushes the commit to `branch`.
+    ///
+    /// The commit must build on `fetched_sha` (branch continuity). The push is a plain
+    /// fast-forward push, never forced: when upstream moved after the fetch, the remote's
+    /// fast-forward check rejects it, the cache commit is rolled back and the result is
+    /// [`PushRemoteError::UpstreamMoved`] (D-18).
     fn push_direct(
         &self,
         remote_checkout: &Path,
         branch: &str,
         expected_set: &HashSet<PathBuf>,
-    ) -> Result<String, String> {
+        fetched_sha: &str,
+    ) -> Result<String, PushRemoteError> {
+        use PushRemoteError::Failed;
         let commit_out = self
             .run_local(
                 self.commit_command(remote_checkout, SYNC_COMMIT_MESSAGE),
                 "git commit",
             )
-            .map_err(|e| format!("Failed to commit in remote checkout: {e}"))?;
+            .map_err(|e| Failed(format!("Failed to commit in remote checkout: {e}")))?;
 
         if !commit_out.status.success() {
-            return Err(with_excerpt(
+            return Err(Failed(with_excerpt(
                 "git commit failed in remote checkout".to_string(),
                 &commit_out,
-            ));
+            )));
         }
 
         if let Err(err) = self.validate_committed_tree(remote_checkout, expected_set) {
             self.rollback_commit(remote_checkout);
-            return Err(err);
+            return Err(Failed(err));
         }
 
+        if let Err(err) = self.check_continuity(remote_checkout, branch, fetched_sha) {
+            self.rollback_commit(remote_checkout);
+            return Err(Failed(err));
+        }
+
+        // No force or lease option, ever: the server's fast-forward check is the
+        // compare-and-swap that detects a concurrent publisher (D-18).
+        let refspec = format!("HEAD:refs/heads/{branch}");
         let mut push = self.git(Some(remote_checkout));
-        push.args(["push", "origin", &format!("HEAD:refs/heads/{branch}")]);
+        push.args(["push", "--porcelain", "origin", &refspec]);
         let push_out = self
             .run_network(push, "git push")
-            .map_err(|e| format!("Failed to push to remote: {e}"))?;
+            .map_err(|e| Failed(format!("Failed to push to remote: {e}")))?;
 
         if !push_out.status.success() {
-            return Err(with_excerpt(
+            // Porcelain stdout starts with a `To <url>` line; it is never printed.
+            let stdout = String::from_utf8_lossy(&push_out.stdout);
+            let rejected = stdout.lines().any(|line| {
+                let mut fields = line.split('\t');
+                fields.next() == Some("!")
+                    && fields.nth(1).is_some_and(|s| s.starts_with("[rejected]"))
+            });
+            if rejected {
+                self.rollback_commit(remote_checkout);
+                return Err(PushRemoteError::UpstreamMoved {
+                    branch: branch.to_string(),
+                });
+            }
+            return Err(Failed(with_excerpt(
                 format!("git push origin {branch} failed"),
                 &push_out,
-            ));
+            )));
         }
 
         Ok(format!(
             "Directly pushed changes to remote branch '{branch}'."
         ))
+    }
+
+    /// Checks that the cache commit's parent is the fetched head of `branch`.
+    fn check_continuity(&self, repo: &Path, branch: &str, fetched_sha: &str) -> Result<(), String> {
+        let mut rev_parse = self.git(Some(repo));
+        rev_parse.args(["rev-parse", "--verify", "HEAD~1"]);
+        let out = self
+            .run_local(rev_parse, "git rev-parse")
+            .map_err(|e| format!("Branch continuity check failed: {e}"))?;
+        if !out.status.success() {
+            return Err(with_excerpt(
+                "Branch continuity check failed: cache commit has no parent".to_string(),
+                &out,
+            ));
+        }
+        let parent = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if parent != fetched_sha {
+            return Err(format!(
+                "Branch continuity check failed: cache commit parent {parent} is not the fetched {branch} head {fetched_sha}"
+            ));
+        }
+        Ok(())
     }
 
     /// The cache-checkout commit command (no hooks, no signing).
