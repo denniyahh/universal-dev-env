@@ -6183,6 +6183,17 @@ mod tests {
             PushPorcelain::Other
         );
         assert_eq!(classify_push_porcelain("!\n"), PushPorcelain::Other);
+        // Order does not matter: a `[rejected]` line decides whichever `!` line comes first.
+        for mixed in [
+            "!\tA\t[rejected] (fetch first)\n!\tB\t[remote rejected] (hook declined)\n",
+            "!\tB\t[remote rejected] (hook declined)\n!\tA\t[rejected] (fetch first)\n",
+        ] {
+            assert_eq!(
+                classify_push_porcelain(mixed),
+                PushPorcelain::RejectedNonFastForward,
+                "{mixed:?}"
+            );
+        }
     }
 
     /// One porcelain "noise" line: never `!`-flagged (empty, or a first character that
