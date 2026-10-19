@@ -124,9 +124,6 @@ pub enum PushResult {
         path: PathBuf,
         reason: String,
     },
-    ConflictBlocked {
-        path: PathBuf,
-    },
     BoundaryBlocked {
         path: PathBuf,
     },
@@ -1099,14 +1096,24 @@ impl SyncEngine {
         };
         let mut candidates_to_write = Vec::new();
         let mut deletions = Vec::new();
+        let mut skipped_conflicts = Vec::new();
+        let mut skipped_merged = Vec::new();
 
         // Pass 1: Strict atomic pre-validation across ALL modified candidates
         for state in &states {
-            // Conflict gate: Abort push if any file is conflicted
-            if state.status == SyncStatus::Conflicted {
-                return PushResult::ConflictBlocked {
-                    path: state.relative_path.clone(),
-                };
+            // Never publish content the developer has not had in the working tree: an
+            // unresolved conflict (D-10) or a clean merge not yet pulled (D-17) is
+            // skipped and reported; the other files are still published.
+            match state.status {
+                SyncStatus::Conflicted | SyncStatus::ConflictPending => {
+                    skipped_conflicts.push(state.relative_path.clone());
+                    continue;
+                }
+                SyncStatus::Merged => {
+                    skipped_merged.push(state.relative_path.clone());
+                    continue;
+                }
+                _ => {}
             }
 
             // Overridden files are never pushed upstream (Option B)
@@ -1295,8 +1302,8 @@ impl SyncEngine {
             staged_files,
             updated_records,
             deleted,
-            skipped_conflicts: Vec::new(),
-            skipped_merged: Vec::new(),
+            skipped_conflicts,
+            skipped_merged,
         }
     }
 

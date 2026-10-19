@@ -781,7 +781,8 @@ fn main() {
                             staged_files,
                             updated_records,
                             deleted,
-                            ..
+                            skipped_conflicts,
+                            skipped_merged,
                         } => {
                             println!(
                                 "  {} Sanitization gate passed: clean of secrets & parameters applied.",
@@ -796,6 +797,21 @@ fn main() {
                                 println!(
                                     "  {} Deleted upstream template for {}",
                                     "✓".green(),
+                                    file.display()
+                                );
+                            }
+                            for file in &skipped_conflicts {
+                                eprintln!(
+                                    "  {} {}: unresolved conflict, skipped (run ude sync resolve {})",
+                                    "✗".red(),
+                                    file.display(),
+                                    file.display()
+                                );
+                            }
+                            for file in &skipped_merged {
+                                eprintln!(
+                                    "  {} {}: merged with upstream changes, skipped (run ude sync pull first)",
+                                    "✗".red(),
                                     file.display()
                                 );
                             }
@@ -858,6 +874,11 @@ fn main() {
                                     }
                                 }
                             }
+                            // Published what was eligible; skipped files still need the
+                            // developer (D-10, D-17).
+                            if !skipped_conflicts.is_empty() || !skipped_merged.is_empty() {
+                                std::process::exit(EXIT_DRIFT);
+                            }
                         }
                         sync::PushResult::SecretBlocked { path, reason } => {
                             eprintln!(
@@ -875,14 +896,6 @@ fn main() {
                                 path.display()
                             );
                             std::process::exit(1);
-                        }
-                        sync::PushResult::ConflictBlocked { path } => {
-                            eprintln!(
-                                "  {} Push rejected: {} conflicts with upstream.",
-                                "✗".red(),
-                                path.display()
-                            );
-                            std::process::exit(EXIT_DRIFT);
                         }
                         sync::PushResult::IoFailed { path, reason } => {
                             eprintln!(
