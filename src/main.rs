@@ -607,6 +607,15 @@ fn main() {
                                     s.relative_path.display()
                                 );
                             }
+                            sync::SyncStatus::ConflictPending => {
+                                println!(
+                                    "  {} {}: Unresolved conflict (see {}.conflict; run ude sync resolve {})",
+                                    "✗".red(),
+                                    s.relative_path.display(),
+                                    s.relative_path.display(),
+                                    s.relative_path.display()
+                                );
+                            }
                         }
                     }
                 }

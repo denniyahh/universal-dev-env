@@ -32,6 +32,9 @@ pub enum SyncStatus {
     Unmanaged,
     /// Not present locally or upstream and not tracked.
     Absent,
+    /// An open conflict record whose local and upstream versions have not converged:
+    /// the file is left untouched until `ude sync resolve` or convergence (D-08, D-09).
+    ConflictPending,
 }
 
 #[derive(Debug, Clone)]
@@ -45,6 +48,8 @@ pub struct FileSyncState {
     pub upstream_content: Option<String>,
     /// LF-normalized local text (`None` when the local file is absent or not UTF-8).
     pub local_content: Option<String>,
+    /// Whether the path has an open conflict record (`ProjectState::conflicts`).
+    pub conflict_open: bool,
 }
 
 /// One present version of a managed file in a three-way comparison.
@@ -139,6 +144,8 @@ pub struct PullReport {
     pub locally_deleted_pending: Vec<PathBuf>,
     /// Conflicted files left untouched, each with a `<file>.conflict` sidecar (D-08).
     pub conflicts: Vec<PathBuf>,
+    /// Open conflicts cleared because local and upstream converged (D-09 amendment).
+    pub converged: Vec<PathBuf>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -556,6 +563,7 @@ impl SyncEngine {
                 merged_content,
                 upstream_content,
                 local_content: local_content.as_deref().map(Self::normalize_eol),
+                conflict_open: false,
             });
         }
 
@@ -3239,6 +3247,482 @@ mod tests {
             matches!(&result, PullResult::Success(r) if !r.deleted.contains(&PathBuf::from(".gitconfig")))
         );
         assert_eq!(fs::read(local.path().join(".gitconfig")).unwrap(), b"");
+    }
+
+    /// The scanned state of the managed file `rel`.
+    fn scan_state(engine: &SyncEngine, local: &Path, upstream: &Path, rel: &str) -> FileSyncState {
+        engine
+            .scan_project(local, upstream, None)
+            .unwrap()
+            .into_iter()
+            .find(|s| s.relative_path == Path::new(rel))
+            .unwrap_or_else(|| panic!("{rel} is not a managed file"))
+    }
+
+    /// A pull report listing only `conflicts`.
+    fn conflicts_only(paths: &[&str]) -> PullResult {
+        PullResult::Success(PullReport {
+            conflicts: paths.iter().map(PathBuf::from).collect(),
+            ..PullReport::default()
+        })
+    }
+
+    const CONFLICT_BASE: &str = "[core]\n\tautocrlf = input\n";
+    const CONFLICT_LOCAL: &str = "[core]\n\tautocrlf = local\n";
+    const CONFLICT_UPSTREAM: &str = "[core]\n\tautocrlf = upstream\n";
+
+    /// A project whose `.gitconfig` text-conflicts, after the first conflicted pull.
+    fn conflicted_gitconfig(engine: &SyncEngine) -> (tempfile::TempDir, tempfile::TempDir) {
+        let (local, upstream) = deletion_fixture(
+            Some(CONFLICT_BASE),
+            None,
+            Some(CONFLICT_LOCAL),
+            Some(CONFLICT_UPSTREAM),
+        );
+        assert_eq!(
+            pull_dirs(engine, local.path(), upstream.path()),
+            conflicts_only(&[".gitconfig"])
+        );
+        (local, upstream)
+    }
+
+    fn upstream_gitconfig_path(upstream: &Path) -> PathBuf {
+        upstream.join("projects/generic/gitconfig.repo")
+    }
+
+    #[test]
+    fn test_pull_conflict_regenerates_sidecar() {
+        let engine = SyncEngine::new();
+        let (local, upstream) = conflicted_gitconfig(&engine);
+        let sidecar_path = local.path().join(".gitconfig.conflict");
+        let first = fs::read_to_string(&sidecar_path).unwrap();
+        assert!(first.contains("autocrlf = upstream\n"), "{first}");
+
+        // Upstream changes again while the conflict is open.
+        let newer = "[core]\n\tautocrlf = newer\n";
+        write_upstream_gitconfig(upstream.path(), newer.as_bytes());
+        assert_eq!(
+            scan_status(&engine, local.path(), upstream.path(), ".gitconfig"),
+            SyncStatus::ConflictPending
+        );
+        assert_eq!(
+            pull_dirs(&engine, local.path(), upstream.path()),
+            conflicts_only(&[".gitconfig"])
+        );
+        let second = fs::read_to_string(&sidecar_path).unwrap();
+        assert!(second.contains("autocrlf = newer\n"), "{second}");
+        assert!(!second.contains("autocrlf = upstream\n"), "{second}");
+        assert_eq!(
+            fs::read_to_string(local.path().join(".gitconfig")).unwrap(),
+            CONFLICT_LOCAL
+        );
+        let state = ProjectState::load_from_dir(local.path()).unwrap();
+        let record = state.conflict(Path::new(".gitconfig")).expect("record");
+        assert_eq!(
+            record.upstream_hash,
+            Some(SyncEngine::fingerprint(newer.as_bytes()))
+        );
+        assert_eq!(record.upstream_content.as_deref(), Some(newer));
+        assert_eq!(
+            state.get_ancestor_hash(Path::new(".gitconfig")),
+            Some(SyncEngine::fingerprint(CONFLICT_BASE.as_bytes()).as_str())
+        );
+
+        // Hand-deleting the sidecar does not resolve: the next pull recreates it.
+        fs::remove_file(&sidecar_path).unwrap();
+        assert_eq!(
+            scan_status(&engine, local.path(), upstream.path(), ".gitconfig"),
+            SyncStatus::ConflictPending
+        );
+        assert_eq!(
+            pull_dirs(&engine, local.path(), upstream.path()),
+            conflicts_only(&[".gitconfig"])
+        );
+        assert_eq!(fs::read_to_string(&sidecar_path).unwrap(), second);
+
+        // Negative control: no upstream change, byte-identical sidecar.
+        pull_dirs(&engine, local.path(), upstream.path());
+        assert_eq!(fs::read_to_string(&sidecar_path).unwrap(), second);
+    }
+
+    #[test]
+    fn test_conflict_auto_clears_on_convergence() {
+        let engine = SyncEngine::new();
+        let (local, upstream) = conflicted_gitconfig(&engine);
+        let sidecar_path = local.path().join(".gitconfig.conflict");
+
+        // Negative control: local still differs from upstream, so nothing clears.
+        let st = scan_state(&engine, local.path(), upstream.path(), ".gitconfig");
+        assert_eq!(
+            (st.status, st.conflict_open),
+            (SyncStatus::ConflictPending, true)
+        );
+        assert_eq!(
+            pull_dirs(&engine, local.path(), upstream.path()),
+            conflicts_only(&[".gitconfig"])
+        );
+        assert!(sidecar_path.is_file());
+        let state = ProjectState::load_from_dir(local.path()).unwrap();
+        assert!(state.conflict(Path::new(".gitconfig")).is_some());
+
+        // The user makes the local file identical to upstream (CRLF: same fingerprint).
+        fs::write(
+            local.path().join(".gitconfig"),
+            CONFLICT_UPSTREAM.replace('\n', "\r\n"),
+        )
+        .unwrap();
+        let st = scan_state(&engine, local.path(), upstream.path(), ".gitconfig");
+        assert_eq!((st.status, st.conflict_open), (SyncStatus::InSync, true));
+
+        // Nothing else changes in this pull: the convergence clear alone is the work.
+        assert_eq!(
+            pull_dirs(&engine, local.path(), upstream.path()),
+            PullResult::Success(PullReport {
+                converged: vec![PathBuf::from(".gitconfig")],
+                ..PullReport::default()
+            })
+        );
+        assert!(
+            !sidecar_path.exists(),
+            "sidecar must be removed on convergence"
+        );
+        let state = ProjectState::load_from_dir(local.path()).unwrap();
+        assert_eq!(state.conflict(Path::new(".gitconfig")), None);
+        assert_eq!(
+            state.get_ancestor_hash(Path::new(".gitconfig")),
+            Some(SyncEngine::fingerprint(CONFLICT_UPSTREAM.as_bytes()).as_str())
+        );
+        assert_eq!(
+            state.get_ancestor_content(Path::new(".gitconfig")),
+            Some(CONFLICT_UPSTREAM)
+        );
+        let st = scan_state(&engine, local.path(), upstream.path(), ".gitconfig");
+        assert_eq!((st.status, st.conflict_open), (SyncStatus::InSync, false));
+    }
+
+    #[test]
+    fn test_conflict_both_absent_converges() {
+        let engine = SyncEngine::new();
+        let rel = Path::new(".gitconfig");
+
+        // Case A (row 14): D-13 conflict (upstream deleted, local edited), files record.
+        let (local, upstream) =
+            deletion_fixture(Some(CONFLICT_BASE), None, Some(CONFLICT_LOCAL), None);
+        assert_eq!(
+            pull_dirs(&engine, local.path(), upstream.path()),
+            conflicts_only(&[".gitconfig"])
+        );
+        let sidecar_path = local.path().join(".gitconfig.conflict");
+        // Negative control: the edited local file is still present, nothing clears.
+        assert_eq!(
+            scan_status(&engine, local.path(), upstream.path(), ".gitconfig"),
+            SyncStatus::ConflictPending
+        );
+        assert_eq!(
+            pull_dirs(&engine, local.path(), upstream.path()),
+            conflicts_only(&[".gitconfig"])
+        );
+        let state = ProjectState::load_from_dir(local.path()).unwrap();
+        assert!(state.conflict(rel).is_some() && sidecar_path.is_file());
+        assert!(state.get_ancestor_hash(rel).is_some());
+
+        fs::remove_file(local.path().join(".gitconfig")).unwrap();
+        let st = scan_state(&engine, local.path(), upstream.path(), ".gitconfig");
+        assert_eq!(
+            (st.status, st.conflict_open),
+            (SyncStatus::BothDeleted, true)
+        );
+        assert_eq!(
+            pull_dirs(&engine, local.path(), upstream.path()),
+            PullResult::Success(PullReport {
+                deleted: vec![PathBuf::from(".gitconfig")],
+                converged: vec![PathBuf::from(".gitconfig")],
+                ..PullReport::default()
+            })
+        );
+        let state = ProjectState::load_from_dir(local.path()).unwrap();
+        assert_eq!(state.conflict(rel), None);
+        assert_eq!(state.get_ancestor_hash(rel), None);
+        let tombstone = state.tombstone(rel).expect("D-16 tombstone");
+        assert_eq!(
+            tombstone.deleted_hash,
+            SyncEngine::fingerprint(CONFLICT_BASE.as_bytes())
+        );
+        assert!(!tombstone.kept_unmanaged);
+        assert!(!sidecar_path.exists());
+        assert!(!local.path().join(".gitconfig").exists(), "no 0-byte file");
+
+        // Case B (row 16): no files record; local and upstream added different content.
+        let (local, upstream) =
+            deletion_fixture(None, None, Some("local add\n"), Some("upstream add\n"));
+        assert_eq!(
+            pull_dirs(&engine, local.path(), upstream.path()),
+            conflicts_only(&[".gitconfig"])
+        );
+        let sidecar_path = local.path().join(".gitconfig.conflict");
+        assert!(sidecar_path.is_file());
+        fs::remove_file(local.path().join(".gitconfig")).unwrap();
+        fs::remove_file(upstream_gitconfig_path(upstream.path())).unwrap();
+        let st = scan_state(&engine, local.path(), upstream.path(), ".gitconfig");
+        assert_eq!((st.status, st.conflict_open), (SyncStatus::Absent, true));
+        assert_eq!(
+            pull_dirs(&engine, local.path(), upstream.path()),
+            PullResult::Success(PullReport {
+                converged: vec![PathBuf::from(".gitconfig")],
+                ..PullReport::default()
+            })
+        );
+        let state = ProjectState::load_from_dir(local.path()).unwrap();
+        assert_eq!(state.conflict(rel), None);
+        assert_eq!(state.get_ancestor_hash(rel), None);
+        assert_eq!(state.tombstone(rel), None, "no fingerprint, no tombstone");
+        assert!(!sidecar_path.exists());
+        assert!(!local.path().join(".gitconfig").exists());
+    }
+
+    #[test]
+    fn test_pull_deletion_conflicts_write_sidecars() {
+        let engine = SyncEngine::new();
+        let rel = Path::new(".gitconfig");
+
+        // D-13: upstream deleted, local edited.
+        let (local, upstream) =
+            deletion_fixture(Some(CONFLICT_BASE), None, Some(CONFLICT_LOCAL), None);
+        assert_eq!(
+            pull_dirs(&engine, local.path(), upstream.path()),
+            conflicts_only(&[".gitconfig"])
+        );
+        let sidecar = fs::read_to_string(local.path().join(".gitconfig.conflict")).unwrap();
+        assert!(
+            sidecar.contains("# UPSTREAM: deleted upstream\n"),
+            "{sidecar}"
+        );
+        assert!(!sidecar.contains("deleted locally"), "{sidecar}");
+        assert_eq!(
+            fs::read_to_string(local.path().join(".gitconfig")).unwrap(),
+            CONFLICT_LOCAL
+        );
+        let state = ProjectState::load_from_dir(local.path()).unwrap();
+        assert_eq!(state.conflict(rel).expect("record").upstream_hash, None);
+
+        // D-15 second clause: local deleted, upstream changed.
+        let (local, upstream) =
+            deletion_fixture(Some(CONFLICT_BASE), None, None, Some(CONFLICT_UPSTREAM));
+        assert_eq!(
+            pull_dirs(&engine, local.path(), upstream.path()),
+            conflicts_only(&[".gitconfig"])
+        );
+        let sidecar = fs::read_to_string(local.path().join(".gitconfig.conflict")).unwrap();
+        assert!(sidecar.contains("# LOCAL: deleted locally\n"), "{sidecar}");
+        assert!(!sidecar.contains("deleted upstream"), "{sidecar}");
+        assert!(!local.path().join(".gitconfig").exists());
+
+        // Open-record precedence (P1, row 12): a text conflict is open, the user restores
+        // the ancestor locally and upstream deletes the template.
+        let (local, upstream) = conflicted_gitconfig(&engine);
+        fs::write(local.path().join(".gitconfig"), CONFLICT_BASE).unwrap();
+        fs::remove_file(upstream_gitconfig_path(upstream.path())).unwrap();
+        assert_eq!(
+            scan_status(&engine, local.path(), upstream.path(), ".gitconfig"),
+            SyncStatus::ConflictPending
+        );
+        assert_eq!(
+            pull_dirs(&engine, local.path(), upstream.path()),
+            conflicts_only(&[".gitconfig"])
+        );
+        assert_eq!(
+            fs::read_to_string(local.path().join(".gitconfig")).unwrap(),
+            CONFLICT_BASE
+        );
+        let sidecar = fs::read_to_string(local.path().join(".gitconfig.conflict")).unwrap();
+        assert!(
+            sidecar.contains("# UPSTREAM: deleted upstream\n"),
+            "{sidecar}"
+        );
+        let state = ProjectState::load_from_dir(local.path()).unwrap();
+        assert_eq!(state.conflict(rel).expect("record").upstream_hash, None);
+        assert_eq!(state.tombstone(rel), None);
+        assert_eq!(
+            state.get_ancestor_hash(rel),
+            Some(SyncEngine::fingerprint(CONFLICT_BASE.as_bytes()).as_str())
+        );
+
+        // Control (row 1): same files, no conflict record: UpstreamDeleted, pull deletes.
+        let (local, upstream) =
+            deletion_fixture(Some(CONFLICT_BASE), None, Some(CONFLICT_BASE), None);
+        assert_eq!(
+            scan_status(&engine, local.path(), upstream.path(), ".gitconfig"),
+            SyncStatus::UpstreamDeleted
+        );
+        assert_eq!(
+            pull_dirs(&engine, local.path(), upstream.path()),
+            PullResult::Success(PullReport {
+                deleted: vec![PathBuf::from(".gitconfig")],
+                ..PullReport::default()
+            })
+        );
+        assert!(!local.path().join(".gitconfig").exists());
+    }
+
+    #[test]
+    fn test_pull_binary_conflict_sidecar() {
+        let engine = SyncEngine::new();
+        let local_dir = tempdir().unwrap();
+        let upstream_dir = tempdir().unwrap();
+        let (base, local, upstream): (&[u8], &[u8], &[u8]) =
+            (b"\xff\xfebase\n", b"\xff\xfelocal\n", b"\xff\xfeupstream\n");
+        let mut state = ProjectState::default();
+        state.record_file(Path::new(".gitconfig"), SyncEngine::fingerprint(base), None);
+        state.save_to_dir(local_dir.path()).unwrap();
+        fs::write(local_dir.path().join(".gitconfig"), local).unwrap();
+        write_upstream_gitconfig(upstream_dir.path(), upstream);
+
+        assert_eq!(
+            pull_dirs(&engine, local_dir.path(), upstream_dir.path()),
+            conflicts_only(&[".gitconfig"])
+        );
+        let sidecar = fs::read_to_string(local_dir.path().join(".gitconfig.conflict")).unwrap();
+        for (label, bytes) in [("LOCAL", local), ("ANCESTOR", base), ("UPSTREAM", upstream)] {
+            let line = format!(
+                "# {label} fingerprint: {}\n",
+                SyncEngine::fingerprint(bytes)
+            );
+            assert!(sidecar.contains(&line), "missing {line:?}: {sidecar}");
+        }
+        assert!(
+            !sidecar.contains("<<<<<<<"),
+            "binary sidecar has markers: {sidecar}"
+        );
+        assert_eq!(
+            fs::read(local_dir.path().join(".gitconfig")).unwrap(),
+            local
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_pull_refuses_symlinked_conflict_sidecar() {
+        use std::os::unix::fs::symlink;
+        let engine = SyncEngine::new();
+        let outside = tempdir().unwrap();
+        let victim = outside.path().join("victim");
+        fs::write(&victim, "outside\n").unwrap();
+        let fixture = |plant: bool| {
+            let (local, upstream) = deletion_fixture(
+                Some(CONFLICT_BASE),
+                None,
+                Some(CONFLICT_LOCAL),
+                Some(CONFLICT_UPSTREAM),
+            );
+            write_upstream(
+                upstream.path(),
+                "projects/generic/hooks/pre-commit",
+                b"#!/bin/sh\nexit 0\n",
+            );
+            if plant {
+                symlink(&victim, local.path().join(".gitconfig.conflict")).unwrap();
+            }
+            (local, upstream)
+        };
+
+        let (local, upstream) = fixture(true);
+        let state_before = fs::read(local.path().join(STATE_FILE_REL)).unwrap();
+        let res = pull_dirs(&engine, local.path(), upstream.path());
+        assert!(
+            matches!(&res, PullResult::IoFailed { path, .. } if path == Path::new(".gitconfig.conflict")),
+            "a symlinked sidecar must be refused: {res:?}"
+        );
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "outside\n");
+        assert!(
+            fs::symlink_metadata(local.path().join(".gitconfig.conflict"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(
+            !local.path().join("scripts/hooks/pre-commit").exists(),
+            "staging aborted, so no clean file may be applied"
+        );
+        assert_eq!(
+            fs::read(local.path().join(STATE_FILE_REL)).unwrap(),
+            state_before
+        );
+
+        // Negative control: without the symlink the sidecar is written and the hook applied.
+        let (local, upstream) = fixture(false);
+        assert_eq!(
+            pull_dirs(&engine, local.path(), upstream.path()),
+            PullResult::Success(PullReport {
+                applied: vec![PathBuf::from("scripts/hooks/pre-commit")],
+                conflicts: vec![PathBuf::from(".gitconfig")],
+                ..PullReport::default()
+            })
+        );
+        assert!(local.path().join(".gitconfig.conflict").is_file());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_sidecar_mode_follows_local() {
+        use std::os::unix::fs::PermissionsExt;
+        let engine = SyncEngine::new();
+
+        // A 0o600 local file gives a 0o600 sidecar.
+        let (local, upstream) = deletion_fixture(
+            Some(CONFLICT_BASE),
+            None,
+            Some(CONFLICT_LOCAL),
+            Some(CONFLICT_UPSTREAM),
+        );
+        fs::set_permissions(
+            local.path().join(".gitconfig"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        assert_eq!(
+            pull_dirs(&engine, local.path(), upstream.path()),
+            conflicts_only(&[".gitconfig"])
+        );
+        let mode = file_mode(&local.path().join(".gitconfig.conflict"));
+        assert_ne!(
+            mode, 0o644,
+            "a 0o600 file's sidecar must not be world-readable"
+        );
+        assert_eq!(mode, 0o600);
+
+        // A 0o755 hook gives a 0o644 sidecar (execute bits cleared).
+        let local = tempdir().unwrap();
+        let upstream = tempdir().unwrap();
+        let hook = "scripts/hooks/pre-commit";
+        let base = "#!/bin/sh\nexit 0\n";
+        let mut state = ProjectState::default();
+        state.record_file(
+            Path::new(hook),
+            SyncEngine::fingerprint(base.as_bytes()),
+            Some(base.to_string()),
+        );
+        state.save_to_dir(local.path()).unwrap();
+        fs::create_dir_all(local.path().join("scripts/hooks")).unwrap();
+        fs::write(local.path().join(hook), "#!/bin/sh\nexit 1\n").unwrap();
+        fs::set_permissions(local.path().join(hook), fs::Permissions::from_mode(0o755)).unwrap();
+        write_upstream(
+            upstream.path(),
+            "projects/generic/hooks/pre-commit",
+            b"#!/bin/sh\nexit 2\n",
+        );
+        assert_eq!(
+            pull_dirs(&engine, local.path(), upstream.path()),
+            conflicts_only(&[hook])
+        );
+        assert_eq!(
+            file_mode(&local.path().join(format!("{hook}.conflict"))),
+            0o644
+        );
+        assert_eq!(
+            file_mode(&local.path().join(hook)),
+            0o755,
+            "hook mode untouched"
+        );
     }
 
     #[test]
