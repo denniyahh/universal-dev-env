@@ -275,6 +275,10 @@ impl Drop for RemoteLockGuard {
 pub struct RemoteCache {
     /// The checkout's `templates/` directory, or the checkout root when it has none.
     pub templates_dir: PathBuf,
+    /// The cache checkout's root (its git toplevel), where publication runs git. Never
+    /// derive it from `templates_dir`: for a remote without `templates/` the two are
+    /// the same directory.
+    pub checkout_dir: PathBuf,
     /// The remote branch head UDE fetched (`refs/remotes/origin/<branch>`). A direct
     /// push must build on exactly this commit (branch continuity, D-18).
     pub fetched_sha: String,
@@ -814,10 +818,11 @@ impl SyncEngine {
         let templates_dir = if templates_path.exists() {
             templates_path
         } else {
-            target_checkout
+            target_checkout.clone()
         };
         Ok(RemoteCache {
             templates_dir,
+            checkout_dir: target_checkout,
             fetched_sha,
             lock: lock_guard,
         })
@@ -4354,7 +4359,7 @@ mod tests {
             .ensure_remote_repo(bare.path().to_str().unwrap(), "main", cache.path())
             .unwrap();
         let tmpl_dir = &cached.templates_dir;
-        let checkout = tmpl_dir.parent().unwrap();
+        let checkout = cached.checkout_dir.as_path();
         let remote_tree = || git.output(bare.path(), &["ls-tree", "-r", "--name-only", "main"]);
 
         let gitconfig = tmpl_dir.join("projects/generic/gitconfig.repo");
@@ -5972,7 +5977,7 @@ mod tests {
             )
             .unwrap();
         let tmpl_dir = &cached.templates_dir;
-        let remote_checkout = tmpl_dir.parent().unwrap();
+        let remote_checkout = cached.checkout_dir.as_path();
 
         // Step 2: Push changes in PR mode (open_pr: true)
         let managed_gitconfig = tmpl_dir.join("projects/generic/gitconfig.repo");
@@ -6006,7 +6011,7 @@ mod tests {
             )
             .unwrap();
         let tmpl_dir_2 = &cached_2.templates_dir;
-        let remote_checkout_2 = tmpl_dir_2.parent().unwrap();
+        let remote_checkout_2 = cached_2.checkout_dir.as_path();
         let managed_gitconfig_2 = tmpl_dir_2.join("projects/generic/gitconfig.repo");
         fs::write(
             &managed_gitconfig_2,
@@ -6067,6 +6072,56 @@ mod tests {
         bare
     }
 
+    /// `checkout_dir` is the cache checkout's git toplevel whether or not the remote
+    /// keeps its templates under `templates/`.
+    #[test]
+    fn test_remote_cache_checkout_dir_is_git_toplevel() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        for (template, templates_subdir) in [
+            ("templates/projects/generic/gitconfig.repo", true),
+            ("projects/generic/gitconfig.repo", false),
+        ] {
+            let bare = tempdir().unwrap();
+            git.run(bare.path(), &["init", "--bare", "-b", "main"]);
+            let seed = tempdir().unwrap();
+            git.run(seed.path(), &["init", "-b", "main"]);
+            let tmpl = seed.path().join(template);
+            fs::create_dir_all(tmpl.parent().unwrap()).unwrap();
+            fs::write(&tmpl, "[core]\n").unwrap();
+            git.run(seed.path(), &["add", "-A"]);
+            git.run(seed.path(), &["commit", "-m", "seed"]);
+            git.run(
+                seed.path(),
+                &["push", bare.path().to_str().unwrap(), "main"],
+            );
+
+            let cache = tempdir().unwrap();
+            let cached = engine
+                .ensure_remote_repo(bare.path().to_str().unwrap(), "main", cache.path())
+                .unwrap();
+            let toplevel = git.output(&cached.checkout_dir, &["rev-parse", "--show-toplevel"]);
+            assert_eq!(
+                fs::canonicalize(toplevel).unwrap(),
+                fs::canonicalize(&cached.checkout_dir).unwrap(),
+                "{template}: checkout_dir must be the git toplevel"
+            );
+            assert!(
+                cached
+                    .templates_dir
+                    .join("projects/generic/gitconfig.repo")
+                    .is_file()
+            );
+            // Negative control: `templates_dir` equals the checkout only without `templates/`.
+            assert_eq!(
+                cached.templates_dir != cached.checkout_dir,
+                templates_subdir,
+                "{template}: templates_dir {}",
+                cached.templates_dir.display()
+            );
+        }
+    }
+
     /// Writes an edit to the managed template of `cached` and pushes it directly,
     /// building on the head `cached` fetched.
     fn direct_push_edit(
@@ -6074,7 +6129,7 @@ mod tests {
         cached: &RemoteCache,
         content: &str,
     ) -> Result<String, PushRemoteError> {
-        let checkout = cached.templates_dir.parent().unwrap();
+        let checkout = cached.checkout_dir.as_path();
         let managed = cached.templates_dir.join("projects/generic/gitconfig.repo");
         fs::write(&managed, content).unwrap();
         engine.push_to_remote(checkout, "main", false, &[managed], &cached.fetched_sha)
@@ -6093,7 +6148,7 @@ mod tests {
             .ensure_remote_repo(bare_url, "main", cache.path())
             .unwrap();
         assert_eq!(cached.fetched_sha, remote_main());
-        let checkout = cached.templates_dir.parent().unwrap();
+        let checkout = cached.checkout_dir.as_path();
 
         // Another machine publishes after UDE fetched.
         let other = tempdir().unwrap();
@@ -6249,7 +6304,7 @@ mod tests {
         let cached = engine
             .ensure_remote_repo(bare_url, "main", cache.path())
             .unwrap();
-        let checkout = cached.templates_dir.parent().unwrap();
+        let checkout = cached.checkout_dir.as_path();
         // A stray local commit: the sync commit's parent is no longer the fetched head.
         git.run(checkout, &["commit", "--allow-empty", "-m", "stray"]);
         let stray = git.output(checkout, &["rev-parse", "HEAD"]);
@@ -6306,7 +6361,7 @@ mod tests {
         let cached = engine
             .ensure_remote_repo(bare.to_str().unwrap(), "main", cache.path())
             .expect("cache checkout of the bare remote");
-        let checkout = cached.templates_dir.parent().unwrap();
+        let checkout = cached.checkout_dir.as_path();
         let managed = cached.templates_dir.join("projects/generic/gitconfig.repo");
         fs::write(&managed, "[core]\n  autocrlf = false\n").unwrap();
         let start = std::time::Instant::now();
