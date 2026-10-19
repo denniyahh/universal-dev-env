@@ -310,10 +310,27 @@ pub enum PushPorcelain {
 }
 
 /// Classifies the stdout of `git push --porcelain` (lines `<flag>\t<from:to>\t<summary>`).
-// Not wired into push_direct yet (RED); the GREEN commit uses it and drops this allow.
-#[allow(dead_code)]
-pub fn classify_push_porcelain(_stdout: &str) -> PushPorcelain {
-    PushPorcelain::Other
+///
+/// Only the flag field and the summary prefix are read, never the parenthetical
+/// reason: a line flagged exactly `!` whose summary starts with `[rejected]` is
+/// [`PushPorcelain::RejectedNonFastForward`], any other `!` line is
+/// [`PushPorcelain::Other`], and no `!` line at all is [`PushPorcelain::Accepted`].
+pub fn classify_push_porcelain(stdout: &str) -> PushPorcelain {
+    let mut result = PushPorcelain::Accepted;
+    for line in stdout.lines() {
+        let mut fields = line.split('\t');
+        if fields.next() != Some("!") {
+            continue;
+        }
+        if fields
+            .nth(1)
+            .is_some_and(|summary| summary.starts_with("[rejected]"))
+        {
+            return PushPorcelain::RejectedNonFastForward;
+        }
+        result = PushPorcelain::Other;
+    }
+    result
 }
 
 /// Commit message of every sync commit in the remote cache checkout.
@@ -1662,12 +1679,7 @@ impl SyncEngine {
         if !push_out.status.success() {
             // Porcelain stdout starts with a `To <url>` line; it is never printed.
             let stdout = String::from_utf8_lossy(&push_out.stdout);
-            let rejected = stdout.lines().any(|line| {
-                let mut fields = line.split('\t');
-                fields.next() == Some("!")
-                    && fields.nth(1).is_some_and(|s| s.starts_with("[rejected]"))
-            });
-            if rejected {
+            if classify_push_porcelain(&stdout) == PushPorcelain::RejectedNonFastForward {
                 self.rollback_commit(remote_checkout);
                 return Err(PushRemoteError::UpstreamMoved {
                     branch: branch.to_string(),
