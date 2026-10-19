@@ -226,3 +226,8 @@ None.
 ---
 *Phase: 01-sync-engine-state-hermeticity*
 *Completed: 2026-10-19*
+
+## Self-Check: PASSED
+
+- Files: src/cli/mod.rs, src/main.rs, src/sync/mod.rs, tests/e2e_lifecycle.rs, 01-10-SUMMARY.md: all FOUND
+- Commits: 4ada381, 40edc7f, ded813d, 98cab7a, acef827, 61cab31: all FOUND as ancestors of HEAD (control: a nonexistent sha reports MISSING); `check evaluation-scope --plan 01-10 --commits-only` resolved the plan's commits on this branch
