@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 01
 current_phase_name: Sync Engine & State Hermeticity
 status: executing
-stopped_at: Completed 01-08-PLAN.md
-last_updated: "2026-10-19T11:27:24.571Z"
+stopped_at: Completed 01-09-PLAN.md
+last_updated: "2026-10-19T11:44:39.282Z"
 last_activity: 2026-10-18
 last_activity_desc: Phase 01 execution started
-state_head: ce335dc0792e388a727614e2d457b7b3e3d46643
+state_head: 4dc2c6762c9eaa14abe42871c53f734fd7cdd619
 progress:
   total_phases: 4
   completed_phases: 0
   total_plans: 11
-  completed_plans: 8
+  completed_plans: 9
   percent: 0
 ---
 
@@ -28,7 +28,7 @@ See: `.planning/PROJECT.md` (updated 2026-10-12)
 ## Current Position
 
 Phase: 01 (Sync Engine & State Hermeticity) — EXECUTING
-Plan: 9 of 11
+Plan: 10 of 11
 Status: Ready to execute
 Last activity: 2026-10-18 — Phase 01 execution started
 
@@ -66,6 +66,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 01 P06 | 15min | 3 tasks | 2 files |
 | Phase 01 P07 | 16min | 3 tasks | 4 files |
 | Phase 01 P08 | 9min | 2 tasks | 4 files |
+| Phase 01 P09 | 11min | 3 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -93,6 +94,8 @@ Recent decisions affecting current work:
 - [Phase 01]: 01-07: push deletes LocalDeleted upstream templates (BoundaryBlocked for local-only paths); both publication gates use --name-status --no-renames, fail closed on unparseable lines and scan every non-D blob
 - [Phase 01]: 01-08: merge_texts uses diffy =0.5.2 (Diff3, Git incomplete hunks); adjacent-line edits conflict (D-02); similar removed
 - [Phase 01]: 01-08: render_conflict_sidecar is pure: header (file, resolve command, legend, absent/binary notes in LOCAL, ANCESTOR, UPSTREAM order) then diff3 body, explicit block for deletions or clean-merging text, comment-only body if any side is binary
+- [Phase 01]: 01-09: pull writes <file>.conflict sidecars in the same staged transaction as clean files (mode = local mode & 0o666) and records ProjectState.conflicts (upstream fingerprint + LF content, None when upstream deleted); PullResult::ConflictBlocked is gone and pull exits 1 when any conflict is reported
+- [Phase 01]: 01-09: an open conflict record reports ConflictPending until local and upstream fingerprints are equal or both absent; pull then clears the record and sidecar and, when both are present, records upstream as the ancestor (rows 13-16); re-pulls regenerate the sidecar and overwrite detected_at
 
 ### Pending Todos
 
@@ -113,6 +116,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-19T11:27:24.516Z
-Stopped at: Completed 01-08-PLAN.md
+Last session: 2026-10-19T11:44:39.214Z
+Stopped at: Completed 01-09-PLAN.md
 Resume file: None

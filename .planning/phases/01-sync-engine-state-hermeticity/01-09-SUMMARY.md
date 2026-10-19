@@ -260,3 +260,8 @@ None.
 ---
 *Phase: 01-sync-engine-state-hermeticity*
 *Completed: 2026-10-19*
+
+## Self-Check: PASSED
+
+- Files: src/sync/state.rs, src/sync/mod.rs, src/main.rs, templates/projects/generic/gitignore.repo, tests/e2e_lifecycle.rs, 01-09-SUMMARY.md: all FOUND
+- Commits: 51ec4cb, 6baca06, bc84da2, a95eef4, 9ecfa53, d82893b, 4dc2c67: all FOUND as ancestors of HEAD; `check evaluation-scope --plan 01-09 --commits-only` resolved them on this branch
