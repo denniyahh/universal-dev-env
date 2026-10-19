@@ -252,6 +252,11 @@ impl ProjectState {
         );
     }
 
+    /// The tombstone of `rel_path`, if the path was deleted while tracked.
+    pub fn tombstone(&self, rel_path: &Path) -> Option<&Tombstone> {
+        self.tombstones.get(&state_key(rel_path))
+    }
+
     /// Removes the tombstone of `rel_path`, if any.
     pub fn clear_tombstone(&mut self, rel_path: &Path) {
         self.tombstones.remove(&state_key(rel_path));
