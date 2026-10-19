@@ -296,6 +296,26 @@ pub enum PushRemoteError {
     Failed(String),
 }
 
+/// What `git push --porcelain` reported for the pushed ref.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PushPorcelain {
+    /// No ref was flagged `!`.
+    Accepted,
+    /// A ref was flagged `!` with a `[rejected]` summary: the remote's fast-forward
+    /// check refused it because the branch moved (`fetch first` / `non-fast-forward`).
+    RejectedNonFastForward,
+    /// A ref was flagged `!` for another reason, for example `[remote rejected]` from a
+    /// remote hook.
+    Other,
+}
+
+/// Classifies the stdout of `git push --porcelain` (lines `<flag>\t<from:to>\t<summary>`).
+// Not wired into push_direct yet (RED); the GREEN commit uses it and drops this allow.
+#[allow(dead_code)]
+pub fn classify_push_porcelain(_stdout: &str) -> PushPorcelain {
+    PushPorcelain::Other
+}
+
 /// Commit message of every sync commit in the remote cache checkout.
 const SYNC_COMMIT_MESSAGE: &str =
     "chore(sync): synchronize environment refinements from local workstation";
@@ -6106,6 +6126,137 @@ mod tests {
             git.output(bare.path(), &["rev-parse", "refs/heads/main~1"]),
             cached.fetched_sha,
             "the published commit must build on the fetched head"
+        );
+    }
+
+    #[test]
+    fn test_classify_push_porcelain() {
+        let fetch_first = "To /x\n!\tHEAD:refs/heads/main\t[rejected] (fetch first)\nDone\n";
+        let non_ff = "To /x\n!\tHEAD:refs/heads/main\t[rejected] (non-fast-forward)\nDone\n";
+        let hook =
+            "To /x\n!\tHEAD:refs/heads/main\t[remote rejected] (pre-receive hook declined)\nDone\n";
+        let accepted = "To /x\n \tHEAD:refs/heads/main\t5891ce6..6b9fbf5\nDone\n";
+        assert_eq!(
+            classify_push_porcelain(fetch_first),
+            PushPorcelain::RejectedNonFastForward
+        );
+        assert_eq!(
+            classify_push_porcelain(non_ff),
+            PushPorcelain::RejectedNonFastForward
+        );
+        assert_eq!(classify_push_porcelain(hook), PushPorcelain::Other);
+        assert_eq!(classify_push_porcelain(accepted), PushPorcelain::Accepted);
+        assert_eq!(classify_push_porcelain(""), PushPorcelain::Accepted);
+        // Negative controls: `[rejected]` outside a `!`-flagged line is not a rejection.
+        for not_flagged in [
+            "To /x [rejected]\nDone\n",
+            " \tHEAD:refs/heads/main\t[rejected] (fetch first)\n",
+            "=\tHEAD:refs/heads/main\t[rejected] (fetch first)\n",
+            "!!\tHEAD:refs/heads/main\t[rejected] (fetch first)\n",
+            "x!\tHEAD:refs/heads/main\t[rejected] (fetch first)\n",
+        ] {
+            assert_ne!(
+                classify_push_porcelain(not_flagged),
+                PushPorcelain::RejectedNonFastForward,
+                "{not_flagged:?}"
+            );
+        }
+        // `[rejected]` must be the summary (third field), as a prefix.
+        assert_eq!(
+            classify_push_porcelain("!\t[rejected]\tother summary\n"),
+            PushPorcelain::Other
+        );
+        assert_eq!(
+            classify_push_porcelain("!\tHEAD:refs/heads/main\tnot [rejected]\n"),
+            PushPorcelain::Other
+        );
+        assert_eq!(classify_push_porcelain("!\n"), PushPorcelain::Other);
+    }
+
+    /// One porcelain "noise" line: never `!`-flagged (empty, or a first character that
+    /// is neither `!` nor a tab).
+    fn porcelain_noise() -> impl proptest::strategy::Strategy<Value = String> {
+        proptest::prop_oneof![
+            proptest::strategy::Just(String::new()),
+            "[^!\t\n][^\n]{0,30}",
+        ]
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn test_classify_push_porcelain_prop(
+            noise in proptest::collection::vec(porcelain_noise(), 0..=6),
+            at in 0usize..=6,
+            refname in "[A-Za-z0-9:/_.-]{1,30}",
+            text in "[^\n]{0,20}",
+        ) {
+            // Property 1: noise alone is never a rejection.
+            proptest::prop_assert_eq!(
+                classify_push_porcelain(&noise.join("\n")),
+                PushPorcelain::Accepted
+            );
+            let with_line = |summary: &str| {
+                let mut lines = noise.clone();
+                lines.insert(at % (noise.len() + 1), format!("!\t{refname}\t{summary} {text}"));
+                lines.join("\n")
+            };
+            // Properties 2 and 3: same shape, only the summary prefix differs, so each is
+            // the other's negative control.
+            proptest::prop_assert_eq!(
+                classify_push_porcelain(&with_line("[remote rejected]")),
+                PushPorcelain::Other
+            );
+            proptest::prop_assert_eq!(
+                classify_push_porcelain(&with_line("[rejected]")),
+                PushPorcelain::RejectedNonFastForward
+            );
+        }
+    }
+
+    #[test]
+    fn test_push_continuity_violation_is_hard_failure() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let bare = seeded_bare_remote(&git);
+        let bare_url = bare.path().to_str().unwrap();
+        let remote_main = || git.output(bare.path(), &["rev-parse", "refs/heads/main"]);
+        let main_before = remote_main();
+
+        let cache = tempdir().unwrap();
+        let cached = engine
+            .ensure_remote_repo(bare_url, "main", cache.path())
+            .unwrap();
+        let checkout = cached.templates_dir.parent().unwrap();
+        // A stray local commit: the sync commit's parent is no longer the fetched head.
+        git.run(checkout, &["commit", "--allow-empty", "-m", "stray"]);
+        let stray = git.output(checkout, &["rev-parse", "HEAD"]);
+        assert_ne!(stray, cached.fetched_sha);
+
+        let err = push_failure(direct_push_edit(
+            &engine,
+            &cached,
+            "[core]\n  autocrlf = false\n",
+        ));
+        assert!(err.contains("Branch continuity check failed"), "{err}");
+        assert_eq!(remote_main(), main_before, "nothing may be published");
+        assert_eq!(
+            git.output(checkout, &["rev-parse", "HEAD"]),
+            stray,
+            "the sync commit was not rolled back"
+        );
+        drop(cached);
+
+        // Negative control: without the stray commit the same push succeeds.
+        let cache = tempdir().unwrap();
+        let cached = engine
+            .ensure_remote_repo(bare_url, "main", cache.path())
+            .unwrap();
+        let res = direct_push_edit(&engine, &cached, "[core]\n  autocrlf = false\n");
+        assert!(res.is_ok(), "push without a stray commit: {res:?}");
+        assert_ne!(
+            remote_main(),
+            main_before,
+            "the remote branch did not advance"
         );
     }
 
