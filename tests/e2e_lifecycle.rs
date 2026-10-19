@@ -1598,3 +1598,96 @@ fn test_sync_push_root_layout_remote_publishes_and_pull_keeps_edit() {
         "projects/agents/mise.toml.jinja",
     );
 }
+
+/// A bare remote at `<root>/<name>.git` whose main holds a copy of this repository's
+/// `templates/` tree, so a fresh `ude init` project starts in sync with it.
+fn seed_full_template_remote(git: &GitFixture, root: &Path, name: &str) -> PathBuf {
+    let bare = root.join(format!("{name}.git"));
+    let bare_url = bare.to_string_lossy().to_string();
+    git.run(root, &["init", "--bare", "-q", "-b", "main", &bare_url]);
+    let seed = root.join(format!("{name}-seed"));
+    git.run(root, &["init", "-q", "-b", "main", &seed.to_string_lossy()]);
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("templates");
+    for entry in walkdir::WalkDir::new(&source) {
+        let entry = entry.expect("walk templates");
+        let rel = entry.path().strip_prefix(&source).unwrap();
+        let target = seed.join("templates").join(rel);
+        if entry.file_type().is_dir() {
+            fs::create_dir_all(&target).unwrap();
+        } else {
+            fs::copy(entry.path(), &target).unwrap();
+        }
+    }
+    git.run(&seed, &["add", "-A"]);
+    git.run(&seed, &["commit", "-q", "-m", "seed"]);
+    git.run(&seed, &["push", "-q", &bare_url, "main"]);
+    bare
+}
+
+const GITCONFIG_TEMPLATE: &str = "templates/projects/generic/gitconfig.repo";
+const NEW_WORKTREE_TEMPLATE: &str = "templates/projects/agents/scratch/new-worktree.sh";
+
+#[test]
+fn test_sync_push_skips_boundary_deletion_and_publishes_rest() {
+    let bin = env!("CARGO_BIN_EXE_ude");
+    let temp = tempdir().unwrap();
+    let git = GitFixture::new();
+    let ude = sync_cli(temp.path());
+
+    let project = temp.path().join("project");
+    init_rust_project(bin, &project);
+    let bare = seed_full_template_remote(&git, temp.path(), "remote");
+    let bare_url = bare.to_string_lossy().to_string();
+    let scratch_template = remote_file(&git, &bare, NEW_WORKTREE_TEMPLATE);
+
+    // A scratch script (publish boundary) deleted locally, plus an eligible edit.
+    let scratch = project.join("scratch/new-worktree.sh");
+    let scratch_bytes = fs::read(&scratch).unwrap();
+    fs::remove_file(&scratch).unwrap();
+    let local_gitconfig = format!(
+        "{}# local edit\n",
+        fs::read_to_string(project.join(".gitconfig")).unwrap()
+    );
+    fs::write(project.join(".gitconfig"), &local_gitconfig).unwrap();
+
+    let push = ude(&project, &["sync", "push", "--remote", &bare_url]);
+    let push_text = outputs(&push);
+    assert_eq!(
+        push.status.code(),
+        Some(1),
+        "a push that skipped a boundary path must exit 1. {push_text}"
+    );
+    assert!(
+        push_text.contains(
+            "scratch/new-worktree.sh: deleted locally, but it is a local-only path that push never publishes; skipped"
+        ),
+        "{push_text}"
+    );
+    assert_eq!(
+        format!("{}\n", remote_file(&git, &bare, GITCONFIG_TEMPLATE)),
+        local_gitconfig,
+        "the eligible .gitconfig edit is published. {push_text}"
+    );
+    assert_eq!(
+        remote_file(&git, &bare, NEW_WORKTREE_TEMPLATE),
+        scratch_template,
+        "the scratch template must be untouched. {push_text}"
+    );
+
+    // Pull keeps the deletion but must not advise a push that would refuse it.
+    let pull = ude(&project, &["sync", "pull", "--remote", &bare_url]);
+    let pull_text = outputs(&pull);
+    assert_eq!(pull.status.code(), Some(0), "{pull_text}");
+    assert!(!scratch.exists(), "pull keeps the local deletion (D-15)");
+    assert!(
+        pull_text.contains("scratch/new-worktree.sh: deleted locally")
+            && !pull_text.contains("scratch/new-worktree.sh: deleted locally — push to propagate"),
+        "{pull_text}"
+    );
+    assert!(pull_text.contains("local-only path"), "{pull_text}");
+
+    // Negative control: restoring the script clears the skip and the push exits 0.
+    fs::write(&scratch, &scratch_bytes).unwrap();
+    let restored = ude(&project, &["sync", "push", "--remote", &bare_url]);
+    assert_eq!(restored.status.code(), Some(0), "{}", outputs(&restored));
+}

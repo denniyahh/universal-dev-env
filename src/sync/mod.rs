@@ -4445,30 +4445,44 @@ mod tests {
         let upstream = tempdir().unwrap();
         let rel = "scratch/sync-personal-env.sh";
         let text = "#!/bin/sh\n";
+        let gitconfig = "[core]\n\tautocrlf = input\n";
         let mut state = ProjectState::default();
-        state.record_file(
-            Path::new(rel),
-            SyncEngine::fingerprint(text.as_bytes()),
-            Some(text.into()),
-        );
+        for (path, content) in [(rel, text), (".gitconfig", gitconfig)] {
+            state.record_file(
+                Path::new(path),
+                SyncEngine::fingerprint(content.as_bytes()),
+                Some(content.into()),
+            );
+        }
         state.save_to_dir(local.path()).unwrap();
         let template = upstream
             .path()
             .join("projects/agents/scratch/sync-personal-env.sh");
         fs::create_dir_all(template.parent().unwrap()).unwrap();
         fs::write(&template, text).unwrap();
+        write_upstream_gitconfig(upstream.path(), gitconfig.as_bytes());
+        let edited = format!("{gitconfig}\tfsmonitor = false\n");
+        fs::write(local.path().join(".gitconfig"), &edited).unwrap();
         assert_eq!(
             scan_status(&engine, local.path(), upstream.path(), rel),
             SyncStatus::LocalDeleted
         );
 
-        assert_eq!(
-            push_dirs(&engine, local.path(), upstream.path()),
-            PushResult::BoundaryBlocked {
-                path: PathBuf::from(rel)
-            }
+        // The boundary path is skipped, not published; the rest of the push goes ahead.
+        let result = push_dirs(&engine, local.path(), upstream.path());
+        assert!(
+            matches!(result, PushResult::Success { .. }),
+            "a boundary path must not abort the push: {result:?}"
         );
         assert_eq!(fs::read_to_string(&template).unwrap(), text);
+        assert_eq!(
+            fs::read_to_string(upstream.path().join("projects/generic/gitconfig.repo")).unwrap(),
+            edited,
+            "the eligible .gitconfig edit is published"
+        );
+        // The skipped deletion stays pending: its ancestor is kept, not dropped.
+        let state = ProjectState::load_from_dir(local.path()).unwrap();
+        assert!(state.get_ancestor_hash(Path::new(rel)).is_some());
     }
 
     #[test]
@@ -5247,7 +5261,7 @@ mod tests {
     }
 
     #[test]
-    fn test_push_updates_blocked_on_publish_boundary() {
+    fn test_push_updates_skips_publish_boundary_edit() {
         let engine = SyncEngine::new();
         let local_dir = tempdir().unwrap();
         let upstream_dir = tempdir().unwrap();
@@ -5265,12 +5279,17 @@ mod tests {
             true,
         );
 
-        match res {
-            PushResult::BoundaryBlocked { path } => {
-                assert_eq!(path, PathBuf::from("scratch/sync-personal-env.sh"));
-            }
-            _ => panic!("Expected BoundaryBlocked, got {:?}", res),
-        }
+        assert!(
+            matches!(res, PushResult::Success { .. }),
+            "a boundary edit must be skipped, not abort the push: {res:?}"
+        );
+        assert!(
+            !upstream_dir
+                .path()
+                .join("projects/agents/scratch/sync-personal-env.sh")
+                .exists(),
+            "a boundary path must never be published"
+        );
     }
 
     #[test]
