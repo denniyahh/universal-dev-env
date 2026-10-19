@@ -5,19 +5,19 @@ titles: json
 findings:
   - id: CR-01
     severity: critical
-    disposition: open
+    disposition: fixed
     title: "A locally deleted boundary file blocks every push and the tool offers no way out (phase-introduced)"
   - id: CR-02
     severity: critical
-    disposition: open
+    disposition: fixed
     title: "Push replaces `.jinja` templates with rendered output, erasing template logic for every consumer (pre-existing)"
   - id: CR-03
     severity: critical
-    disposition: open
+    disposition: fixed
     title: "`ude init` keeps a custom `.gitignore` but records it as the ancestor, so the first pull silently overwrites it (pre-existing)"
   - id: WR-01
     severity: warning
-    disposition: open
+    disposition: fixed
     title: "`test_remote_lock_not_inherited_by_children` is flaky (it races the child's exec and loader)"
   - id: IN-01
     severity: info
@@ -47,7 +47,7 @@ findings:
     severity: info
     disposition: open
     title: "Test hermeticity gaps (pre-existing pattern, now on new tests)"
-open: 11
+open: 7
 total: 11
 recorded: 2026-10-19T17:53:06.283Z
 ---
@@ -56,10 +56,10 @@ recorded: 2026-10-19T17:53:06.283Z
 
 | Finding | Severity | Disposition | Source |
 |---------|----------|-------------|--------|
-| CR-01 | critical | open | - |
-| CR-02 | critical | open | - |
-| CR-03 | critical | open | - |
-| WR-01 | warning | open | - |
+| CR-01 | critical | fixed | operator-approved fix, 98261e6, 9da142c |
+| CR-02 | critical | fixed | operator-approved fix, 67b1c45, 3c9e79a |
+| CR-03 | critical | fixed | operator-approved fix, 52bc341, 984f0c7 |
+| WR-01 | warning | fixed | operator-approved fix, ee296c4 |
 | IN-01 | info | open | - |
 | IN-02 | info | open | - |
 | IN-03 | info | open | - |
