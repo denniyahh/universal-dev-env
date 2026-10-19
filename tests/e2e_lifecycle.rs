@@ -1927,3 +1927,71 @@ fn test_init_refuses_corrupt_prior_state() {
     fs::remove_file(&state).unwrap();
     reinit_rust(&ude, &project);
 }
+
+/// The line of `text` that mentions `needle`, or "" when none does.
+fn line_with<'a>(text: &'a str, needle: &str) -> &'a str {
+    text.lines()
+        .find(|line| line.contains(needle))
+        .unwrap_or("")
+}
+
+#[test]
+fn test_status_and_push_agree_on_edit_under_template_logic() {
+    let bin = env!("CARGO_BIN_EXE_ude");
+    let temp = tempdir().unwrap();
+    let git = GitFixture::new();
+    let ude = sync_cli(temp.path());
+
+    let project = temp.path().join("project");
+    let init_mise = init_rust_project(bin, &project);
+    let bare = seed_full_template_remote(&git, temp.path(), "remote");
+    let bare_url = bare.to_string_lossy().to_string();
+    let env_block = "[env]\nFOO = \"1\"\n";
+    fs::write(project.join("mise.toml"), format!("{init_mise}{env_block}")).unwrap();
+    let local_gitconfig = format!(
+        "{}# local edit\n",
+        fs::read_to_string(project.join(".gitconfig")).unwrap()
+    );
+    fs::write(project.join(".gitconfig"), &local_gitconfig).unwrap();
+
+    let status = outputs(&ude(&project, &["sync", "status", "--remote", &bare_url]));
+    let mise_line = line_with(&status, "mise.toml: Locally Modified");
+    assert!(
+        !mise_line.is_empty()
+            && !mise_line.contains("ready to push")
+            && mise_line.contains("template has logic")
+            && mise_line.contains("move the change into mise.local.toml"),
+        "{status}"
+    );
+    // Negative control: an edit under a template without logic is still pushable.
+    assert!(
+        status.contains(".gitconfig: Locally Modified (ready to push)"),
+        "{status}"
+    );
+
+    let push = ude(&project, &["sync", "push", "--remote", &bare_url]);
+    let push_text = outputs(&push);
+    assert_eq!(push.status.code(), Some(1), "{push_text}");
+    let skip_line = line_with(&push_text, "mise.toml: upstream template");
+    assert!(
+        skip_line.contains("for this project only, move the change into mise.local.toml")
+            && skip_line.contains("for every project, edit"),
+        "{push_text}"
+    );
+    assert_eq!(
+        format!("{}\n", remote_file(&git, &bare, GITCONFIG_TEMPLATE)),
+        local_gitconfig,
+        "the .gitconfig edit is published. {push_text}"
+    );
+
+    // Following the hint clears the skip.
+    fs::write(project.join("mise.local.toml"), env_block).unwrap();
+    fs::write(project.join("mise.toml"), &init_mise).unwrap();
+    let status = outputs(&ude(&project, &["sync", "status", "--remote", &bare_url]));
+    assert!(
+        status.contains("mise.toml: Layered Override Active"),
+        "{status}"
+    );
+    let push = ude(&project, &["sync", "push", "--remote", &bare_url]);
+    assert_eq!(push.status.code(), Some(0), "{}", outputs(&push));
+}
