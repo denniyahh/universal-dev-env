@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 01
 current_phase_name: Sync Engine & State Hermeticity
 status: executing
-stopped_at: Completed 01-06-PLAN.md
-last_updated: "2026-10-18T20:03:38.953Z"
+stopped_at: Completed 01-07-PLAN.md
+last_updated: "2026-10-19T11:14:57.941Z"
 last_activity: 2026-10-18
 last_activity_desc: Phase 01 execution started
-state_head: 1246ba530104abbf4cae52d45e9154f59dc4fb70
+state_head: 095e42717589b195f3c26ae51df99c2471097c26
 progress:
   total_phases: 4
   completed_phases: 0
   total_plans: 11
-  completed_plans: 6
+  completed_plans: 7
   percent: 0
 ---
 
@@ -28,7 +28,7 @@ See: `.planning/PROJECT.md` (updated 2026-10-12)
 ## Current Position
 
 Phase: 01 (Sync Engine & State Hermeticity) — EXECUTING
-Plan: 7 of 11
+Plan: 8 of 11
 Status: Ready to execute
 Last activity: 2026-10-18 — Phase 01 execution started
 
@@ -64,6 +64,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 01 P04 | 8min | 2 tasks | 4 files |
 | Phase 01 P05 | 15min | 3 tasks | 4 files |
 | Phase 01 P06 | 15min | 3 tasks | 2 files |
+| Phase 01 P07 | 16min | 3 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -86,6 +87,9 @@ Recent decisions affecting current work:
 - [Phase 01]: 01-05: pull and push write text in the destination's dominant line-ending style (ties LF); absent or binary destinations get the source bytes as is
 - [Phase 01]: 01-06: every pull/push workspace or template write goes through sync::staging::StagedTransaction (stage + validate all, then rename); state.json is staged before and committed after the files; a rename-phase failure is reported on the transaction root with the file named and the replaced count
 - [Phase 01]: 01-06: staged modes come from staging::file_mode_for: existing files keep their mode (0o7777), existing hooks/scripts gain execute for each class that can read plus owner, new files 0o755 (hook/script) or 0o644
+- [Phase 01]: 01-07: scan_project treats only NotFound/NotADirectory reads as absent; any other read error fails the scan, so an unreadable file is never classified as deleted
+- [Phase 01]: 01-07: deletions follow the state table rows 1-11; pull deletes UpstreamDeleted copies via StagedTransaction::stage_delete (after writes, state.json last) and tombstones UpstreamDeleted/BothDeleted; LocalDeleted stays pending; record_file clears tombstones (I1)
+- [Phase 01]: 01-07: push deletes LocalDeleted upstream templates (BoundaryBlocked for local-only paths); both publication gates use --name-status --no-renames, fail closed on unparseable lines and scan every non-D blob
 
 ### Pending Todos
 
@@ -106,6 +110,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-18T20:03:31.704Z
-Stopped at: Completed 01-06-PLAN.md
+Last session: 2026-10-19T11:14:57.864Z
+Stopped at: Completed 01-07-PLAN.md
 Resume file: None
