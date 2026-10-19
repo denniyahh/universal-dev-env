@@ -104,6 +104,8 @@ pub enum PushResult {
         synced_files: usize,
         staged_files: Vec<PathBuf>,
         updated_records: Vec<(PathBuf, String, Option<String>)>,
+        /// Local paths whose upstream template was deleted (D-14).
+        deleted: Vec<PathBuf>,
     },
     SecretBlocked {
         path: PathBuf,
@@ -1045,6 +1047,7 @@ impl SyncEngine {
             synced_files: staged_files.len(),
             staged_files,
             updated_records,
+            deleted: Vec::new(), // RED scaffold: the GREEN commit reports deletions
         }
     }
 
@@ -3078,6 +3081,158 @@ mod tests {
             }
         }
         assert_eq!(visited, 256);
+    }
+
+    fn push_dirs(engine: &SyncEngine, local: &Path, upstream: &Path) -> PushResult {
+        engine.push_updates(
+            local,
+            upstream,
+            "/home/alice",
+            "/home/alice/.config",
+            false,
+            true,
+        )
+    }
+
+    #[test]
+    fn test_push_local_deletion() {
+        let engine = SyncEngine::new();
+        let local = tempdir().unwrap();
+        let upstream = tempdir().unwrap();
+        let gitconfig = "[core]\n\tautocrlf = input\n";
+        let gitignore = "target/\n";
+        let mut state = ProjectState::default();
+        for (rel, text) in [(".gitconfig", gitconfig), (".gitignore", gitignore)] {
+            state.record_file(
+                Path::new(rel),
+                SyncEngine::fingerprint(text.as_bytes()),
+                Some(text.to_string()),
+            );
+        }
+        state.save_to_dir(local.path()).unwrap();
+        fs::write(local.path().join(".gitignore"), gitignore).unwrap();
+        write_upstream_gitconfig(upstream.path(), gitconfig.as_bytes());
+        let template = upstream.path().join("projects/generic/gitconfig.repo");
+        let other = upstream.path().join("projects/generic/gitignore.repo");
+        fs::write(&other, gitignore).unwrap();
+
+        let result = push_dirs(&engine, local.path(), upstream.path());
+
+        let PushResult::Success {
+            staged_files,
+            deleted,
+            ..
+        } = &result
+        else {
+            panic!("push: {result:?}");
+        };
+        assert_eq!(deleted, &vec![PathBuf::from(".gitconfig")]);
+        assert_eq!(staged_files, &vec![template.clone()]);
+        assert!(!template.exists(), "the upstream template must be deleted");
+        let state = ProjectState::load_from_dir(local.path()).unwrap();
+        assert_eq!(state.get_ancestor_hash(Path::new(".gitconfig")), None);
+        assert_eq!(state.tombstone(Path::new(".gitconfig")), None);
+        // Negative control: the untouched template stays byte-identical and tracked.
+        assert_eq!(fs::read_to_string(&other).unwrap(), gitignore);
+        assert!(state.get_ancestor_hash(Path::new(".gitignore")).is_some());
+    }
+
+    #[test]
+    fn test_push_to_remote_deletion() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let bare = tempdir().unwrap();
+        let cache = tempdir().unwrap();
+        git.run(bare.path(), &["init", "--bare", "-b", "main"]);
+        let seed = tempdir().unwrap();
+        git.run(seed.path(), &["init", "-b", "main"]);
+        let generic = seed.path().join("templates/projects/generic");
+        fs::create_dir_all(generic.join("hooks")).unwrap();
+        fs::write(generic.join("gitconfig.repo"), "[core]\n").unwrap();
+        fs::write(generic.join("gitignore.repo"), "target/\n").unwrap();
+        fs::write(generic.join("hooks/pre-commit"), "#!/bin/sh\n").unwrap();
+        git.run(seed.path(), &["add", "-A"]);
+        git.run(seed.path(), &["commit", "-m", "seed"]);
+        git.run(
+            seed.path(),
+            &["remote", "add", "origin", bare.path().to_str().unwrap()],
+        );
+        git.run(seed.path(), &["push", "-u", "origin", "main"]);
+
+        let (tmpl_dir, _lock) = engine
+            .ensure_remote_repo(bare.path().to_str().unwrap(), "main", cache.path())
+            .unwrap();
+        let checkout = tmpl_dir.parent().unwrap();
+        let remote_tree = || git.output(bare.path(), &["ls-tree", "-r", "--name-only", "main"]);
+
+        let gitconfig = tmpl_dir.join("projects/generic/gitconfig.repo");
+        fs::remove_file(&gitconfig).unwrap();
+        let pushed = engine.push_to_remote(checkout, "main", false, &[gitconfig]);
+        assert!(pushed.is_ok(), "deletion push: {pushed:?}");
+        let tree = remote_tree();
+        assert!(!tree.contains("gitconfig.repo"), "{tree}");
+        assert!(
+            tree.contains("templates/projects/generic/gitignore.repo"),
+            "{tree}"
+        );
+
+        // Negative control: a deletion does not exempt the other staged blobs from the
+        // secret scan, and nothing is published.
+        let gitignore = tmpl_dir.join("projects/generic/gitignore.repo");
+        let hook = tmpl_dir.join("projects/generic/hooks/pre-commit");
+        fs::remove_file(&gitignore).unwrap();
+        let prefix = "ghp_";
+        let body = "111122223333444455556666777788889999";
+        fs::write(&hook, format!("#!/bin/sh\n# {prefix}{body}\n")).unwrap();
+        let err = engine
+            .push_to_remote(checkout, "main", false, &[gitignore, hook])
+            .unwrap_err();
+        assert!(
+            err.starts_with("Publication gate violation: secret detected"),
+            "{err}"
+        );
+        assert_eq!(remote_tree(), tree);
+    }
+
+    #[test]
+    fn test_tombstone_prevents_republish() {
+        let engine = SyncEngine::new();
+        let base = "[core]\n";
+        let (local, upstream) = upstream_deletion_fixture(base, base);
+        let pulled = pull_dirs(&engine, local.path(), upstream.path());
+        assert!(
+            matches!(&pulled, PullResult::Success(report) if report.deleted.len() == 1),
+            "{pulled:?}"
+        );
+        fs::write(
+            local.path().join(".gitconfig"),
+            "[core]\n\trecreated = true\n",
+        )
+        .unwrap();
+        let template = upstream.path().join("projects/generic/gitconfig.repo");
+
+        let result = push_dirs(&engine, local.path(), upstream.path());
+        let PushResult::Success { staged_files, .. } = &result else {
+            panic!("push: {result:?}");
+        };
+        assert!(!staged_files.contains(&template), "{staged_files:?}");
+        assert!(
+            !template.exists(),
+            "a tombstoned path must not be republished"
+        );
+
+        // Negative control: without the tombstone the same file is a new local file.
+        fs::remove_file(local.path().join(STATE_FILE_REL)).unwrap();
+        assert_eq!(
+            scan_status(&engine, local.path(), upstream.path(), ".gitconfig"),
+            SyncStatus::LocallyModified
+        );
+        let result = push_dirs(&engine, local.path(), upstream.path());
+        let PushResult::Success { staged_files, .. } = &result else {
+            panic!("push: {result:?}");
+        };
+        assert_eq!(staged_files, &vec![template.clone()]);
+        assert!(template.exists());
     }
 
     #[test]
