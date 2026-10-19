@@ -36,7 +36,9 @@
   through `sync_cli`). 01-10 fixed only its own helper (scope boundary).
 
 - Remote cache checkout is derived as `templates_dir.parent()`
-  status: open
+  status: resolved (2026-10-19 — reproduced as push data loss by the security
+  audit; operator chose fix-before-verification; 40c9c90..c737383: checkout root
+  carried on RemoteCache, failed git status / diff --cached now a hard error)
   **Found during:** 01-11 Task 1 (reading `open_sync_templates` in src/main.rs)
   **What:** `ensure_remote_repo` returns the checkout root itself as
   `templates_dir` when the remote has no `templates/` directory, and
