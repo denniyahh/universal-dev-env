@@ -2030,6 +2030,63 @@ mod tests {
         );
     }
 
+    /// Records `ancestor` for `.gitconfig`, writes `local` and the upstream template.
+    fn gitconfig_three_way(local_dir: &Path, upstream_dir: &Path, versions: [&str; 3]) {
+        let [ancestor, local, upstream] = versions;
+        let mut state = ProjectState::default();
+        state.record_file(
+            Path::new(".gitconfig"),
+            SyncEngine::fingerprint(ancestor.as_bytes()),
+            Some(ancestor.to_string()),
+        );
+        state.save_to_dir(local_dir).unwrap();
+        fs::write(local_dir.join(".gitconfig"), local).unwrap();
+        write_upstream_gitconfig(upstream_dir, upstream.as_bytes());
+    }
+
+    #[test]
+    fn test_pull_adjacent_edits_conflict() {
+        let engine = SyncEngine::new();
+        let local_dir = tempdir().unwrap();
+        let upstream_dir = tempdir().unwrap();
+
+        // D-02: edits on adjacent lines are a conflict, as in git.
+        gitconfig_three_way(
+            local_dir.path(),
+            upstream_dir.path(),
+            ["a=1\nb=1\n", "a=2\nb=1\n", "a=1\nb=2\n"],
+        );
+        assert_eq!(
+            scan_status(&engine, local_dir.path(), upstream_dir.path(), ".gitconfig"),
+            SyncStatus::Conflicted,
+            "adjacent-line edits must not auto-merge"
+        );
+
+        // Negative control: one unchanged line between the edits merges cleanly.
+        let local_dir = tempdir().unwrap();
+        let upstream_dir = tempdir().unwrap();
+        gitconfig_three_way(
+            local_dir.path(),
+            upstream_dir.path(),
+            ["a=1\nx\nb=1\n", "a=2\nx\nb=1\n", "a=1\nx\nb=2\n"],
+        );
+        assert_eq!(
+            scan_status(&engine, local_dir.path(), upstream_dir.path(), ".gitconfig"),
+            SyncStatus::Merged
+        );
+        let ctx = crate::template::TemplateContext::detect_for_project(
+            local_dir.path(),
+            "test-proj",
+            "rust",
+        );
+        let pull = engine.pull_updates(local_dir.path(), upstream_dir.path(), &ctx);
+        assert_eq!(applied_only(pull), 1);
+        assert_eq!(
+            fs::read_to_string(local_dir.path().join(".gitconfig")).unwrap(),
+            "a=2\nx\nb=2\n"
+        );
+    }
+
     #[test]
     fn test_scan_after_v1_migration_in_sync() {
         let engine = SyncEngine::new();
@@ -4275,8 +4332,9 @@ mod tests {
         let local_dir = tempdir().unwrap();
         let upstream_dir = tempdir().unwrap();
 
-        // 1. Base ancestor setup: a=1, b=1
-        let base_content = "a=1\nb=1\n";
+        // 1. Base ancestor setup: a=1, x, b=1 (the unchanged middle line keeps the two
+        // edited lines apart; adjacent-line edits are a conflict per D-02)
+        let base_content = "a=1\nx\nb=1\n";
         let base_hash = SyncEngine::compute_hash(base_content.as_bytes());
         let mut state = ProjectState::default();
         state.record_file(
@@ -4286,14 +4344,14 @@ mod tests {
         );
         state.save_to_dir(local_dir.path()).unwrap();
 
-        // 2. Local has line 1 edited: a=2, b=1
+        // 2. Local has line 1 edited: a=2, x, b=1
         let loc_mise = local_dir.path().join("mise.toml");
-        fs::write(&loc_mise, "a=2\nb=1\n").unwrap();
+        fs::write(&loc_mise, "a=2\nx\nb=1\n").unwrap();
 
-        // 3. Upstream has line 2 edited: a=1, b=2
+        // 3. Upstream has line 3 edited: a=1, x, b=2
         let up_mise = upstream_dir.path().join("projects/agents/mise.toml.jinja");
         fs::create_dir_all(up_mise.parent().unwrap()).unwrap();
-        fs::write(&up_mise, "a=1\nb=2\n").unwrap();
+        fs::write(&up_mise, "a=1\nx\nb=2\n").unwrap();
 
         let ctx = crate::template::TemplateContext::detect_for_project(
             local_dir.path(),
@@ -4301,12 +4359,12 @@ mod tests {
             "rust",
         );
 
-        // 4. First pull: orthogonal merge produces a=2, b=2
+        // 4. First pull: orthogonal merge produces a=2, x, b=2
         let pull1 = engine.pull_updates(local_dir.path(), upstream_dir.path(), &ctx);
         assert_eq!(applied_only(pull1), 1);
         assert_eq!(
             fs::read_to_string(&loc_mise).unwrap(),
-            "a=2\nb=2\n",
+            "a=2\nx\nb=2\n",
             "First pull must merge orthogonal changes cleanly"
         );
 
@@ -4315,19 +4373,19 @@ mod tests {
         assert_eq!(applied_only(pull2), 0);
         assert_eq!(
             fs::read_to_string(&loc_mise).unwrap(),
-            "a=2\nb=2\n",
+            "a=2\nx\nb=2\n",
             "Second pull must preserve local edit and remain idempotent!"
         );
 
-        // 6. Upstream now updates line 2 again to b=3
-        fs::write(&up_mise, "a=1\nb=3\n").unwrap();
+        // 6. Upstream now updates line 3 again to b=3
+        fs::write(&up_mise, "a=1\nx\nb=3\n").unwrap();
 
-        // 7. Third pull: merges new upstream change with preserved local edit to produce a=2, b=3
+        // 7. Third pull: merges new upstream change with preserved local edit to produce a=2, x, b=3
         let pull3 = engine.pull_updates(local_dir.path(), upstream_dir.path(), &ctx);
         assert_eq!(applied_only(pull3), 1);
         assert_eq!(
             fs::read_to_string(&loc_mise).unwrap(),
-            "a=2\nb=3\n",
+            "a=2\nx\nb=3\n",
             "Subsequent pull must merge future upstream updates with preserved local edit!"
         );
     }
