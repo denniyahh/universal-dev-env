@@ -29,6 +29,21 @@ pub struct Tombstone {
     pub kept_unmanaged: bool,
 }
 
+/// An unresolved conflict on a managed path (D-08, D-09).
+///
+/// Records the upstream version the conflict was detected against, which is what
+/// `ude sync resolve` resolves against. Kept in its own map (not in the files record)
+/// so a conflict on a path with no ancestor record can be recorded too.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConflictRecord {
+    /// Upstream fingerprint at detection time; `None` when upstream deleted the file.
+    pub upstream_hash: Option<String>,
+    /// LF-normalized upstream text at detection time (`None` when deleted or binary).
+    pub upstream_content: Option<String>,
+    /// Seconds since the Unix epoch when the conflict was (last) detected.
+    pub detected_at: Option<String>,
+}
+
 /// Project synchronization state persisted in `.ude/state.json`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProjectState {
@@ -39,6 +54,9 @@ pub struct ProjectState {
     /// Paths deleted while tracked, keyed like `files`. A path never has both.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub tombstones: BTreeMap<String, Tombstone>,
+    /// Open conflicts, keyed like `files`. Cleared by resolve or convergence.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub conflicts: BTreeMap<String, ConflictRecord>,
 }
 
 /// Newest `.ude/state.json` schema version this build reads and writes.
@@ -91,6 +109,7 @@ impl Default for ProjectState {
             project_type: None,
             files: BTreeMap::new(),
             tombstones: BTreeMap::new(),
+            conflicts: BTreeMap::new(),
         }
     }
 }
@@ -262,13 +281,42 @@ impl ProjectState {
         self.tombstones.remove(&state_key(rel_path));
     }
 
+    /// Records an open conflict on `rel_path` detected against the given upstream
+    /// version (`None` / `None` when upstream deleted the file), replacing any earlier
+    /// record for the path. The files record and tombstone are left untouched.
+    pub fn record_conflict(
+        &mut self,
+        rel_path: &Path,
+        upstream_hash: Option<String>,
+        upstream_content: Option<String>,
+    ) {
+        self.conflicts.insert(
+            state_key(rel_path),
+            ConflictRecord {
+                upstream_hash,
+                upstream_content,
+                detected_at: now_timestamp(),
+            },
+        );
+    }
+
+    /// The open conflict on `rel_path`, if any.
+    pub fn conflict(&self, rel_path: &Path) -> Option<&ConflictRecord> {
+        self.conflicts.get(&state_key(rel_path))
+    }
+
+    /// Removes the open conflict on `rel_path`, if any.
+    pub fn clear_conflict(&mut self, rel_path: &Path) {
+        self.conflicts.remove(&state_key(rel_path));
+    }
+
     /// Removes a file record from tracked state.
     pub fn remove_file(&mut self, rel_path: &Path) {
         self.files.remove(&state_key(rel_path));
     }
 }
 
-/// Key of `rel_path` in the `files` and `tombstones` maps.
+/// Key of `rel_path` in the `files`, `tombstones` and `conflicts` maps.
 fn state_key(rel_path: &Path) -> String {
     rel_path.to_string_lossy().to_string()
 }
