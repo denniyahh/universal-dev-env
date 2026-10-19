@@ -169,6 +169,17 @@ fn main() {
                 std::process::exit(1);
             }
 
+            // Records of an earlier `ude init`, so a re-run keeps the ancestor of a file
+            // it keeps. Unreadable state is never reset (D-06), so init stops before
+            // touching any file.
+            let prior_state = match sync::ProjectState::load_from_dir(&project_path) {
+                Ok(state) => state,
+                Err(e) => {
+                    eprintln!("  {} Initialization failed: {e}", "✗".red());
+                    std::process::exit(EXIT_HARD_FAILURE);
+                }
+            };
+
             let project_name = project_path
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())
@@ -407,13 +418,26 @@ fn main() {
                 std::path::PathBuf::from(".agents/AGENTS.md"),
             ];
             for rel in &managed_rels {
+                let kept_template = kept_gitignore_template
+                    .as_ref()
+                    .filter(|_| rel.as_path() == Path::new(".gitignore"));
+                // A kept file with a prior record keeps that ancestor: replacing it
+                // with the current template would turn an unedited but stale file
+                // into a local modification that push publishes over upstream.
+                if kept_template.is_some()
+                    && let Some(hash) = prior_state.get_ancestor_hash(rel)
+                {
+                    let content = prior_state.get_ancestor_content(rel).map(String::from);
+                    project_state.record_file(rel, hash.to_string(), content);
+                    continue;
+                }
                 // A kept pre-existing .gitignore records the template as its ancestor,
                 // so the kept rules read as a local modification: pull then merges or
                 // conflicts instead of replacing them with the template (CR-03). No
                 // readable template means no ancestor, never the kept bytes.
-                let p = match &kept_gitignore_template {
-                    Some(template) if rel.as_path() == Path::new(".gitignore") => template.clone(),
-                    _ => project_path.join(rel),
+                let p = match kept_template {
+                    Some(template) => template.clone(),
+                    None => project_path.join(rel),
                 };
                 if let Ok(bytes) = fs::read(&p) {
                     let hash = sync::SyncEngine::fingerprint(&bytes);
