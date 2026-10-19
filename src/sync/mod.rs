@@ -269,6 +269,37 @@ impl Drop for RemoteLockGuard {
     }
 }
 
+/// A synchronized remote cache checkout, as returned by
+/// [`SyncEngine::ensure_remote_repo`].
+#[derive(Debug)]
+pub struct RemoteCache {
+    /// The checkout's `templates/` directory, or the checkout root when it has none.
+    pub templates_dir: PathBuf,
+    /// The remote branch head UDE fetched (`refs/remotes/origin/<branch>`). A direct
+    /// push must build on exactly this commit (branch continuity, D-18).
+    pub fetched_sha: String,
+    /// The cache lock; hold it for the whole sync action.
+    pub lock: RemoteLockGuard,
+}
+
+/// Why [`SyncEngine::push_to_remote`] published nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PushRemoteError {
+    /// The remote branch moved after UDE fetched it, so its fast-forward check rejected
+    /// the push. The cache commit was rolled back; the user should pull first (D-18).
+    UpstreamMoved {
+        /// The remote branch that moved.
+        branch: String,
+    },
+    /// Any other failure (staging, publication gate, commit, continuity, network,
+    /// remote hook rejection). A hard failure.
+    Failed(String),
+}
+
+/// Commit message of every sync commit in the remote cache checkout.
+const SYNC_COMMIT_MESSAGE: &str =
+    "chore(sync): synchronize environment refinements from local workstation";
+
 /// Time limits for the engine's git and gh spawns.
 ///
 /// Internal parameterisation so tests can use sub-second limits. It is not a
@@ -669,7 +700,7 @@ impl SyncEngine {
         remote_url: &str,
         branch: &str,
         cache_dir: &Path,
-    ) -> Result<(PathBuf, RemoteLockGuard), String> {
+    ) -> Result<RemoteCache, String> {
         fs::create_dir_all(cache_dir)
             .map_err(|e| format!("Failed to create cache dir {}: {e}", cache_dir.display()))?;
 
@@ -739,13 +770,38 @@ impl SyncEngine {
             let _ = self.run_local(clean, "git clean");
         }
 
+        let fetched_sha = self.fetched_head(&target_checkout, branch)?;
+
         // Return the templates directory inside the remote checkout along with the held lock
         let templates_path = target_checkout.join("templates");
-        if templates_path.exists() {
-            Ok((templates_path, lock_guard))
+        let templates_dir = if templates_path.exists() {
+            templates_path
         } else {
-            Ok((target_checkout, lock_guard))
+            target_checkout
+        };
+        Ok(RemoteCache {
+            templates_dir,
+            fetched_sha,
+            lock: lock_guard,
+        })
+    }
+
+    /// The commit `refs/remotes/origin/<branch>` points at in `checkout`.
+    fn fetched_head(&self, checkout: &Path, branch: &str) -> Result<String, String> {
+        let mut rev_parse = self.git(Some(checkout));
+        rev_parse.args([
+            "rev-parse",
+            "--verify",
+            &format!("refs/remotes/origin/{branch}"),
+        ]);
+        let out = self.run_local(rev_parse, "git rev-parse")?;
+        if !out.status.success() {
+            return Err(with_excerpt(
+                format!("Failed to read the fetched head of origin/{branch}"),
+                &out,
+            ));
         }
+        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
     }
 
     /// Pulls upstream updates into the local project directory.
@@ -1307,14 +1363,41 @@ impl SyncEngine {
         }
     }
 
-    /// Pushes committed upstream updates to the remote git origin or creates a PR
+    /// Publishes the staged template updates: commits them in the cache checkout and
+    /// pushes the commit directly to `branch`, or to a fresh `ude-sync-*` branch with a
+    /// PR when `open_pr` is set. `fetched_sha` is the head UDE fetched
+    /// ([`RemoteCache::fetched_sha`]); a direct push must build on it.
     pub fn push_to_remote(
         &self,
         remote_checkout: &Path,
         branch: &str,
         open_pr: bool,
         staged_files: &[PathBuf],
-    ) -> Result<String, String> {
+        _fetched_sha: &str,
+    ) -> Result<String, PushRemoteError> {
+        let Some(expected_set) = self
+            .stage_publication(remote_checkout, staged_files)
+            .map_err(PushRemoteError::Failed)?
+        else {
+            return Ok("No changes to push to remote repository.".to_string());
+        };
+        if open_pr {
+            self.push_pr_branch(remote_checkout, branch, &expected_set)
+                .map_err(PushRemoteError::Failed)
+        } else {
+            self.push_direct(remote_checkout, branch, &expected_set)
+                .map_err(PushRemoteError::Failed)
+        }
+    }
+
+    /// Stages exactly `staged_files` in the cache checkout and runs the publication gate
+    /// on the index (allowlist, secret scan of every staged blob). Returns the validated
+    /// allowlist relative to `remote_checkout`, or `None` when there is nothing to push.
+    fn stage_publication(
+        &self,
+        remote_checkout: &Path,
+        staged_files: &[PathBuf],
+    ) -> Result<Option<HashSet<PathBuf>>, String> {
         let mut status_cmd = self.git(Some(remote_checkout));
         status_cmd.args(["status", "--porcelain"]);
         let status = self
@@ -1322,11 +1405,11 @@ impl SyncEngine {
             .map_err(|e| format!("Failed to check git status in remote checkout: {e}"))?;
 
         if status.stdout.is_empty() {
-            return Ok("No changes to push to remote repository.".to_string());
+            return Ok(None);
         }
 
         if staged_files.is_empty() {
-            return Ok("No changes to push to remote repository.".to_string());
+            return Ok(None);
         }
 
         // Convert target paths to relative paths from remote checkout
@@ -1414,129 +1497,144 @@ impl SyncEngine {
             }
         }
 
-        let commit_msg = "chore(sync): synchronize environment refinements from local workstation";
+        Ok(Some(expected_set))
+    }
 
-        if open_pr {
-            let epoch_secs = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-            let sync_branch = format!(
-                "ude-sync-{}-{}",
-                &Self::compute_hash(commit_msg.as_bytes())[..8],
-                epoch_secs
-            );
-            let mut create_branch = self.git(Some(remote_checkout));
-            create_branch.args(["checkout", "-b", &sync_branch]);
-            let branch_out = self
-                .run_local(create_branch, "git checkout -b")
-                .map_err(|e| format!("Failed to create sync branch {sync_branch}: {e}"))?;
+    /// PR mode: commits on a fresh `ude-sync-<hash>-<epoch>` branch, pushes it and opens
+    /// a PR against `branch`. Not subject to the upstream-moved abort (D-18 scope note).
+    fn push_pr_branch(
+        &self,
+        remote_checkout: &Path,
+        branch: &str,
+        expected_set: &HashSet<PathBuf>,
+    ) -> Result<String, String> {
+        let epoch_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let sync_branch = format!(
+            "ude-sync-{}-{}",
+            &Self::compute_hash(SYNC_COMMIT_MESSAGE.as_bytes())[..8],
+            epoch_secs
+        );
+        let mut create_branch = self.git(Some(remote_checkout));
+        create_branch.args(["checkout", "-b", &sync_branch]);
+        let branch_out = self
+            .run_local(create_branch, "git checkout -b")
+            .map_err(|e| format!("Failed to create sync branch {sync_branch}: {e}"))?;
 
-            if !branch_out.status.success() {
-                return Err(with_excerpt(
-                    format!("git checkout -b {sync_branch} failed"),
-                    &branch_out,
-                ));
-            }
-
-            let commit_out = self
-                .run_local(
-                    self.commit_command(remote_checkout, commit_msg),
-                    "git commit",
-                )
-                .map_err(|e| format!("Failed to commit in remote checkout: {e}"))?;
-
-            if !commit_out.status.success() {
-                self.abandon_sync_branch(remote_checkout, branch, &sync_branch);
-                return Err(with_excerpt(
-                    "git commit failed in remote checkout".to_string(),
-                    &commit_out,
-                ));
-            }
-
-            if let Err(err) = self.validate_committed_tree(remote_checkout, &expected_set) {
-                self.rollback_commit(remote_checkout);
-                self.abandon_sync_branch(remote_checkout, branch, &sync_branch);
-                return Err(err);
-            }
-
-            let mut push = self.git(Some(remote_checkout));
-            push.args(["push", "-u", "origin", &sync_branch]);
-            let push_out = self
-                .run_network(push, "git push")
-                .map_err(|e| format!("Failed to push sync branch: {e}"))?;
-
-            // Return working tree to canonical branch
-            self.git_best_effort(remote_checkout, &["checkout", branch], "git checkout");
-
-            if !push_out.status.success() {
-                return Err(with_excerpt(
-                    format!("git push failed for branch {sync_branch}"),
-                    &push_out,
-                ));
-            }
-
-            // Attempt to create PR via gh CLI if available
-            let mut pr = self.tool("gh", Some(remote_checkout));
-            pr.args([
-                "pr",
-                "create",
-                "--title",
-                commit_msg,
-                "--body",
-                "Automated pull request from UDE remote synchronization.",
-                "--base",
-                branch,
-                "--head",
-                &sync_branch,
-            ]);
-
-            match self.run_network(pr, "gh pr create") {
-                Ok(output) if output.status.success() => {
-                    let pr_url = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                    Ok(format!("Opened GitHub Pull Request: {pr_url}"))
-                }
-                _ => Ok(format!(
-                    "Pushed changes to branch '{sync_branch}'. Create a PR on GitHub to merge into '{branch}'."
-                )),
-            }
-        } else {
-            let commit_out = self
-                .run_local(
-                    self.commit_command(remote_checkout, commit_msg),
-                    "git commit",
-                )
-                .map_err(|e| format!("Failed to commit in remote checkout: {e}"))?;
-
-            if !commit_out.status.success() {
-                return Err(with_excerpt(
-                    "git commit failed in remote checkout".to_string(),
-                    &commit_out,
-                ));
-            }
-
-            if let Err(err) = self.validate_committed_tree(remote_checkout, &expected_set) {
-                self.rollback_commit(remote_checkout);
-                return Err(err);
-            }
-
-            let mut push = self.git(Some(remote_checkout));
-            push.args(["push", "origin", &format!("HEAD:refs/heads/{branch}")]);
-            let push_out = self
-                .run_network(push, "git push")
-                .map_err(|e| format!("Failed to push to remote: {e}"))?;
-
-            if !push_out.status.success() {
-                return Err(with_excerpt(
-                    format!("git push origin {branch} failed"),
-                    &push_out,
-                ));
-            }
-
-            Ok(format!(
-                "Directly pushed changes to remote branch '{branch}'."
-            ))
+        if !branch_out.status.success() {
+            return Err(with_excerpt(
+                format!("git checkout -b {sync_branch} failed"),
+                &branch_out,
+            ));
         }
+
+        let commit_out = self
+            .run_local(
+                self.commit_command(remote_checkout, SYNC_COMMIT_MESSAGE),
+                "git commit",
+            )
+            .map_err(|e| format!("Failed to commit in remote checkout: {e}"))?;
+
+        if !commit_out.status.success() {
+            self.abandon_sync_branch(remote_checkout, branch, &sync_branch);
+            return Err(with_excerpt(
+                "git commit failed in remote checkout".to_string(),
+                &commit_out,
+            ));
+        }
+
+        if let Err(err) = self.validate_committed_tree(remote_checkout, expected_set) {
+            self.rollback_commit(remote_checkout);
+            self.abandon_sync_branch(remote_checkout, branch, &sync_branch);
+            return Err(err);
+        }
+
+        let mut push = self.git(Some(remote_checkout));
+        push.args(["push", "-u", "origin", &sync_branch]);
+        let push_out = self
+            .run_network(push, "git push")
+            .map_err(|e| format!("Failed to push sync branch: {e}"))?;
+
+        // Return working tree to canonical branch
+        self.git_best_effort(remote_checkout, &["checkout", branch], "git checkout");
+
+        if !push_out.status.success() {
+            return Err(with_excerpt(
+                format!("git push failed for branch {sync_branch}"),
+                &push_out,
+            ));
+        }
+
+        // Attempt to create PR via gh CLI if available
+        let mut pr = self.tool("gh", Some(remote_checkout));
+        pr.args([
+            "pr",
+            "create",
+            "--title",
+            SYNC_COMMIT_MESSAGE,
+            "--body",
+            "Automated pull request from UDE remote synchronization.",
+            "--base",
+            branch,
+            "--head",
+            &sync_branch,
+        ]);
+
+        match self.run_network(pr, "gh pr create") {
+            Ok(output) if output.status.success() => {
+                let pr_url = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                Ok(format!("Opened GitHub Pull Request: {pr_url}"))
+            }
+            _ => Ok(format!(
+                "Pushed changes to branch '{sync_branch}'. Create a PR on GitHub to merge into '{branch}'."
+            )),
+        }
+    }
+
+    /// Direct mode: commits in the cache checkout and pushes the commit to `branch`.
+    fn push_direct(
+        &self,
+        remote_checkout: &Path,
+        branch: &str,
+        expected_set: &HashSet<PathBuf>,
+    ) -> Result<String, String> {
+        let commit_out = self
+            .run_local(
+                self.commit_command(remote_checkout, SYNC_COMMIT_MESSAGE),
+                "git commit",
+            )
+            .map_err(|e| format!("Failed to commit in remote checkout: {e}"))?;
+
+        if !commit_out.status.success() {
+            return Err(with_excerpt(
+                "git commit failed in remote checkout".to_string(),
+                &commit_out,
+            ));
+        }
+
+        if let Err(err) = self.validate_committed_tree(remote_checkout, expected_set) {
+            self.rollback_commit(remote_checkout);
+            return Err(err);
+        }
+
+        let mut push = self.git(Some(remote_checkout));
+        push.args(["push", "origin", &format!("HEAD:refs/heads/{branch}")]);
+        let push_out = self
+            .run_network(push, "git push")
+            .map_err(|e| format!("Failed to push to remote: {e}"))?;
+
+        if !push_out.status.success() {
+            return Err(with_excerpt(
+                format!("git push origin {branch} failed"),
+                &push_out,
+            ));
+        }
+
+        Ok(format!(
+            "Directly pushed changes to remote branch '{branch}'."
+        ))
     }
 
     /// The cache-checkout commit command (no hooks, no signing).
@@ -4171,15 +4269,17 @@ mod tests {
         );
         git.run(seed.path(), &["push", "-u", "origin", "main"]);
 
-        let (tmpl_dir, _lock) = engine
+        let cached = engine
             .ensure_remote_repo(bare.path().to_str().unwrap(), "main", cache.path())
             .unwrap();
+        let tmpl_dir = &cached.templates_dir;
         let checkout = tmpl_dir.parent().unwrap();
         let remote_tree = || git.output(bare.path(), &["ls-tree", "-r", "--name-only", "main"]);
 
         let gitconfig = tmpl_dir.join("projects/generic/gitconfig.repo");
         fs::remove_file(&gitconfig).unwrap();
-        let pushed = engine.push_to_remote(checkout, "main", false, &[gitconfig]);
+        let pushed =
+            engine.push_to_remote(checkout, "main", false, &[gitconfig], &cached.fetched_sha);
         assert!(pushed.is_ok(), "deletion push: {pushed:?}");
         let tree = remote_tree();
         assert!(!tree.contains("gitconfig.repo"), "{tree}");
@@ -4196,9 +4296,13 @@ mod tests {
         let prefix = "ghp_";
         let body = "111122223333444455556666777788889999";
         fs::write(&hook, format!("#!/bin/sh\n# {prefix}{body}\n")).unwrap();
-        let err = engine
-            .push_to_remote(checkout, "main", false, &[gitignore, hook])
-            .unwrap_err();
+        let err = push_failure(engine.push_to_remote(
+            checkout,
+            "main",
+            false,
+            &[gitignore, hook],
+            &cached.fetched_sha,
+        ));
         assert!(
             err.starts_with("Publication gate violation: secret detected"),
             "{err}"
@@ -5108,7 +5212,11 @@ mod tests {
         git.run(fake_remote.path(), &["commit", "-m", "init fake remote"]);
 
         let remote_url = fake_remote.path().to_string_lossy().to_string();
-        let (resolved, _lock1) = engine
+        let RemoteCache {
+            templates_dir: resolved,
+            lock: _lock1,
+            ..
+        } = engine
             .ensure_remote_repo(&remote_url, "main", cache_dir.path())
             .expect("remote cache resolution");
 
@@ -5126,7 +5234,11 @@ mod tests {
         git.run(fake_remote.path(), &["commit", "-m", "develop commit"]);
         git.run(fake_remote.path(), &["checkout", "main"]);
 
-        let (resolved_develop, _lock2) = engine
+        let RemoteCache {
+            templates_dir: resolved_develop,
+            lock: _lock2,
+            ..
+        } = engine
             .ensure_remote_repo(&remote_url, "develop", cache_dir.path())
             .expect("remote cache resolution on develop branch");
         assert!(resolved_develop.exists());
@@ -5134,7 +5246,11 @@ mod tests {
 
         drop(_lock1);
         // Switching back to main must still work
-        let (resolved_main, _lock3) = engine
+        let RemoteCache {
+            templates_dir: resolved_main,
+            lock: _lock3,
+            ..
+        } = engine
             .ensure_remote_repo(&remote_url, "main", cache_dir.path())
             .expect("remote cache resolution on main branch");
         assert!(resolved_main.exists());
@@ -5418,7 +5534,8 @@ mod tests {
         // Call push_to_remote staging ONLY the valid file
         let staged_allowlist = vec![valid_file.clone()];
         // Note: git push will fail because there is no remote server, but staging and commit will execute
-        let _ = engine.push_to_remote(remote_repo.path(), "main", false, &staged_allowlist);
+        let head = git.output(remote_repo.path(), &["rev-parse", "HEAD"]);
+        let _ = engine.push_to_remote(remote_repo.path(), "main", false, &staged_allowlist, &head);
 
         // Verify git status: the dirty secret file must remain UNTRACKED / UNSTAGED!
         let status_out = git.output(remote_repo.path(), &["status", "--porcelain"]);
@@ -5608,14 +5725,16 @@ mod tests {
 
         // Working tree file has benign content, but staged index blob will have secret via clean filter!
         let staged_allowlist = vec![valid_file.clone()];
-        let res = engine.push_to_remote(remote_repo.path(), "main", false, &staged_allowlist);
+        let head = git.output(remote_repo.path(), &["rev-parse", "HEAD"]);
+        let res =
+            engine.push_to_remote(remote_repo.path(), "main", false, &staged_allowlist, &head);
 
         // Publication gate must detect secret in the staged blob and reject!
         assert!(
             res.is_err(),
             "Publication gate must fail when staged blob contains secret!"
         );
-        let err_msg = res.unwrap_err();
+        let err_msg = push_failure(res);
         assert!(
             err_msg.contains("Publication gate violation: secret detected in staged index blob"),
             "Error was: {err_msg}"
@@ -5735,8 +5854,8 @@ mod tests {
             "ensure_remote_repo must succeed for slash branch: {:?}",
             res.err()
         );
-        let (checkout_tmpl, _lock) = res.unwrap();
-        assert!(checkout_tmpl.exists());
+        let cached = res.unwrap();
+        assert!(cached.templates_dir.exists());
     }
 
     #[test]
@@ -5764,13 +5883,14 @@ mod tests {
         git.run(seed_dir.path(), &["push", "-u", "origin", "main"]);
 
         // Step 1: Ensure cache checkout of main
-        let (tmpl_dir, lock) = engine
+        let cached = engine
             .ensure_remote_repo(
                 bare_remote.path().to_str().unwrap(),
                 "main",
                 cache_dir.path(),
             )
             .unwrap();
+        let tmpl_dir = &cached.templates_dir;
         let remote_checkout = tmpl_dir.parent().unwrap();
 
         // Step 2: Push changes in PR mode (open_pr: true)
@@ -5781,11 +5901,12 @@ mod tests {
         )
         .unwrap();
         let staged = vec![managed_gitconfig.clone()];
-        let pr_res = engine.push_to_remote(remote_checkout, "main", true, &staged);
+        let pr_res =
+            engine.push_to_remote(remote_checkout, "main", true, &staged, &cached.fetched_sha);
         assert!(pr_res.is_ok(), "PR push must succeed: {:?}", pr_res.err());
 
         // Explicitly release first lock before acquiring lock in Step 3
-        drop(lock);
+        drop(cached);
 
         // Verify remote has a ude-sync branch
         let branch_out = git.output(bare_remote.path(), &["branch", "--list"]);
@@ -5796,13 +5917,14 @@ mod tests {
 
         // Step 3: Now run direct push on main (open_pr: false)
         // ensure_remote_repo must cleanly reset the working tree back to main
-        let (tmpl_dir_2, _lock_2) = engine
+        let cached_2 = engine
             .ensure_remote_repo(
                 bare_remote.path().to_str().unwrap(),
                 "main",
                 cache_dir.path(),
             )
             .unwrap();
+        let tmpl_dir_2 = &cached_2.templates_dir;
         let remote_checkout_2 = tmpl_dir_2.parent().unwrap();
         let managed_gitconfig_2 = tmpl_dir_2.join("projects/generic/gitconfig.repo");
         fs::write(
@@ -5811,7 +5933,13 @@ mod tests {
         )
         .unwrap();
         let staged_2 = vec![managed_gitconfig_2.clone()];
-        let direct_res = engine.push_to_remote(remote_checkout_2, "main", false, &staged_2);
+        let direct_res = engine.push_to_remote(
+            remote_checkout_2,
+            "main",
+            false,
+            &staged_2,
+            &cached_2.fetched_sha,
+        );
         assert!(
             direct_res.is_ok(),
             "Direct push must succeed: {:?}",
@@ -5829,11 +5957,17 @@ mod tests {
         );
     }
 
-    /// A bare remote seeded with one template on `main` whose pre-receive hook is the
-    /// POSIX sh script `hook` (installed after seeding, mode 0o755).
-    #[cfg(unix)]
-    fn bare_remote_with_pre_receive(git: &GitFixture, hook: &str) -> tempfile::TempDir {
-        use std::os::unix::fs::PermissionsExt;
+    /// The message of a hard push failure; panics on success or on `UpstreamMoved`.
+    fn push_failure(res: Result<String, PushRemoteError>) -> String {
+        match res {
+            Err(PushRemoteError::Failed(e)) => e,
+            other => panic!("expected a hard push failure, got {other:?}"),
+        }
+    }
+
+    /// A bare remote seeded with one template on `main`
+    /// (`templates/projects/generic/gitconfig.repo`).
+    fn seeded_bare_remote(git: &GitFixture) -> tempfile::TempDir {
         let bare = tempdir().unwrap();
         git.run(bare.path(), &["init", "--bare", "-b", "main"]);
         let seed = tempdir().unwrap();
@@ -5849,6 +5983,89 @@ mod tests {
             seed.path(),
             &["push", bare.path().to_str().unwrap(), "main"],
         );
+        bare
+    }
+
+    /// Writes an edit to the managed template of `cached` and pushes it directly,
+    /// building on the head `cached` fetched.
+    fn direct_push_edit(
+        engine: &SyncEngine,
+        cached: &RemoteCache,
+        content: &str,
+    ) -> Result<String, PushRemoteError> {
+        let checkout = cached.templates_dir.parent().unwrap();
+        let managed = cached.templates_dir.join("projects/generic/gitconfig.repo");
+        fs::write(&managed, content).unwrap();
+        engine.push_to_remote(checkout, "main", false, &[managed], &cached.fetched_sha)
+    }
+
+    #[test]
+    fn test_direct_push_aborts_when_upstream_moved() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let bare = seeded_bare_remote(&git);
+        let bare_url = bare.path().to_str().unwrap();
+        let remote_main = || git.output(bare.path(), &["rev-parse", "refs/heads/main"]);
+
+        let cache = tempdir().unwrap();
+        let cached = engine
+            .ensure_remote_repo(bare_url, "main", cache.path())
+            .unwrap();
+        assert_eq!(cached.fetched_sha, remote_main());
+        let checkout = cached.templates_dir.parent().unwrap();
+
+        // Another machine publishes after UDE fetched.
+        let other = tempdir().unwrap();
+        git.run(other.path(), &["clone", bare_url, "."]);
+        fs::write(other.path().join("unrelated.txt"), "other machine\n").unwrap();
+        git.run(other.path(), &["add", "unrelated.txt"]);
+        git.run(other.path(), &["commit", "-m", "concurrent publish"]);
+        git.run(other.path(), &["push", "origin", "main"]);
+        let moved = remote_main();
+        assert_ne!(moved, cached.fetched_sha);
+
+        let res = direct_push_edit(&engine, &cached, "[core]\n  autocrlf = false\n");
+        assert_eq!(
+            res,
+            Err(PushRemoteError::UpstreamMoved {
+                branch: "main".to_string()
+            })
+        );
+        assert_eq!(
+            remote_main(),
+            moved,
+            "the remote branch must keep the other push"
+        );
+        assert_eq!(
+            git.output(checkout, &["rev-parse", "HEAD"]),
+            cached.fetched_sha,
+            "the cache commit was not rolled back"
+        );
+        drop(cached);
+
+        // Negative control: with no concurrent push the same edit is published on top
+        // of the fetched head.
+        let cache = tempdir().unwrap();
+        let cached = engine
+            .ensure_remote_repo(bare_url, "main", cache.path())
+            .unwrap();
+        assert_eq!(cached.fetched_sha, moved);
+        let res = direct_push_edit(&engine, &cached, "[core]\n  autocrlf = false\n");
+        assert!(res.is_ok(), "push without a race: {res:?}");
+        assert_ne!(remote_main(), moved, "the remote branch did not advance");
+        assert_eq!(
+            git.output(bare.path(), &["rev-parse", "refs/heads/main~1"]),
+            cached.fetched_sha,
+            "the published commit must build on the fetched head"
+        );
+    }
+
+    /// A bare remote seeded with one template on `main` whose pre-receive hook is the
+    /// POSIX sh script `hook` (installed after seeding, mode 0o755).
+    #[cfg(unix)]
+    fn bare_remote_with_pre_receive(git: &GitFixture, hook: &str) -> tempfile::TempDir {
+        use std::os::unix::fs::PermissionsExt;
+        let bare = seeded_bare_remote(git);
         let hook_path = bare.path().join("hooks/pre-receive");
         fs::write(&hook_path, hook).unwrap();
         fs::set_permissions(&hook_path, fs::Permissions::from_mode(0o755)).unwrap();
@@ -5861,16 +6078,16 @@ mod tests {
     fn direct_push_through(
         engine: &SyncEngine,
         bare: &Path,
-    ) -> (Result<String, String>, std::time::Duration) {
+    ) -> (Result<String, PushRemoteError>, std::time::Duration) {
         let cache = tempdir().unwrap();
-        let (tmpl_dir, _lock) = engine
+        let cached = engine
             .ensure_remote_repo(bare.to_str().unwrap(), "main", cache.path())
             .expect("cache checkout of the bare remote");
-        let checkout = tmpl_dir.parent().unwrap();
-        let managed = tmpl_dir.join("projects/generic/gitconfig.repo");
+        let checkout = cached.templates_dir.parent().unwrap();
+        let managed = cached.templates_dir.join("projects/generic/gitconfig.repo");
         fs::write(&managed, "[core]\n  autocrlf = false\n").unwrap();
         let start = std::time::Instant::now();
-        let res = engine.push_to_remote(checkout, "main", false, &[managed]);
+        let res = engine.push_to_remote(checkout, "main", false, &[managed], &cached.fetched_sha);
         (res, start.elapsed())
     }
 
@@ -5890,7 +6107,10 @@ mod tests {
         let (res, elapsed) = direct_push_through(&engine, hanging.path());
         let err = match res {
             Ok(msg) => panic!("push through a hanging hook returned Ok after {elapsed:?}: {msg}"),
-            Err(e) => e,
+            Err(PushRemoteError::Failed(e)) => e,
+            Err(other) => {
+                panic!("push through a hanging hook: expected a hard failure, got {other:?}")
+            }
         };
         assert!(
             err.contains("git push"),
