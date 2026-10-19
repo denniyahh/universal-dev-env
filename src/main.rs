@@ -471,38 +471,17 @@ fn main() {
                     .unwrap_or_else(|| "main".to_string())
             });
 
-            let (root_template_dir, remote_checkout_root, _remote_lock): (
-                PathBuf,
-                Option<PathBuf>,
-                Option<sync::RemoteLockGuard>,
-            ) = if let Some(ref r_url) = remote_url {
-                match engine.ensure_remote_repo(r_url, &branch, &cache_dir) {
-                    Ok((tmpl_dir, lock_guard)) => {
-                        let checkout_dir = tmpl_dir.parent().unwrap_or(&tmpl_dir).to_path_buf();
-                        (tmpl_dir, Some(checkout_dir), Some(lock_guard))
-                    }
-                    Err(e) => {
-                        eprintln!(
-                            "  {} Failed to sync with remote {}: {}",
-                            "✗".red(),
-                            process::redact_userinfo(r_url),
-                            e
-                        );
-                        std::process::exit(EXIT_HARD_FAILURE);
-                    }
-                }
-            } else {
-                (
-                    find_templates_dir().unwrap_or_else(|| PathBuf::from("templates")),
-                    None,
-                    None,
-                )
-            };
-
             let local_project = PathBuf::from(".");
 
             match sync_args.action {
+                // Resolve is offline: it reads only state.json and the local file, so it
+                // runs before (and without) any remote cache access or lock.
+                cli::SyncAction::Resolve { file } => {
+                    run_sync_resolve(&engine, &local_project, &file);
+                }
                 cli::SyncAction::Status => {
+                    let (root_template_dir, _remote_checkout_root, _remote_lock) =
+                        open_sync_templates(&engine, remote_url.as_deref(), &branch, &cache_dir);
                     println!("{}", "==> Checking UDE environment sync status...".bold());
                     if let Some(ref r_url) = remote_url {
                         println!(
@@ -620,6 +599,8 @@ fn main() {
                     }
                 }
                 cli::SyncAction::Pull => {
+                    let (root_template_dir, _remote_checkout_root, _remote_lock) =
+                        open_sync_templates(&engine, remote_url.as_deref(), &branch, &cache_dir);
                     println!(
                         "{}",
                         "==> Pulling updates from central configuration store...".bold()
@@ -698,6 +679,8 @@ fn main() {
                     }
                 }
                 cli::SyncAction::Push { force, pr } => {
+                    let (root_template_dir, remote_checkout_root, _remote_lock) =
+                        open_sync_templates(&engine, remote_url.as_deref(), &branch, &cache_dir);
                     println!("{}", "==> Running Sanitization Gate & Sync Push...".bold());
 
                     // If TypeSafe AI API is configured, evaluate semantic drift on agent rules
@@ -916,6 +899,66 @@ fn main() {
                     }
                 }
             }
+        }
+    }
+}
+
+/// Template root for a sync action: the cached checkout of `remote_url` (with its
+/// checkout root and the remote cache lock, held by the caller for the whole action),
+/// or the local templates directory. Exits with [`EXIT_HARD_FAILURE`] when the remote
+/// cannot be synchronized.
+fn open_sync_templates(
+    engine: &sync::SyncEngine,
+    remote_url: Option<&str>,
+    branch: &str,
+    cache_dir: &Path,
+) -> (PathBuf, Option<PathBuf>, Option<sync::RemoteLockGuard>) {
+    let Some(r_url) = remote_url else {
+        return (
+            find_templates_dir().unwrap_or_else(|| PathBuf::from("templates")),
+            None,
+            None,
+        );
+    };
+    match engine.ensure_remote_repo(r_url, branch, cache_dir) {
+        Ok((tmpl_dir, lock_guard)) => {
+            let checkout_dir = tmpl_dir.parent().unwrap_or(&tmpl_dir).to_path_buf();
+            (tmpl_dir, Some(checkout_dir), Some(lock_guard))
+        }
+        Err(e) => {
+            eprintln!(
+                "  {} Failed to sync with remote {}: {}",
+                "✗".red(),
+                process::redact_userinfo(r_url),
+                e
+            );
+            std::process::exit(EXIT_HARD_FAILURE);
+        }
+    }
+}
+
+/// `ude sync resolve <file>`: prints what the resolution means, or the error to stderr
+/// with exit [`EXIT_HARD_FAILURE`].
+fn run_sync_resolve(engine: &sync::SyncEngine, local_project: &Path, file: &Path) {
+    match engine.resolve_conflict(local_project, file) {
+        Ok(outcome) => {
+            let meaning = match outcome {
+                sync::ResolveOutcome::KeptLocal => {
+                    "local content will be published on the next push"
+                }
+                sync::ResolveOutcome::AcceptedLocalDeletion => {
+                    "the next push deletes the upstream template if it still exists"
+                }
+                sync::ResolveOutcome::KeptUnmanaged => {
+                    "kept as an unmanaged file; it will not be republished"
+                }
+                sync::ResolveOutcome::DroppedDeleted => "deletion accepted; tracking removed",
+            };
+            println!("  {} Resolved {}: {meaning}", "✓".green(), file.display());
+        }
+        Err(e) => {
+            eprintln!("  {} {e}", "✗".red());
+            std::process::exit(EXIT_HARD_FAILURE);
         }
     }
 }
