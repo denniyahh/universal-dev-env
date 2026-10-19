@@ -119,13 +119,13 @@ pub enum PushResult {
         /// Files whose local and upstream edits merge cleanly, not published until the
         /// merge is pulled (D-17).
         skipped_merged: Vec<PathBuf>,
+        /// Locally deleted or edited files inside the private publish boundary, never
+        /// published; the rest of the push goes ahead (CR-01, D-10 pattern).
+        skipped_boundary: Vec<PathBuf>,
     },
     SecretBlocked {
         path: PathBuf,
         reason: String,
-    },
-    BoundaryBlocked {
-        path: PathBuf,
     },
     IoFailed {
         path: PathBuf,
@@ -1175,8 +1175,9 @@ impl SyncEngine {
     }
 
     /// Pre-validates and pushes locally modified files to upstream template directory.
-    /// Operates atomically: verifies that ALL candidate files pass publish boundary,
-    /// read integrity, and secret scanning before performing any upstream modifications.
+    /// Operates atomically: verifies that ALL candidate files pass read integrity and
+    /// secret scanning before performing any upstream modifications. Files inside the
+    /// publish boundary are skipped and reported, not published (CR-01).
     pub fn push_updates(
         &self,
         local_root: &Path,
@@ -1196,6 +1197,7 @@ impl SyncEngine {
         let mut deletions = Vec::new();
         let mut skipped_conflicts = Vec::new();
         let mut skipped_merged = Vec::new();
+        let mut skipped_boundary = Vec::new();
 
         // Pass 1: Strict atomic pre-validation across ALL modified candidates
         for state in &states {
@@ -1219,17 +1221,22 @@ impl SyncEngine {
                 continue;
             }
 
+            // Gate 1: publish boundary. A local deletion or edit of a private path is
+            // skipped and reported, like a conflict (D-10); the rest is still published.
+            if matches!(
+                state.status,
+                SyncStatus::LocalDeleted | SyncStatus::LocallyModified
+            ) && self
+                .sanitizer
+                .is_local_only_path(&state.relative_path, allow_agent_rules)
+            {
+                skipped_boundary.push(state.relative_path.clone());
+                continue;
+            }
+
             // Deleted locally, unchanged upstream (D-14): delete the upstream template.
             // Unmanaged, UpstreamDeleted, BothDeleted and Absent are never published.
             if state.status == SyncStatus::LocalDeleted {
-                if self
-                    .sanitizer
-                    .is_local_only_path(&state.relative_path, allow_agent_rules)
-                {
-                    return PushResult::BoundaryBlocked {
-                        path: state.relative_path.clone(),
-                    };
-                }
                 if let Some(target_upstream) = map_to_upstream(upstream_root, &state.relative_path)
                 {
                     deletions.push((state.relative_path.clone(), target_upstream));
@@ -1239,16 +1246,6 @@ impl SyncEngine {
 
             if state.status == SyncStatus::LocallyModified {
                 let local_path = local_root.join(&state.relative_path);
-
-                // Gate 1: Check publish boundary
-                if self
-                    .sanitizer
-                    .is_local_only_path(&state.relative_path, allow_agent_rules)
-                {
-                    return PushResult::BoundaryBlocked {
-                        path: state.relative_path.clone(),
-                    };
-                }
 
                 let raw_bytes = match fs::read(&local_path) {
                     Ok(b) => b,
@@ -1402,6 +1399,7 @@ impl SyncEngine {
             deleted,
             skipped_conflicts,
             skipped_merged,
+            skipped_boundary,
         }
     }
 
@@ -2052,7 +2050,9 @@ fn remove_conflict_sidecar(local_root: &Path, rel: &Path) -> Result<(), String> 
     }
 }
 
-fn map_to_upstream(upstream_root: &Path, rel: &Path) -> Option<PathBuf> {
+/// Upstream template path for the managed project path `rel`, or `None` when `rel`
+/// has no template.
+pub fn map_to_upstream(upstream_root: &Path, rel: &Path) -> Option<PathBuf> {
     let rel_str = rel.to_string_lossy();
     if rel_str == ".gitconfig" {
         Some(upstream_root.join("projects/generic/gitconfig.repo"))
@@ -4470,10 +4470,16 @@ mod tests {
 
         // The boundary path is skipped, not published; the rest of the push goes ahead.
         let result = push_dirs(&engine, local.path(), upstream.path());
-        assert!(
-            matches!(result, PushResult::Success { .. }),
-            "a boundary path must not abort the push: {result:?}"
-        );
+        let PushResult::Success {
+            skipped_boundary,
+            deleted,
+            ..
+        } = &result
+        else {
+            panic!("a boundary path must not abort the push: {result:?}");
+        };
+        assert_eq!(skipped_boundary, &vec![PathBuf::from(rel)]);
+        assert_eq!(deleted, &Vec::<PathBuf>::new());
         assert_eq!(fs::read_to_string(&template).unwrap(), text);
         assert_eq!(
             fs::read_to_string(upstream.path().join("projects/generic/gitconfig.repo")).unwrap(),
@@ -5279,10 +5285,19 @@ mod tests {
             true,
         );
 
-        assert!(
-            matches!(res, PushResult::Success { .. }),
-            "a boundary edit must be skipped, not abort the push: {res:?}"
+        let PushResult::Success {
+            skipped_boundary,
+            synced_files,
+            ..
+        } = &res
+        else {
+            panic!("a boundary edit must be skipped, not abort the push: {res:?}");
+        };
+        assert_eq!(
+            skipped_boundary,
+            &vec![PathBuf::from("scratch/sync-personal-env.sh")]
         );
+        assert_eq!(*synced_files, 0);
         assert!(
             !upstream_dir
                 .path()

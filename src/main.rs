@@ -517,8 +517,13 @@ fn main() {
                                 );
                             }
                             sync::SyncStatus::LocallyModified => {
+                                let hint = match push_boundary(&s.relative_path) {
+                                    PushBoundary::Publishable => "ready to push",
+                                    PushBoundary::ForceOnly => "push with --force to publish",
+                                    PushBoundary::Never => "local-only path, never pushed",
+                                };
                                 println!(
-                                    "  {} {}: Locally Modified (ready to push)",
+                                    "  {} {}: Locally Modified ({hint})",
                                     "!".yellow(),
                                     s.relative_path.display()
                                 );
@@ -552,8 +557,15 @@ fn main() {
                                 );
                             }
                             sync::SyncStatus::LocalDeleted => {
+                                let hint = match push_boundary(&s.relative_path) {
+                                    PushBoundary::Publishable => "push to propagate",
+                                    PushBoundary::ForceOnly => "push with --force to propagate",
+                                    PushBoundary::Never => {
+                                        "local-only path, push never publishes it; restore it to clear"
+                                    }
+                                };
                                 println!(
-                                    "  {} {}: Deleted locally (push to propagate)",
+                                    "  {} {}: Deleted locally ({hint})",
                                     "!".yellow(),
                                     s.relative_path.display()
                                 );
@@ -641,8 +653,18 @@ fn main() {
                                 );
                             }
                             for file in &report.locally_deleted_pending {
+                                let advice = match push_boundary(file) {
+                                    PushBoundary::Publishable => "push to propagate".to_string(),
+                                    PushBoundary::ForceOnly => {
+                                        "push with --force to propagate".to_string()
+                                    }
+                                    PushBoundary::Never => format!(
+                                        "a local-only path, push never publishes it; {}",
+                                        boundary_restore_hint(&root_template_dir, file)
+                                    ),
+                                };
                                 println!(
-                                    "  {} {}: deleted locally — push to propagate",
+                                    "  {} {}: deleted locally — {advice}",
                                     "!".yellow(),
                                     file.display()
                                 );
@@ -783,6 +805,7 @@ fn main() {
                             deleted,
                             skipped_conflicts,
                             skipped_merged,
+                            skipped_boundary,
                         } => {
                             println!(
                                 "  {} Sanitization gate passed: clean of secrets & parameters applied.",
@@ -814,6 +837,24 @@ fn main() {
                                     "✗".red(),
                                     file.display()
                                 );
+                            }
+                            for file in &skipped_boundary {
+                                let change = if local_project.join(file).symlink_metadata().is_ok()
+                                {
+                                    "edited locally"
+                                } else {
+                                    "deleted locally"
+                                };
+                                let reason = match push_boundary(file) {
+                                    PushBoundary::ForceOnly => {
+                                        "agent rules are published only with --force; skipped (re-run with --force)".to_string()
+                                    }
+                                    _ => format!(
+                                        "but it is a local-only path that push never publishes; skipped ({})",
+                                        boundary_restore_hint(&root_template_dir, file)
+                                    ),
+                                };
+                                eprintln!("  {} {}: {change}, {reason}", "✗".red(), file.display());
                             }
 
                             if let Some(ref remote_checkout) = remote_checkout_root {
@@ -890,7 +931,10 @@ fn main() {
                             }
                             // Published what was eligible; skipped files still need the
                             // developer (D-10, D-17).
-                            if !skipped_conflicts.is_empty() || !skipped_merged.is_empty() {
+                            if !skipped_conflicts.is_empty()
+                                || !skipped_merged.is_empty()
+                                || !skipped_boundary.is_empty()
+                            {
                                 std::process::exit(EXIT_DRIFT);
                             }
                         }
@@ -900,14 +944,6 @@ fn main() {
                                 "✗".red(),
                                 path.display(),
                                 reason
-                            );
-                            std::process::exit(1);
-                        }
-                        sync::PushResult::BoundaryBlocked { path } => {
-                            eprintln!(
-                                "  {} Push rejected: {} is within private publish boundary.",
-                                "✗".red(),
-                                path.display()
                             );
                             std::process::exit(1);
                         }
@@ -928,6 +964,39 @@ fn main() {
                 }
             }
         }
+    }
+}
+
+/// How the private publish boundary treats a managed path in `ude sync push`.
+enum PushBoundary {
+    /// Push publishes it.
+    Publishable,
+    /// Push publishes it only with `--force` (agent rules).
+    ForceOnly,
+    /// Push never publishes it (`scratch/` and other local-only paths).
+    Never,
+}
+
+fn push_boundary(path: &Path) -> PushBoundary {
+    let sanitizer = sanitizer::Sanitizer::new();
+    if !sanitizer.is_local_only_path(path, false) {
+        PushBoundary::Publishable
+    } else if !sanitizer.is_local_only_path(path, true) {
+        PushBoundary::ForceOnly
+    } else {
+        PushBoundary::Never
+    }
+}
+
+/// How to clear a local change push will never publish: restore the file to the
+/// upstream template, which neither pull (D-15) nor push does for a local deletion.
+fn boundary_restore_hint(template_root: &Path, file: &Path) -> String {
+    match sync::map_to_upstream(template_root, file) {
+        Some(template) => format!(
+            "restore it from the upstream template {} to clear this",
+            template.display()
+        ),
+        None => "restore it locally to clear this".to_string(),
     }
 }
 
