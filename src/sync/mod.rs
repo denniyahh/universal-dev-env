@@ -1444,6 +1444,17 @@ impl SyncEngine {
         let status = self
             .run_local(status_cmd, "git status")
             .map_err(|e| format!("Failed to check git status in remote checkout: {e}"))?;
+        // Empty output means "nothing to push" only when git status succeeded.
+        if !status.status.success() {
+            return Err(with_excerpt(
+                format!(
+                    "git status failed in remote checkout {} with exit status {:?}",
+                    remote_checkout.display(),
+                    status.status.code()
+                ),
+                &status,
+            ));
+        }
 
         if status.stdout.is_empty() {
             return Ok(None);
@@ -1484,6 +1495,17 @@ impl SyncEngine {
         let diff_cached = self
             .run_local(diff, "git diff --cached")
             .map_err(|e| format!("Failed to inspect staged diff in remote checkout: {e}"))?;
+        // The gate below checks only what this lists; a failed listing checks nothing.
+        if !diff_cached.status.success() {
+            self.reset_index(remote_checkout);
+            return Err(with_excerpt(
+                format!(
+                    "git diff --cached failed in remote checkout with exit status {:?}",
+                    diff_cached.status.code()
+                ),
+                &diff_cached,
+            ));
+        }
 
         let staged_output = String::from_utf8_lossy(&diff_cached.stdout);
         let expected_set: HashSet<PathBuf> = rel_staged_paths.into_iter().collect();
