@@ -14,7 +14,7 @@ Requirements for initial release, mapping directly to remediation tracks from [`
 - [x] **SYNC-03**: All subprocess executions (`git`, `gh`) enforce bounded timeouts (30s-60s) with active process cancellation to prevent hangs.
 - [x] **SYNC-04**: Cryptographic SHA-256 ancestor hash calculation normalizes CRLF line endings to prevent false drift detection across platforms.
 - [x] **SYNC-05**: Divergent 3-way conflicts generate structured `.conflict` files with standard Myers conflict markers while preserving user modifications.
-- [ ] **SYNC-06**: `push_to_remote` reconciles push candidates safely and verifies branch head continuity before publishing.
+- [x] **SYNC-06**: `push_to_remote` reconciles push candidates safely and verifies branch head continuity before publishing.
 
 ### Sanitizer, Boundaries & Security (Track 2)
 
@@ -72,7 +72,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | SYNC-03 | Phase 1 | Complete |
 | SYNC-04 | Phase 1 | Complete |
 | SYNC-05 | Phase 1 | Complete |
-| SYNC-06 | Phase 1 | Pending |
+| SYNC-06 | Phase 1 | Complete |
 | SEC-01 | Phase 2 | Pending |
 | SEC-02 | Phase 2 | Pending |
 | SEC-03 | Phase 2 | Pending |

@@ -32,3 +32,14 @@
   for runs on hosts with other fixtures.
   **Fix:** `env_remove("TYPESAFE_API_KEY")` on every e2e spawn (or route them all
   through `sync_cli`). 01-10 fixed only its own helper (scope boundary).
+
+- Remote cache checkout is derived as `templates_dir.parent()`
+  status: open
+  **Found during:** 01-11 Task 1 (reading `open_sync_templates` in src/main.rs)
+  **What:** `ensure_remote_repo` returns the checkout root itself as
+  `templates_dir` when the remote has no `templates/` directory, and
+  `open_sync_templates` then takes its parent (`<cache>/ude`) as the checkout, so
+  push would run git outside the cache repository. Read from code only, not
+  reproduced; a remote without `templates/` is not a supported layout today.
+  **Fix:** have `RemoteCache` carry the checkout root explicitly instead of
+  deriving it in main.rs.
