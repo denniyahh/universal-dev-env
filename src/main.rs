@@ -776,6 +776,7 @@ fn main() {
                             synced_files,
                             staged_files,
                             updated_records,
+                            deleted,
                         } => {
                             println!(
                                 "  {} Sanitization gate passed: clean of secrets & parameters applied.",
@@ -786,6 +787,13 @@ fn main() {
                                 "✓".green(),
                                 synced_files
                             );
+                            for file in &deleted {
+                                println!(
+                                    "  {} Deleted upstream template for {}",
+                                    "✓".green(),
+                                    file.display()
+                                );
+                            }
 
                             if let Some(ref remote_checkout) = remote_checkout_root {
                                 println!(
