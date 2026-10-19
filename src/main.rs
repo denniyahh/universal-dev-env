@@ -642,6 +642,7 @@ fn main() {
                             if report.applied.is_empty()
                                 && report.deleted.is_empty()
                                 && report.conflicts.is_empty()
+                                && report.converged.is_empty()
                             {
                                 println!("  {} No pending upstream updates to apply.", "✓".green());
                             } else if !report.applied.is_empty() {
@@ -662,6 +663,13 @@ fn main() {
                                 println!(
                                     "  {} {}: deleted locally — push to propagate",
                                     "!".yellow(),
+                                    file.display()
+                                );
+                            }
+                            for file in &report.converged {
+                                println!(
+                                    "  {} {}: conflict resolved by convergence",
+                                    "✓".green(),
                                     file.display()
                                 );
                             }
