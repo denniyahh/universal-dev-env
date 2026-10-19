@@ -572,6 +572,41 @@ fn main() {
                                     s.relative_path.display()
                                 );
                             }
+                            sync::SyncStatus::LocalDeleted => {
+                                println!(
+                                    "  {} {}: Deleted locally (push to propagate)",
+                                    "!".yellow(),
+                                    s.relative_path.display()
+                                );
+                            }
+                            sync::SyncStatus::UpstreamDeleted => {
+                                println!(
+                                    "  {} {}: Deleted upstream (pull to remove)",
+                                    "↓".cyan(),
+                                    s.relative_path.display()
+                                );
+                            }
+                            sync::SyncStatus::BothDeleted => {
+                                println!(
+                                    "  {} {}: Deleted on both sides (pull to drop tracking)",
+                                    "↓".cyan(),
+                                    s.relative_path.display()
+                                );
+                            }
+                            sync::SyncStatus::Unmanaged => {
+                                println!(
+                                    "  {} {}: Unmanaged (deleted upstream; kept locally, never republished)",
+                                    "ℹ".blue(),
+                                    s.relative_path.display()
+                                );
+                            }
+                            sync::SyncStatus::Absent => {
+                                println!(
+                                    "  {} {}: Not present locally or upstream (not tracked)",
+                                    "ℹ".blue(),
+                                    s.relative_path.display()
+                                );
+                            }
                         }
                     }
                 }
@@ -594,14 +629,21 @@ fn main() {
                         "generic",
                     );
                     match engine.pull_updates(&local_project, &root_template_dir, &sync_ctx) {
-                        sync::PullResult::Success { applied_files } => {
-                            if applied_files == 0 {
+                        sync::PullResult::Success(report) => {
+                            if report.applied.is_empty() && report.deleted.is_empty() {
                                 println!("  {} No pending upstream updates to apply.", "✓".green());
-                            } else {
+                            } else if !report.applied.is_empty() {
                                 println!(
                                     "  {} Successfully pulled and materialized {} upstream update(s).",
                                     "✓".green(),
-                                    applied_files
+                                    report.applied.len()
+                                );
+                            }
+                            for file in &report.deleted {
+                                println!(
+                                    "  {} Removed {} (deleted upstream)",
+                                    "✓".green(),
+                                    file.display()
                                 );
                             }
                         }

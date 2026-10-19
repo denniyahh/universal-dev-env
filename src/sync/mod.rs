@@ -22,6 +22,21 @@ pub enum SyncStatus {
     Merged,
     Conflicted,
     Overridden,
+    /// Tracked, deleted locally, upstream unchanged: push deletes the template (D-14, D-15).
+    #[allow(dead_code)] // RED scaffold: the GREEN commit makes the classifier produce it
+    LocalDeleted,
+    /// Tracked, deleted upstream, local copy unchanged: pull deletes it (D-12).
+    #[allow(dead_code)] // RED scaffold: the GREEN commit makes the classifier produce it
+    UpstreamDeleted,
+    /// Tracked, deleted on both sides: pull drops the record (D-16).
+    #[allow(dead_code)] // RED scaffold: the GREEN commit makes the classifier produce it
+    BothDeleted,
+    /// Untracked, tombstoned, present locally only: never republished (SYNC-01).
+    #[allow(dead_code)] // RED scaffold: the GREEN commit makes the classifier produce it
+    Unmanaged,
+    /// Not present locally or upstream and not tracked.
+    #[allow(dead_code)] // RED scaffold: the GREEN commit makes the classifier produce it
+    Absent,
 }
 
 #[derive(Debug, Clone)]
@@ -114,9 +129,18 @@ pub enum PushResult {
     },
 }
 
+/// What a successful pull changed, path by path (project-relative paths).
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct PullReport {
+    /// Files written from upstream (updated or cleanly merged).
+    pub applied: Vec<PathBuf>,
+    /// Files whose tracking ended because they were deleted upstream (D-12, D-16).
+    pub deleted: Vec<PathBuf>,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum PullResult {
-    Success { applied_files: usize },
+    Success(PullReport),
     ConflictBlocked { path: PathBuf },
     IoFailed { path: PathBuf, reason: String },
 }
@@ -774,8 +798,9 @@ impl SyncEngine {
             }
         }
 
+        let mut report = PullReport::default();
         if candidates_to_write.is_empty() && converged_to_record.is_empty() {
-            return PullResult::Success { applied_files: 0 };
+            return PullResult::Success(report);
         }
 
         // Pass 2: stage every file and the new state before replacing anything (D-05).
@@ -818,9 +843,8 @@ impl SyncEngine {
             return state_pull_failure(format!("Failed to persist state: {e}"));
         }
 
-        PullResult::Success {
-            applied_files: applied.len(),
-        }
+        report.applied = applied;
+        PullResult::Success(report)
     }
 
     /// Pre-validates and pushes locally modified files to upstream template directory.
@@ -1662,24 +1686,116 @@ mod tests {
         );
     }
 
+    /// Applied-file count of a successful pull that ended no tracking; panics otherwise.
+    fn applied_only(result: PullResult) -> usize {
+        match result {
+            PullResult::Success(report) => {
+                assert!(
+                    report.deleted.is_empty(),
+                    "unexpected deletions: {report:?}"
+                );
+                report.applied.len()
+            }
+            other => panic!("expected a successful pull, got {other:?}"),
+        }
+    }
+
     #[test]
     fn test_sync_status_deletions() {
-        // Local deleted, upstream untouched
+        let base = Some("base version");
+        let cases = [
+            // (ancestor, local, upstream, expected): state table rows 1-5 and 11.
+            (base, None, base, SyncStatus::LocalDeleted),
+            (base, base, None, SyncStatus::UpstreamDeleted),
+            (
+                base,
+                None,
+                Some("upstream modified"),
+                SyncStatus::Conflicted,
+            ),
+            (base, Some("local edit"), None, SyncStatus::Conflicted),
+            (base, None, None, SyncStatus::BothDeleted),
+            (None, None, None, SyncStatus::Absent),
+            // Negative control: an empty local file is present and edited, not deleted.
+            (base, Some(""), None, SyncStatus::Conflicted),
+        ];
+        for (ancestor, local, upstream, expected) in cases {
+            assert_eq!(
+                SyncEngine::compare_3way(ancestor, local, upstream, false),
+                expected,
+                "ancestor {ancestor:?}, local {local:?}, upstream {upstream:?}"
+            );
+        }
+        // A file that exists nowhere is Absent even with a local override (invariant I2).
         assert_eq!(
-            SyncEngine::compare_3way(Some("base version"), None, Some("base version"), false,),
-            SyncStatus::LocallyModified
+            SyncEngine::compare_3way(None, None, None, true),
+            SyncStatus::Absent
         );
+    }
 
-        // Upstream deleted, local untouched
-        assert_eq!(
-            SyncEngine::compare_3way(Some("base version"), Some("base version"), None, false,),
-            SyncStatus::UpstreamModified
+    /// A project whose `.gitconfig` is recorded at `base` and whose local copy is
+    /// `local`, plus an upstream tree with no `.gitconfig` template.
+    fn upstream_deletion_fixture(
+        base: &str,
+        local: &str,
+    ) -> (tempfile::TempDir, tempfile::TempDir) {
+        let local_dir = tempdir().unwrap();
+        let upstream_dir = tempdir().unwrap();
+        let mut state = ProjectState::default();
+        state.record_file(
+            Path::new(".gitconfig"),
+            SyncEngine::fingerprint(base.as_bytes()),
+            Some(base.to_string()),
         );
+        state.save_to_dir(local_dir.path()).unwrap();
+        fs::write(local_dir.path().join(".gitconfig"), local).unwrap();
+        (local_dir, upstream_dir)
+    }
 
-        // Conflicting deletion: local deleted, upstream modified
+    #[test]
+    fn test_pull_upstream_deletion() {
+        let engine = SyncEngine::new();
+        let base = "[core]\n\tautocrlf = input\n";
+        let (local, upstream) = upstream_deletion_fixture(base, base);
+        let ctx = crate::template::TemplateContext::detect_for_project(local.path(), "p", "rust");
+
+        let result = engine.pull_updates(local.path(), upstream.path(), &ctx);
+
         assert_eq!(
-            SyncEngine::compare_3way(Some("base version"), None, Some("upstream modified"), false,),
-            SyncStatus::Conflicted
+            result,
+            PullResult::Success(PullReport {
+                applied: vec![],
+                deleted: vec![PathBuf::from(".gitconfig")],
+            })
+        );
+        assert!(
+            !local.path().join(".gitconfig").exists(),
+            "local copy must be deleted"
+        );
+        let state = ProjectState::load_from_dir(local.path()).unwrap();
+        assert_eq!(state.get_ancestor_hash(Path::new(".gitconfig")), None);
+        let tombstone = state
+            .tombstones
+            .get(".gitconfig")
+            .expect("upstream deletion must leave a tombstone");
+        assert_eq!(
+            tombstone.deleted_hash,
+            SyncEngine::fingerprint(base.as_bytes())
+        );
+        assert!(!tombstone.kept_unmanaged);
+
+        // Negative control (D-13): an edited local copy blocks the pull and keeps its bytes.
+        let edited = "[core]\n\tautocrlf = false\n";
+        let (local, upstream) = upstream_deletion_fixture(base, edited);
+        assert_eq!(
+            engine.pull_updates(local.path(), upstream.path(), &ctx),
+            PullResult::ConflictBlocked {
+                path: PathBuf::from(".gitconfig")
+            }
+        );
+        assert_eq!(
+            fs::read_to_string(local.path().join(".gitconfig")).unwrap(),
+            edited
         );
     }
 
@@ -1921,8 +2037,8 @@ mod tests {
         );
 
         assert_eq!(
-            engine.pull_updates(local_dir.path(), upstream_dir.path(), &ctx),
-            PullResult::Success { applied_files: 1 }
+            applied_only(engine.pull_updates(local_dir.path(), upstream_dir.path(), &ctx)),
+            1
         );
         assert_eq!(
             scan_status(&engine, local_dir.path(), upstream_dir.path(), ".gitconfig"),
@@ -2086,26 +2202,17 @@ mod tests {
 
         // Pull, applied upstream change.
         let (local, upstream) = setup(base, &crlf(base), &crlf(upstream_edit));
-        assert_eq!(
-            pull(local.path(), upstream.path()),
-            PullResult::Success { applied_files: 1 }
-        );
+        assert_eq!(applied_only(pull(local.path(), upstream.path())), 1);
         assert_gitconfig_ancestor(local.path(), upstream_edit, "pull applied");
 
         // Pull, clean merge: the upstream version becomes the ancestor.
         let (local, upstream) = setup(base, &crlf(local_edit), &crlf(upstream_edit));
-        assert_eq!(
-            pull(local.path(), upstream.path()),
-            PullResult::Success { applied_files: 1 }
-        );
+        assert_eq!(applied_only(pull(local.path(), upstream.path())), 1);
         assert_gitconfig_ancestor(local.path(), upstream_edit, "pull merged");
 
         // Pull, converged copies with a stale ancestor are reconciled.
         let (local, upstream) = setup(base, &crlf(upstream_edit), &crlf(upstream_edit));
-        assert_eq!(
-            pull(local.path(), upstream.path()),
-            PullResult::Success { applied_files: 0 }
-        );
+        assert_eq!(applied_only(pull(local.path(), upstream.path())), 0);
         assert_gitconfig_ancestor(local.path(), upstream_edit, "pull converged");
 
         // Push with immediate persistence records the published local version.
@@ -2163,7 +2270,7 @@ mod tests {
         );
 
         let pull_res = engine.pull_updates(local_dir.path(), upstream_dir.path(), &ctx);
-        assert_eq!(pull_res, PullResult::Success { applied_files: 3 });
+        assert_eq!(applied_only(pull_res), 3);
 
         // Verify files materialized locally
         let loc_gitconfig = local_dir.path().join(".gitconfig");
@@ -2382,7 +2489,7 @@ mod tests {
         // Negative control: without the collision all three files and the state apply.
         let (local, upstream) = staging_failure_fixture(false);
         let res = engine.pull_updates(local.path(), upstream.path(), &ctx);
-        assert_eq!(res, PullResult::Success { applied_files: 3 });
+        assert_eq!(applied_only(res), 3);
         let state = ProjectState::load_from_dir(local.path()).unwrap();
         for (_, rel, text) in STAGING_UPSTREAM {
             assert_eq!(fs::read_to_string(local.path().join(rel)).unwrap(), text);
@@ -2424,7 +2531,7 @@ mod tests {
         let ctx =
             crate::template::TemplateContext::detect_for_project(local.path(), "test-proj", "rust");
         let res = engine.pull_updates(local.path(), upstream.path(), &ctx);
-        assert_eq!(res, PullResult::Success { applied_files: 2 });
+        assert_eq!(applied_only(res), 2);
         assert_eq!(
             file_mode(&local.path().join("scripts/hooks/pre-commit")),
             0o755
@@ -2479,7 +2586,7 @@ mod tests {
         }
         state.save_to_dir(local.path()).unwrap();
         let res = engine.pull_updates(local.path(), upstream.path(), &ctx);
-        assert_eq!(res, PullResult::Success { applied_files: 4 });
+        assert_eq!(applied_only(res), 4);
         for (rel, _, before, expected) in cases {
             let path = local.path().join(rel);
             assert_eq!(
@@ -3225,7 +3332,7 @@ mod tests {
         );
         let pull_res = engine.pull_updates(local_dir.path(), upstream_dir.path(), &ctx);
         // It should NOT apply 1 update and wipe local edit; it has 0 pending upstream updates
-        assert_eq!(pull_res, PullResult::Success { applied_files: 0 });
+        assert_eq!(applied_only(pull_res), 0);
         assert_eq!(
             fs::read_to_string(&loc_gitconfig).unwrap(),
             local_edit,
@@ -3393,7 +3500,7 @@ mod tests {
 
         // Pull updates: must update mise.toml to 1.86.0 while preserving mise.local.toml
         let pull_res = engine.pull_updates(local_dir.path(), upstream_dir.path(), &ctx);
-        assert_eq!(pull_res, PullResult::Success { applied_files: 1 });
+        assert_eq!(applied_only(pull_res), 1);
         assert_eq!(fs::read_to_string(&loc_mise).unwrap(), updated_upstream);
         assert_eq!(
             fs::read_to_string(&loc_override).unwrap(),
@@ -3506,7 +3613,7 @@ mod tests {
 
         // 4. First pull: orthogonal merge produces a=2, b=2
         let pull1 = engine.pull_updates(local_dir.path(), upstream_dir.path(), &ctx);
-        assert_eq!(pull1, PullResult::Success { applied_files: 1 });
+        assert_eq!(applied_only(pull1), 1);
         assert_eq!(
             fs::read_to_string(&loc_mise).unwrap(),
             "a=2\nb=2\n",
@@ -3515,7 +3622,7 @@ mod tests {
 
         // 5. Second pull: with upstream UNCHANGED, local edit must NOT be erased!
         let pull2 = engine.pull_updates(local_dir.path(), upstream_dir.path(), &ctx);
-        assert_eq!(pull2, PullResult::Success { applied_files: 0 });
+        assert_eq!(applied_only(pull2), 0);
         assert_eq!(
             fs::read_to_string(&loc_mise).unwrap(),
             "a=2\nb=2\n",
@@ -3527,7 +3634,7 @@ mod tests {
 
         // 7. Third pull: merges new upstream change with preserved local edit to produce a=2, b=3
         let pull3 = engine.pull_updates(local_dir.path(), upstream_dir.path(), &ctx);
-        assert_eq!(pull3, PullResult::Success { applied_files: 1 });
+        assert_eq!(applied_only(pull3), 1);
         assert_eq!(
             fs::read_to_string(&loc_mise).unwrap(),
             "a=2\nb=3\n",
@@ -3932,7 +4039,7 @@ mod tests {
 
         // 4. Pull updates: reconciles ancestor state in .ude/state.json
         let pull_res = engine.pull_updates(local_dir.path(), upstream_dir.path(), &ctx);
-        assert_eq!(pull_res, PullResult::Success { applied_files: 0 });
+        assert_eq!(applied_only(pull_res), 0);
 
         let updated_state = ProjectState::load_from_dir(local_dir.path()).unwrap();
         let v2_hash = SyncEngine::compute_hash(v2_content.as_bytes());
