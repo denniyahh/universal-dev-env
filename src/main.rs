@@ -781,6 +781,7 @@ fn main() {
                             staged_files,
                             updated_records,
                             deleted,
+                            ..
                         } => {
                             println!(
                                 "  {} Sanitization gate passed: clean of secrets & parameters applied.",

@@ -113,6 +113,12 @@ pub enum PushResult {
         updated_records: Vec<(PathBuf, String, Option<String>)>,
         /// Local paths whose upstream template was deleted (D-14).
         deleted: Vec<PathBuf>,
+        /// Files with an unresolved conflict (Conflicted or ConflictPending), not
+        /// published (D-10).
+        skipped_conflicts: Vec<PathBuf>,
+        /// Files whose local and upstream edits merge cleanly, not published until the
+        /// merge is pulled (D-17).
+        skipped_merged: Vec<PathBuf>,
     },
     SecretBlocked {
         path: PathBuf,
@@ -1289,6 +1295,8 @@ impl SyncEngine {
             staged_files,
             updated_records,
             deleted,
+            skipped_conflicts: Vec::new(),
+            skipped_merged: Vec::new(),
         }
     }
 
@@ -4364,47 +4372,164 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_push_updates_blocked_on_conflict() {
-        let engine = SyncEngine::new();
-        let local_dir = tempdir().unwrap();
-        let upstream_dir = tempdir().unwrap();
-
-        // Record ancestor for .gitconfig
-        let mut state = ProjectState::default();
-        let base_content = "[core]\n  autocrlf = false\n";
-        let base_hash = SyncEngine::compute_hash(base_content.as_bytes());
-        state.record_file(
-            Path::new(".gitconfig"),
-            base_hash,
-            Some(base_content.to_string()),
-        );
-        state.save_to_dir(local_dir.path()).unwrap();
-
-        // Local edit
-        let loc_gitconfig = local_dir.path().join(".gitconfig");
-        fs::write(&loc_gitconfig, "[core]\n  autocrlf = local_edit\n").unwrap();
-
-        // Upstream edit
-        let up_gitconfig = upstream_dir.path().join("projects/generic/gitconfig.repo");
-        fs::create_dir_all(up_gitconfig.parent().unwrap()).unwrap();
-        fs::write(&up_gitconfig, "[core]\n  autocrlf = upstream_edit\n").unwrap();
-
-        let res = engine.push_updates(
-            local_dir.path(),
-            upstream_dir.path(),
-            "/home/alice",
-            "/home/alice/.config",
-            false,
-            true,
-        );
-
-        match res {
-            PushResult::ConflictBlocked { path } => {
-                assert_eq!(path, PathBuf::from(".gitconfig"));
+    /// Bytes of every regular file under `root`, keyed by relative path.
+    fn tree_bytes(root: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+        let mut found = std::collections::BTreeMap::new();
+        let mut pending = vec![root.to_path_buf()];
+        while let Some(dir) = pending.pop() {
+            for entry in fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    pending.push(path);
+                } else {
+                    let rel = path.strip_prefix(root).unwrap().to_path_buf();
+                    found.insert(rel, fs::read(&path).unwrap());
+                }
             }
-            _ => panic!("Expected ConflictBlocked on push, got {:?}", res),
         }
+        found
+    }
+
+    /// The skip lists of a successful push (panics on any other result).
+    fn push_skips(result: &PushResult) -> (Vec<PathBuf>, Vec<PathBuf>) {
+        let PushResult::Success {
+            skipped_conflicts,
+            skipped_merged,
+            ..
+        } = result
+        else {
+            panic!("expected a successful push, got {result:?}");
+        };
+        (skipped_conflicts.clone(), skipped_merged.clone())
+    }
+
+    #[test]
+    fn test_push_skips_conflicts_and_merged() {
+        let engine = SyncEngine::new();
+        let local = tempdir().unwrap();
+        let upstream = tempdir().unwrap();
+        let ignore_base = "target/\n*.log\n.env\nbuild/\ndist/\n";
+        let hook_base = "#!/bin/sh\nexit 0\n";
+        let mut state = ProjectState::default();
+        for (rel, base) in [
+            (".gitconfig", CONFLICT_BASE),
+            (".gitignore", ignore_base),
+            ("scripts/hooks/pre-commit", hook_base),
+        ] {
+            state.record_file(
+                Path::new(rel),
+                SyncEngine::fingerprint(base.as_bytes()),
+                Some(base.to_string()),
+            );
+        }
+        state.save_to_dir(local.path()).unwrap();
+
+        // .gitconfig: both sides edit the same line (Conflicted). .gitignore: local
+        // edits line 1, upstream line 4 (Merged). pre-commit: local edit only.
+        write_upstream(local.path(), ".gitconfig", CONFLICT_LOCAL.as_bytes());
+        write_upstream(
+            local.path(),
+            ".gitignore",
+            b"target-local/\n*.log\n.env\nbuild/\ndist/\n",
+        );
+        let local_hook = "#!/bin/sh\necho local\nexit 0\n";
+        write_upstream(
+            local.path(),
+            "scripts/hooks/pre-commit",
+            local_hook.as_bytes(),
+        );
+        write_upstream(
+            upstream.path(),
+            "projects/generic/gitconfig.repo",
+            CONFLICT_UPSTREAM.as_bytes(),
+        );
+        write_upstream(
+            upstream.path(),
+            "projects/generic/gitignore.repo",
+            b"target/\n*.log\n.env\nbuild-up/\ndist/\n",
+        );
+        write_upstream(
+            upstream.path(),
+            "projects/generic/hooks/pre-commit",
+            hook_base.as_bytes(),
+        );
+        assert_eq!(
+            scan_status(&engine, local.path(), upstream.path(), ".gitignore"),
+            SyncStatus::Merged,
+            "fixture: .gitignore must merge cleanly"
+        );
+        let local_before = tree_bytes(local.path());
+        let upstream_before = tree_bytes(upstream.path());
+
+        let result = push_dirs(&engine, local.path(), upstream.path());
+        assert_eq!(
+            push_skips(&result),
+            (
+                vec![PathBuf::from(".gitconfig")],
+                vec![PathBuf::from(".gitignore")]
+            )
+        );
+        let PushResult::Success { staged_files, .. } = &result else {
+            unreachable!("push_skips checked the variant");
+        };
+        let hook_template = upstream.path().join("projects/generic/hooks/pre-commit");
+        assert_eq!(staged_files, &vec![hook_template.clone()]);
+        assert_eq!(fs::read_to_string(&hook_template).unwrap(), local_hook);
+
+        // Nothing about a skipped file is written upstream or locally.
+        let mut upstream_after = tree_bytes(upstream.path());
+        let mut upstream_expected = upstream_before.clone();
+        upstream_after.remove(Path::new("projects/generic/hooks/pre-commit"));
+        upstream_expected.remove(Path::new("projects/generic/hooks/pre-commit"));
+        assert_eq!(upstream_after, upstream_expected);
+        let mut local_after = tree_bytes(local.path());
+        let mut local_expected = local_before.clone();
+        local_after.remove(Path::new(STATE_FILE_REL));
+        local_expected.remove(Path::new(STATE_FILE_REL));
+        assert_eq!(
+            local_after, local_expected,
+            "push never rewrites local files"
+        );
+
+        // A ConflictPending file (open record after a conflicted pull) is skipped too.
+        let (pending_local, pending_upstream) = conflicted_gitconfig(&engine);
+        assert_eq!(
+            scan_status(
+                &engine,
+                pending_local.path(),
+                pending_upstream.path(),
+                ".gitconfig"
+            ),
+            SyncStatus::ConflictPending
+        );
+        let pending_template = fs::read(upstream_gitconfig_path(pending_upstream.path())).unwrap();
+        let pending = push_dirs(&engine, pending_local.path(), pending_upstream.path());
+        assert_eq!(
+            push_skips(&pending),
+            (vec![PathBuf::from(".gitconfig")], Vec::new())
+        );
+        assert_eq!(
+            fs::read(upstream_gitconfig_path(pending_upstream.path())).unwrap(),
+            pending_template
+        );
+
+        // Negative control: a push with only a modified hook skips nothing.
+        let clean_local = tempdir().unwrap();
+        let clean_upstream = tempdir().unwrap();
+        write_upstream(
+            clean_local.path(),
+            "scripts/hooks/pre-commit",
+            local_hook.as_bytes(),
+        );
+        let clean = push_dirs(&engine, clean_local.path(), clean_upstream.path());
+        assert_eq!(push_skips(&clean), (Vec::new(), Vec::new()));
+        assert!(matches!(
+            clean,
+            PushResult::Success {
+                synced_files: 1,
+                ..
+            }
+        ));
     }
 
     #[test]
