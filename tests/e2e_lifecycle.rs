@@ -1903,3 +1903,27 @@ fn test_reinit_keeps_ancestor_of_unedited_gitignore() {
         outputs(&pull)
     );
 }
+
+#[test]
+fn test_init_refuses_corrupt_prior_state() {
+    let temp = tempdir().unwrap();
+    let ude = sync_cli(temp.path());
+    let project = temp.path().join("project");
+    let state = project.join(".ude/state.json");
+    fs::create_dir_all(state.parent().unwrap()).unwrap();
+    fs::write(&state, "{not json").unwrap();
+    let path = project.to_string_lossy().to_string();
+
+    let init = ude(&project, &["init", "--path", &path, "--type", "rust"]);
+    assert_eq!(init.status.code(), Some(2), "{}", outputs(&init));
+    assert_eq!(fs::read_to_string(&state).unwrap(), "{not json");
+    assert!(
+        !project.join(".gitignore").exists() && !project.join("mise.toml").exists(),
+        "init must stop before touching any file. {}",
+        outputs(&init)
+    );
+
+    // Negative control: without the corrupt state the same init succeeds.
+    fs::remove_file(&state).unwrap();
+    reinit_rust(&ude, &project);
+}
