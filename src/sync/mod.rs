@@ -178,6 +178,36 @@ fn conflict_side<'a>(
     }
 }
 
+/// Project-relative paths UDE manages, in scan order.
+pub const MANAGED_FILES: [&str; 11] = [
+    ".gitconfig",
+    ".gitignore",
+    "scripts/hooks/commit-msg",
+    "scripts/hooks/pre-commit",
+    "scripts/hooks/pre-push",
+    "scripts/check-in-container.sh",
+    "mise.toml",
+    ".agents/AGENTS.md",
+    "scratch/sync-personal-env.sh",
+    "scratch/new-worktree.sh",
+    "scratch/check-publish-boundary.sh",
+];
+
+/// What `ude sync resolve` recorded for a conflicted file (state table R1-R4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolveOutcome {
+    /// R1: the local file is kept against the recorded upstream; push publishes it.
+    KeptLocal,
+    /// R2: the local deletion is kept against the recorded upstream; push deletes the
+    /// upstream template (D-14).
+    AcceptedLocalDeletion,
+    /// R3: upstream deleted the file and the local copy is kept as an unmanaged file
+    /// (tombstone with `kept_unmanaged`, D-13); it is never republished.
+    KeptUnmanaged,
+    /// R4: upstream deleted the file and so did the user; tracking ends.
+    DroppedDeleted,
+}
+
 /// Interval between attempts to take a contended remote cache lock.
 const LOCK_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
@@ -485,22 +515,7 @@ impl SyncEngine {
         let project_state = ProjectState::load_from_dir(local_root)?;
         let renderer = crate::template::TemplateRenderer::new();
 
-        // Inspect known managed files
-        let managed_files = vec![
-            PathBuf::from(".gitconfig"),
-            PathBuf::from(".gitignore"),
-            PathBuf::from("scripts/hooks/commit-msg"),
-            PathBuf::from("scripts/hooks/pre-commit"),
-            PathBuf::from("scripts/hooks/pre-push"),
-            PathBuf::from("scripts/check-in-container.sh"),
-            PathBuf::from("mise.toml"),
-            PathBuf::from(".agents/AGENTS.md"),
-            PathBuf::from("scratch/sync-personal-env.sh"),
-            PathBuf::from("scratch/new-worktree.sh"),
-            PathBuf::from("scratch/check-publish-boundary.sh"),
-        ];
-
-        for rel in managed_files {
+        for rel in MANAGED_FILES.iter().map(PathBuf::from) {
             let local_path = local_root.join(&rel);
             let upstream_path = map_to_upstream(upstream_root, &rel);
 
@@ -578,6 +593,70 @@ impl SyncEngine {
         }
 
         Ok(states)
+    }
+
+    /// Marks the open conflict on `rel` as resolved with the file's current local state
+    /// (D-09), against the upstream version recorded when the conflict was detected.
+    /// Offline: reads only `state.json` and the local file.
+    ///
+    /// The outcome follows state table rows R1-R4. The new state is staged first, the
+    /// `<rel>.conflict` sidecar is removed next and the state is committed last, so a
+    /// failure never leaves the conflict cleared while its sidecar remains: until the
+    /// commit, `state.json` is untouched and the conflict stays open.
+    pub fn resolve_conflict(
+        &self,
+        local_root: &Path,
+        rel: &Path,
+    ) -> Result<ResolveOutcome, String> {
+        let rel = managed_resolve_target(rel)?;
+        let mut state = ProjectState::load_from_dir(local_root)?;
+        let Some(record) = state.conflict(rel).cloned() else {
+            return Err(format!(
+                "No open conflict for {}; nothing to resolve",
+                rel.display()
+            ));
+        };
+        let local_bytes = read_resolve_local(local_root, rel)?;
+        let ancestor_hash = state.get_ancestor_hash(rel).map(String::from);
+
+        let outcome = match (record.upstream_hash, local_bytes) {
+            (Some(upstream_hash), local) => {
+                state.record_file(rel, upstream_hash, record.upstream_content);
+                if local.is_some() {
+                    ResolveOutcome::KeptLocal
+                } else {
+                    ResolveOutcome::AcceptedLocalDeletion
+                }
+            }
+            (None, Some(bytes)) => {
+                let deleted_hash = ancestor_hash.unwrap_or_else(|| Self::fingerprint(&bytes));
+                state.remove_file(rel);
+                state.record_tombstone(rel, deleted_hash, true);
+                ResolveOutcome::KeptUnmanaged
+            }
+            (None, None) => {
+                // With no files record there is no fingerprint to tombstone (same end
+                // state as convergence row 16).
+                if let Some(deleted_hash) = ancestor_hash {
+                    state.remove_file(rel);
+                    state.record_tombstone(rel, deleted_hash, false);
+                }
+                ResolveOutcome::DroppedDeleted
+            }
+        };
+        state.clear_conflict(rel);
+
+        let staged = state.stage_to_dir(local_root)?;
+        remove_conflict_sidecar(local_root, rel)?;
+        let sidecar = sidecar_rel(rel);
+        staged.commit().map_err(|e| {
+            format!(
+                "Removed {} but failed to save state: {e}; {} is still unresolved (the next ude sync pull regenerates the sidecar)",
+                sidecar.display(),
+                rel.display()
+            )
+        })?;
+        Ok(outcome)
     }
 
     /// Ensures a remote git repository is cached locally and updated.
@@ -1680,6 +1759,76 @@ fn validate_safe_write_target(local_root: &Path, rel_path: &Path) -> Result<Path
     }
 
     Ok(target)
+}
+
+/// The [`MANAGED_FILES`] entry `rel` names. Refuses absolute paths, `..` and every
+/// other non-normal component before the managed-list check.
+fn managed_resolve_target(rel: &Path) -> Result<&'static Path, String> {
+    let all_normal = rel
+        .components()
+        .all(|comp| matches!(comp, std::path::Component::Normal(_)));
+    if rel.as_os_str().is_empty() || !all_normal {
+        return Err(format!("Refusing to resolve unsafe path {}", rel.display()));
+    }
+    MANAGED_FILES
+        .iter()
+        .map(Path::new)
+        .find(|managed| *managed == rel)
+        .ok_or_else(|| format!("{} is not a UDE-managed file", rel.display()))
+}
+
+/// The local bytes of the managed file `rel`, or `None` when it is absent. A symlink,
+/// a symlinked parent or a non-regular file is an error.
+fn read_resolve_local(local_root: &Path, rel: &Path) -> Result<Option<Vec<u8>>, String> {
+    let path = validate_safe_write_target(local_root, rel)
+        .map_err(|e| format!("Cannot resolve {}: {e}", rel.display()))?;
+    match fs::symlink_metadata(&path) {
+        Ok(meta) if meta.is_file() => fs::read(&path)
+            .map(Some)
+            .map_err(|e| format!("Failed to read {}: {e}", path.display())),
+        Ok(_) => Err(format!(
+            "Cannot resolve {}: not a regular file",
+            rel.display()
+        )),
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            Ok(None)
+        }
+        Err(e) => Err(format!("Failed to inspect {}: {e}", path.display())),
+    }
+}
+
+/// Removes the regular file `<rel>.conflict` if it exists. Refuses a symlinked,
+/// escaping or non-regular sidecar, which leaves the conflict unresolved.
+fn remove_conflict_sidecar(local_root: &Path, rel: &Path) -> Result<(), String> {
+    let sidecar = sidecar_rel(rel);
+    let unresolved = |reason: String| {
+        format!(
+            "Cannot remove {}: {reason}; {} is still unresolved",
+            sidecar.display(),
+            rel.display()
+        )
+    };
+    let path = validate_safe_write_target(local_root, &sidecar).map_err(unresolved)?;
+    match fs::symlink_metadata(&path) {
+        Ok(meta) if meta.is_file() => {}
+        Ok(_) => return Err(unresolved("not a regular file".to_string())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(unresolved(e.to_string())),
+    }
+    match fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!(
+            "Failed to remove {}: {e}; {} is still unresolved",
+            sidecar.display(),
+            rel.display()
+        )),
+    }
 }
 
 fn map_to_upstream(upstream_root: &Path, rel: &Path) -> Option<PathBuf> {

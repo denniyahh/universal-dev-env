@@ -115,4 +115,9 @@ pub enum SyncAction {
         #[arg(long)]
         pr: bool,
     },
+    /// Mark a conflicted file as resolved using its current local state
+    Resolve {
+        /// Managed file path relative to the project root
+        file: PathBuf,
+    },
 }
