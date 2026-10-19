@@ -307,14 +307,15 @@ impl SyncEngine {
     /// file and the upstream template (`None` = absent; an empty file is present).
     ///
     /// Implements the C-less rows of the phase sync state table: deletion rows 1-5,
-    /// the all-present rows (6), and the no-ancestor rows 8-11. A local override only
-    /// changes rows where the local file is present, as before (invariant I2).
+    /// the all-present rows (6), and the no-ancestor rows 7-11. `tombstoned` (the path
+    /// has a tombstone) matters only without an ancestor record (invariant I1). A local
+    /// override only changes rows where the local file is present, as before (I2).
     pub fn compare_3way_hashes(
         ancestor_hash: Option<&str>,
         local_hash: Option<&str>,
         upstream_hash: Option<&str>,
         has_local_override: bool,
-        _tombstoned: bool, // RED scaffold: the GREEN commit classifies with it
+        tombstoned: bool,
     ) -> SyncStatus {
         let local_change = if has_local_override {
             SyncStatus::Overridden
@@ -341,7 +342,8 @@ impl SyncEngine {
             (Some(o), Some(l), Some(_)) if l == o => SyncStatus::UpstreamModified,
             (Some(o), Some(_), Some(u)) if u == o => local_change,
             (Some(_), Some(_), Some(_)) => SyncStatus::Conflicted,
-            // Rows 8-10: untracked.
+            // Rows 7-10: untracked.
+            (None, Some(_), None) if tombstoned => SyncStatus::Unmanaged,
             (None, Some(_), None) => local_change,
             (None, None, Some(_)) => SyncStatus::UpstreamModified,
             (None, Some(l), Some(u)) if l == u => in_sync,
@@ -359,13 +361,14 @@ impl SyncEngine {
         local: Option<FileVersion<'_>>,
         upstream: Option<FileVersion<'_>>,
         has_local_override: bool,
+        tombstoned: bool,
     ) -> (SyncStatus, Option<String>) {
         let status = Self::compare_3way_hashes(
             ancestor.map(|v| v.fingerprint),
             local.map(|v| v.fingerprint),
             upstream.map(|v| v.fingerprint),
             has_local_override,
-            false,
+            tombstoned,
         );
         if status != SyncStatus::Conflicted {
             return (status, None);
@@ -406,6 +409,7 @@ impl SyncEngine {
             FileVersion::new(local_fp.as_deref(), local_content),
             FileVersion::new(upstream_fp.as_deref(), upstream_content),
             has_local_override,
+            false,
         )
     }
 
@@ -511,6 +515,7 @@ impl SyncEngine {
                 FileVersion::new(local_hash.as_deref(), local_content.as_deref()),
                 FileVersion::new(upstream_hash.as_deref(), upstream_content.as_deref()),
                 has_local_override,
+                project_state.tombstone(&rel).is_some(),
             );
 
             states.push(FileSyncState {
@@ -781,21 +786,32 @@ impl SyncEngine {
             }
         }
 
-        // Deleted upstream with an unchanged local copy (D-12): delete it, end tracking.
+        // Deletions. UpstreamDeleted (D-12) deletes the unchanged local copy; BothDeleted
+        // (D-16) has no file to touch. Both end tracking with a tombstone. LocalDeleted
+        // (D-15) stays deleted until a push propagates it.
+        let mut report = PullReport::default();
         let mut upstream_deleted = Vec::new();
+        let mut both_deleted = Vec::new();
         for s in &states {
-            if s.status == SyncStatus::UpstreamDeleted
-                && let Some(ancestor) = &s.ancestor_hash
-            {
-                upstream_deleted.push((s.relative_path.clone(), ancestor.clone()));
+            match (&s.status, &s.ancestor_hash) {
+                (SyncStatus::UpstreamDeleted, Some(ancestor)) => {
+                    upstream_deleted.push((s.relative_path.clone(), ancestor.clone()));
+                }
+                (SyncStatus::BothDeleted, Some(ancestor)) => {
+                    both_deleted.push((s.relative_path.clone(), ancestor.clone()));
+                }
+                (SyncStatus::LocalDeleted, _) => {
+                    report.locally_deleted_pending.push(s.relative_path.clone());
+                }
+                _ => {}
             }
         }
 
-        let mut report = PullReport::default();
         // Nothing to write, delete or record: skip staging but keep the report built so far.
         if candidates_to_write.is_empty()
             && converged_to_record.is_empty()
             && upstream_deleted.is_empty()
+            && both_deleted.is_empty()
         {
             return PullResult::Success(report);
         }
@@ -825,6 +841,12 @@ impl SyncEngine {
             if let Err(reason) = transaction.stage_delete(&rel) {
                 return PullResult::IoFailed { path: rel, reason };
             }
+            project_state.remove_file(&rel);
+            project_state.record_tombstone(&rel, ancestor, false);
+            report.deleted.push(rel);
+        }
+
+        for (rel, ancestor) in both_deleted {
             project_state.remove_file(&rel);
             project_state.record_tombstone(&rel, ancestor, false);
             report.deleted.push(rel);
