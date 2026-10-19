@@ -876,12 +876,15 @@ fn main() {
                                         );
                                         std::process::exit(EXIT_HARD_FAILURE);
                                     }
+                                    // D-18: nothing was published and the cache commit
+                                    // was undone; ancestors are not advanced.
                                     Err(sync::PushRemoteError::UpstreamMoved { branch }) => {
                                         eprintln!(
-                                            "  {} Failed to push to remote: upstream branch {branch} moved",
+                                            "  {} Upstream branch {branch} moved since UDE fetched it; nothing was published.",
                                             "✗".red()
                                         );
-                                        std::process::exit(EXIT_HARD_FAILURE);
+                                        eprintln!("  upstream changed, run ude sync pull");
+                                        std::process::exit(EXIT_DRIFT);
                                     }
                                 }
                             }
