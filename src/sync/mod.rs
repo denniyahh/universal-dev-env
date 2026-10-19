@@ -6072,6 +6072,58 @@ mod tests {
         bare
     }
 
+    /// `git status` decides whether anything is published, so its failure (here: the
+    /// directory is not a repository) is a hard error, never "nothing to push".
+    #[test]
+    fn test_stage_publication_fails_when_git_status_fails() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let rel = Path::new("projects/generic/gitconfig.repo");
+
+        let not_repo = tempdir().unwrap();
+        let probe = git
+            .cmd(not_repo.path())
+            .args(["rev-parse", "--git-dir"])
+            .output()
+            .unwrap();
+        assert!(
+            !probe.status.success(),
+            "fixture dir must not be inside a git repository"
+        );
+        let edited = not_repo.path().join(rel);
+        fs::create_dir_all(edited.parent().unwrap()).unwrap();
+        fs::write(&edited, "[core]\n").unwrap();
+        let err = engine
+            .stage_publication(not_repo.path(), std::slice::from_ref(&edited))
+            .expect_err("a failed git status must be an error");
+        assert!(err.contains("git status"), "{err}");
+        let pushed = engine.push_to_remote(not_repo.path(), "main", false, &[edited], "");
+        assert!(
+            matches!(pushed, Err(PushRemoteError::Failed(_))),
+            "{pushed:?}"
+        );
+
+        // Negative control: in a real checkout a clean tree is "nothing to push" and an
+        // edit is staged.
+        let repo = tempdir().unwrap();
+        git.run(repo.path(), &["init", "-b", "main"]);
+        let tracked = repo.path().join(rel);
+        fs::create_dir_all(tracked.parent().unwrap()).unwrap();
+        fs::write(&tracked, "[core]\n").unwrap();
+        git.run(repo.path(), &["add", "-A"]);
+        git.run(repo.path(), &["commit", "-m", "seed"]);
+        assert_eq!(
+            engine.stage_publication(repo.path(), std::slice::from_ref(&tracked)),
+            Ok(None)
+        );
+        fs::write(&tracked, "[core]\n  autocrlf = false\n").unwrap();
+        let staged = engine
+            .stage_publication(repo.path(), std::slice::from_ref(&tracked))
+            .unwrap()
+            .expect("the edit must be staged");
+        assert!(staged.contains(rel), "{staged:?}");
+    }
+
     /// `checkout_dir` is the cache checkout's git toplevel whether or not the remote
     /// keeps its templates under `templates/`.
     #[test]
