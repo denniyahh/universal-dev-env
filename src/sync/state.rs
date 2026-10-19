@@ -15,6 +15,20 @@ pub struct FileStateRecord {
     pub ancestor_content: Option<String>,
 }
 
+/// Marker for a managed path whose file was deleted while UDE tracked it.
+///
+/// It replaces the path's files record, so a later local re-creation is not mistaken
+/// for a new file to publish (SYNC-01). Tombstones have no TTL (D-01).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Tombstone {
+    /// Fingerprint of the last tracked version (the ancestor at deletion time).
+    pub deleted_hash: String,
+    /// Seconds since the Unix epoch when the tombstone was written.
+    pub deleted_at: Option<String>,
+    /// Whether the user chose to keep a local copy as an unmanaged file.
+    pub kept_unmanaged: bool,
+}
+
 /// Project synchronization state persisted in `.ude/state.json`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProjectState {
@@ -22,6 +36,9 @@ pub struct ProjectState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_type: Option<String>,
     pub files: BTreeMap<String, FileStateRecord>,
+    /// Paths deleted while tracked, keyed like `files`. A path never has both.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub tombstones: BTreeMap<String, Tombstone>,
 }
 
 /// Newest `.ude/state.json` schema version this build reads and writes.
@@ -73,6 +90,7 @@ impl Default for ProjectState {
             version: CURRENT_STATE_VERSION,
             project_type: None,
             files: BTreeMap::new(),
+            tombstones: BTreeMap::new(),
         }
     }
 }
