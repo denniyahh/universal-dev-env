@@ -1162,3 +1162,142 @@ fn test_sync_pull_conflict_exits_1_and_writes_sidecar() {
     );
     assert!(!ignored("mise.toml"));
 }
+
+/// A `ude` runner for sync tests: fake HOME / XDG dirs under `root`, the fixture
+/// gitconfig as the only global config, inherited repo-local git variables removed.
+fn sync_cli(root: &Path) -> impl Fn(&Path, &[&str]) -> Output {
+    let bin = env!("CARGO_BIN_EXE_ude");
+    let fake_home = root.join("fake_home");
+    let fake_config = fake_home.join(".config");
+    fs::create_dir_all(fake_config.join("git")).unwrap();
+    let gitconfig = fake_config.join("git/config");
+    fs::write(&gitconfig, FIXTURE_GITCONFIG).unwrap();
+    let cache_dir = root.join("cache");
+    fs::create_dir_all(&cache_dir).unwrap();
+    move |project: &Path, args: &[&str]| {
+        let mut cmd = Command::new(bin);
+        cmd.current_dir(project).args(args);
+        for name in FIXTURE_GIT_LOCAL_ENV_VARS {
+            cmd.env_remove(name);
+        }
+        cmd.env("HOME", &fake_home)
+            .env("XDG_CONFIG_HOME", &fake_config)
+            .env("GIT_CONFIG_GLOBAL", &gitconfig)
+            .env("XDG_CACHE_HOME", &cache_dir)
+            .stdin(Stdio::null())
+            .output()
+            .expect("ude execution")
+    }
+}
+
+/// Exit code plus both streams, for assertion messages.
+fn outputs(out: &Output) -> String {
+    format!(
+        "exit {:?}\nOut: {}\nErr: {}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    )
+}
+
+/// Commits `files` (path under the repo root, content) to `bare`'s main through a
+/// fresh clone at `clone`.
+fn commit_upstream(git: &GitFixture, bare: &Path, clone: &Path, files: &[(&str, &str)]) {
+    if !clone.exists() {
+        git.run(
+            clone.parent().unwrap(),
+            &[
+                "clone",
+                "-q",
+                &bare.to_string_lossy(),
+                &clone.to_string_lossy(),
+            ],
+        );
+    }
+    git.run(clone, &["pull", "-q", "origin", "main"]);
+    for (path, content) in files {
+        let target = clone.join(path);
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::write(target, content).unwrap();
+    }
+    git.run(clone, &["add", "-A"]);
+    git.run(clone, &["commit", "-q", "-m", "upstream edit"]);
+    git.run(clone, &["push", "-q", "origin", "main"]);
+}
+
+/// Content of `path` on `bare`'s main branch.
+fn remote_file(git: &GitFixture, bare: &Path, path: &str) -> String {
+    git.output(bare, &["show", &format!("main:{path}")])
+}
+
+const MISE_TEMPLATE: &str = "templates/projects/agents/mise.toml.jinja";
+
+#[test]
+fn test_sync_resolve_end_to_end() {
+    let bin = env!("CARGO_BIN_EXE_ude");
+    let temp = tempdir().unwrap();
+    let git = GitFixture::new();
+    let ude = sync_cli(temp.path());
+
+    // Conflicting appends to mise.toml locally and upstream.
+    let project = temp.path().join("project");
+    let init_mise = init_rust_project(bin, &project);
+    let bare = seed_mise_remote(&git, temp.path(), "remote", &init_mise);
+    let bare_url = bare.to_string_lossy().to_string();
+    let local_mise = format!("{init_mise}# local edit\n");
+    fs::write(project.join("mise.toml"), &local_mise).unwrap();
+    commit_upstream(
+        &git,
+        &bare,
+        &temp.path().join("upstream-clone"),
+        &[(MISE_TEMPLATE, &format!("{init_mise}# upstream edit\n"))],
+    );
+
+    let pull = ude(&project, &["sync", "pull", "--remote", &bare_url]);
+    assert_eq!(pull.status.code(), Some(1), "{}", outputs(&pull));
+    assert!(project.join("mise.toml.conflict").is_file());
+
+    // Resolve needs no --remote: it works from the recorded upstream version.
+    let resolve = ude(&project, &["sync", "resolve", "mise.toml"]);
+    assert_eq!(resolve.status.code(), Some(0), "{}", outputs(&resolve));
+    assert!(
+        String::from_utf8_lossy(&resolve.stdout).contains("Resolved mise.toml"),
+        "{}",
+        outputs(&resolve)
+    );
+    assert!(
+        !project.join("mise.toml.conflict").exists(),
+        "resolve must remove the sidecar"
+    );
+    assert_eq!(
+        fs::read_to_string(project.join("mise.toml")).unwrap(),
+        local_mise,
+        "resolve keeps the local file as is"
+    );
+
+    let status = ude(&project, &["sync", "status", "--remote", &bare_url]);
+    assert!(
+        String::from_utf8_lossy(&status.stdout).contains("mise.toml: Locally Modified"),
+        "{}",
+        outputs(&status)
+    );
+
+    let push = ude(&project, &["sync", "push", "--remote", &bare_url]);
+    assert_eq!(push.status.code(), Some(0), "{}", outputs(&push));
+    assert_eq!(
+        format!("{}\n", remote_file(&git, &bare, MISE_TEMPLATE)),
+        local_mise,
+        "push publishes the resolved local content"
+    );
+
+    // Negative control: there is nothing left to resolve.
+    let again = ude(&project, &["sync", "resolve", "mise.toml"]);
+    assert_eq!(again.status.code(), Some(2), "{}", outputs(&again));
+    assert!(
+        String::from_utf8_lossy(&again.stderr)
+            .to_lowercase()
+            .contains("no open conflict"),
+        "{}",
+        outputs(&again)
+    );
+}
