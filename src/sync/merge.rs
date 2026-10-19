@@ -29,13 +29,24 @@ pub fn merge_texts(ancestor_lf: &str, local_lf: &str, upstream_lf: &str) -> Merg
     // diffy calls the sides "ours" and "theirs": ours = local, theirs = upstream.
     match opts.merge(ancestor_lf, local_lf, upstream_lf) {
         Ok(merged) => MergeOutcome::Clean(merged),
-        Err(marked) => MergeOutcome::Conflict(marked),
+        Err(marked) => MergeOutcome::Conflict(relabel_conflict_markers(&marked)),
     }
 }
 
 /// Rewrites diffy's hard-coded conflict labels to LOCAL / ANCESTOR / UPSTREAM.
+///
+/// diffy has no label option and always writes `ours`, `original` and `theirs`.
+/// Only lines that are exactly one of those marker lines, LF included, are
+/// rewritten; a content line that merely resembles a marker is left untouched.
 pub fn relabel_conflict_markers(text: &str) -> String {
-    text.to_string()
+    text.split_inclusive('\n')
+        .map(|line| match line {
+            "<<<<<<< ours\n" => "<<<<<<< LOCAL\n",
+            "||||||| original\n" => "||||||| ANCESTOR\n",
+            ">>>>>>> theirs\n" => ">>>>>>> UPSTREAM\n",
+            other => other,
+        })
+        .collect()
 }
 
 /// One version of a conflicted file, as shown in its `.conflict` sidecar.
@@ -49,14 +60,91 @@ pub enum ConflictSide<'a> {
     Binary { fingerprint: &'a str },
 }
 
-/// Renders the body of the `.conflict` sidecar for `rel`.
+/// Explains the three sidecar sections; the last fixed line of every header.
+const SIDECAR_LEGEND: &str =
+    "# LOCAL = your working copy, ANCESTOR = last synced version, UPSTREAM = central template\n";
+
+/// Sidecar body when any side is binary: there is no meaningful text diff.
+const BINARY_BODY: &str = "# Binary content: no text diff available.\n";
+
+/// Renders the body of the `.conflict` sidecar for the managed file `rel`.
+///
+/// The result is a header of `# ` lines (file, resolve command, section legend,
+/// then one note per absent or binary side), a blank line, and a body:
+/// - any binary side: a single comment line, no markers;
+/// - three text sides: the relabeled diff3 conflict from [`merge_texts`];
+/// - otherwise (a deletion, or text diffy unexpectedly merges cleanly): an
+///   explicit LOCAL / ANCESTOR / UPSTREAM block where an absent side is an empty
+///   section.
+///
+/// Text inputs must be LF-normalized. Every marker starts a line. This is a pure
+/// function; writing the file is the caller's job.
 pub fn render_conflict_sidecar(
-    _rel: &Path,
-    _ancestor: ConflictSide<'_>,
-    _local: ConflictSide<'_>,
-    _upstream: ConflictSide<'_>,
+    rel: &Path,
+    ancestor: ConflictSide<'_>,
+    local: ConflictSide<'_>,
+    upstream: ConflictSide<'_>,
 ) -> String {
-    String::new()
+    let rel = rel.display();
+    let mut out = format!(
+        "# UDE sync conflict: {rel}\n# Resolve with: ude sync resolve {rel}\n{SIDECAR_LEGEND}"
+    );
+    for (label, absent_note, side) in [
+        ("LOCAL", "deleted locally", local),
+        ("ANCESTOR", "none (never synced)", ancestor),
+        ("UPSTREAM", "deleted upstream", upstream),
+    ] {
+        match side {
+            ConflictSide::Text(_) => {}
+            ConflictSide::Absent => out.push_str(&format!("# {label}: {absent_note}\n")),
+            ConflictSide::Binary { fingerprint } => {
+                out.push_str(&format!("# {label} fingerprint: {fingerprint}\n"));
+            }
+        }
+    }
+    out.push('\n');
+    out.push_str(&sidecar_body(ancestor, local, upstream));
+    out
+}
+
+/// The part of the sidecar after the header and its blank line.
+fn sidecar_body(
+    ancestor: ConflictSide<'_>,
+    local: ConflictSide<'_>,
+    upstream: ConflictSide<'_>,
+) -> String {
+    let sides = [local, ancestor, upstream];
+    if sides
+        .iter()
+        .any(|side| matches!(side, ConflictSide::Binary { .. }))
+    {
+        return BINARY_BODY.to_string();
+    }
+    if let (ConflictSide::Text(a), ConflictSide::Text(l), ConflictSide::Text(u)) =
+        (ancestor, local, upstream)
+        && let MergeOutcome::Conflict(marked) = merge_texts(a, l, u)
+    {
+        return marked;
+    }
+    let mut out = String::from("<<<<<<< LOCAL\n");
+    push_section(&mut out, local);
+    out.push_str("||||||| ANCESTOR\n");
+    push_section(&mut out, ancestor);
+    out.push_str("=======\n");
+    push_section(&mut out, upstream);
+    out.push_str(">>>>>>> UPSTREAM\n");
+    out
+}
+
+/// Appends a text side as one explicit-block section, LF-terminated so the next
+/// marker starts a line. Absent sides (and binary, never reached) add nothing.
+fn push_section(out: &mut String, side: ConflictSide<'_>) {
+    if let ConflictSide::Text(text) = side {
+        out.push_str(text);
+        if !text.is_empty() && !text.ends_with('\n') {
+            out.push('\n');
+        }
+    }
 }
 
 #[cfg(test)]
