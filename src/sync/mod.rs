@@ -553,6 +553,16 @@ impl SyncEngine {
                 has_local_override,
                 project_state.tombstone(&rel).is_some(),
             );
+            // An open conflict wins over every record-less row until local and upstream
+            // converge (state table P1); once converged the record-less status stands and
+            // `conflict_open` tells pull to clear the record (P2, rows 13-16).
+            let conflict_open = project_state.conflict(&rel).is_some();
+            let converged = local_hash == upstream_hash;
+            let (status, merged_content) = if conflict_open && !converged {
+                (SyncStatus::ConflictPending, None)
+            } else {
+                (status, merged_content)
+            };
 
             states.push(FileSyncState {
                 relative_path: rel,
@@ -563,7 +573,7 @@ impl SyncEngine {
                 merged_content,
                 upstream_content,
                 local_content: local_content.as_deref().map(Self::normalize_eol),
-                conflict_open: false,
+                conflict_open,
             });
         }
 
@@ -658,8 +668,10 @@ impl SyncEngine {
 
     /// Pulls upstream updates into the local project directory.
     /// Operates with strict safety:
-    /// 1. Applies clean files and leaves each Conflicted file untouched, writing a
-    ///    `<file>.conflict` sidecar and recording the upstream version (D-08, D-09).
+    /// 1. Applies clean files and leaves each Conflicted or ConflictPending file
+    ///    untouched, (re)writing a `<file>.conflict` sidecar and recording the current
+    ///    upstream version (D-08, D-09). An open conflict whose local and upstream
+    ///    versions converged is cleared and its sidecar removed (D-09 amendment).
     /// 2. Validates targets defensively against symlink traversal and symlink destinations.
     /// 3. Supports binary and non-UTF8 template files cleanly without data corruption.
     /// 4. Reconciles converged ancestor states in `.ude/state.json` to prevent future false conflicts.
@@ -676,11 +688,21 @@ impl SyncEngine {
         };
         let renderer = crate::template::TemplateRenderer::new();
 
-        // Conflicted files are left untouched; each gets a sidecar and a conflict
-        // record in the same transaction as the clean files (D-08).
+        // Conflicted and still-pending files are left untouched; each gets a sidecar and
+        // a conflict record in the same transaction as the clean files (D-08, row 12).
         let conflicted: Vec<&FileSyncState> = states
             .iter()
-            .filter(|s| s.status == SyncStatus::Conflicted)
+            .filter(|s| {
+                matches!(
+                    s.status,
+                    SyncStatus::Conflicted | SyncStatus::ConflictPending
+                )
+            })
+            .collect();
+        // An open record whose file is no longer pending has converged (rows 13-16).
+        let converged: Vec<&FileSyncState> = states
+            .iter()
+            .filter(|s| s.conflict_open && s.status != SyncStatus::ConflictPending)
             .collect();
 
         let mut candidates_to_write = Vec::new();
@@ -812,6 +834,7 @@ impl SyncEngine {
         let mut converged_to_record = Vec::new();
         for s in &states {
             if s.status == SyncStatus::InSync
+                && !s.conflict_open
                 && let Some(loc_h) = &s.local_hash
                 && s.ancestor_hash.as_ref() != Some(loc_h)
             {
@@ -850,6 +873,7 @@ impl SyncEngine {
             && upstream_deleted.is_empty()
             && both_deleted.is_empty()
             && conflicted.is_empty()
+            && converged.is_empty()
         {
             return PullResult::Success(report);
         }
@@ -896,6 +920,33 @@ impl SyncEngine {
             project_state.record_conflict(rel, s.upstream_hash.clone(), upstream_lf);
             sidecars.insert(sidecar);
             report.conflicts.push(rel.clone());
+        }
+
+        // Convergence clears the conflict and its sidecar. Both present (rows 13/15): the
+        // upstream version becomes the ancestor. Both absent: BothDeleted (row 14) is
+        // handled with the other deletions below; Absent (row 16) records nothing.
+        for s in converged {
+            let rel = &s.relative_path;
+            project_state.clear_conflict(rel);
+            let sidecar = sidecar_rel(rel);
+            if fs::symlink_metadata(local_root.join(&sidecar)).is_ok_and(|meta| meta.is_file())
+                && let Err(reason) = transaction.stage_delete(&sidecar)
+            {
+                return PullResult::IoFailed {
+                    path: sidecar,
+                    reason,
+                };
+            }
+            if s.local_hash.is_some()
+                && let Some(upstream_hash) = &s.upstream_hash
+            {
+                project_state.record_file(
+                    rel,
+                    upstream_hash.clone(),
+                    s.upstream_content.as_deref().map(Self::normalize_eol),
+                );
+            }
+            report.converged.push(rel.clone());
         }
 
         for (rel, hash, content) in converged_to_record {
