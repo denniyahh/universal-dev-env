@@ -196,13 +196,13 @@ mod tests {
 
     #[test]
     fn test_merge_orthogonal_changes_clean() {
-        let base = "a=1\nb=1\n";
-        let local = "a=2\nb=1\n";
-        let upstream = "a=1\nb=2\n";
+        let base = "a=1\nx\nb=1\n";
+        let local = "a=2\nx\nb=1\n";
+        let upstream = "a=1\nx\nb=2\n";
 
         match merge_3way_text(base, local, upstream) {
             MergeResult::Clean(merged) => {
-                assert_eq!(merged, "a=2\nb=2\n");
+                assert_eq!(merged, "a=2\nx\nb=2\n");
             }
             MergeResult::Conflict => panic!("Expected clean merge for orthogonal changes"),
         }
