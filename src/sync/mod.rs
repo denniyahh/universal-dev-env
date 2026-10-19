@@ -43,6 +43,8 @@ pub struct FileSyncState {
     pub ancestor_hash: Option<String>,
     pub merged_content: Option<String>,
     pub upstream_content: Option<String>,
+    /// LF-normalized local text (`None` when the local file is absent or not UTF-8).
+    pub local_content: Option<String>,
 }
 
 /// One present version of a managed file in a three-way comparison.
@@ -142,8 +144,31 @@ pub struct PullReport {
 #[derive(Debug, PartialEq, Eq)]
 pub enum PullResult {
     Success(PullReport),
-    ConflictBlocked { path: PathBuf },
     IoFailed { path: PathBuf, reason: String },
+}
+
+/// Permission bits a conflict sidecar may take from its local file: execute bits are
+/// cleared (a sidecar is data), read/write bits are kept so it is never wider (T-01-24).
+const SIDECAR_EXEC_MASK: u32 = 0o666;
+
+/// `<rel>.conflict`, the sidecar path beside the managed file `rel` (D-08).
+fn sidecar_rel(rel: &Path) -> PathBuf {
+    let mut name = rel.as_os_str().to_os_string();
+    name.push(".conflict");
+    PathBuf::from(name)
+}
+
+/// One version of a conflicted file for its sidecar: the text when known, else the
+/// fingerprint (binary, or an ancestor recorded without content), else absent.
+fn conflict_side<'a>(
+    text: Option<&'a str>,
+    fingerprint: Option<&'a str>,
+) -> merge::ConflictSide<'a> {
+    match (text, fingerprint) {
+        (Some(text), _) => merge::ConflictSide::Text(text),
+        (None, Some(fingerprint)) => merge::ConflictSide::Binary { fingerprint },
+        (None, None) => merge::ConflictSide::Absent,
+    }
 }
 
 /// Interval between attempts to take a contended remote cache lock.
@@ -530,6 +555,7 @@ impl SyncEngine {
                 ancestor_hash,
                 merged_content,
                 upstream_content,
+                local_content: local_content.as_deref().map(Self::normalize_eol),
             });
         }
 
@@ -624,7 +650,8 @@ impl SyncEngine {
 
     /// Pulls upstream updates into the local project directory.
     /// Operates with strict safety:
-    /// 1. Rejects pull completely if any managed file is Conflicted (conflict gate).
+    /// 1. Applies clean files and leaves each Conflicted file untouched, writing a
+    ///    `<file>.conflict` sidecar and recording the upstream version (D-08, D-09).
     /// 2. Validates targets defensively against symlink traversal and symlink destinations.
     /// 3. Supports binary and non-UTF8 template files cleanly without data corruption.
     /// 4. Reconciles converged ancestor states in `.ude/state.json` to prevent future false conflicts.
@@ -641,14 +668,12 @@ impl SyncEngine {
         };
         let renderer = crate::template::TemplateRenderer::new();
 
-        // Gate 1: Check for conflicts across the entire project
-        for s in &states {
-            if s.status == SyncStatus::Conflicted {
-                return PullResult::ConflictBlocked {
-                    path: s.relative_path.clone(),
-                };
-            }
-        }
+        // Conflicted files are left untouched; each gets a sidecar and a conflict
+        // record in the same transaction as the clean files (D-08).
+        let conflicted: Vec<&FileSyncState> = states
+            .iter()
+            .filter(|s| s.status == SyncStatus::Conflicted)
+            .collect();
 
         let mut candidates_to_write = Vec::new();
 
@@ -816,6 +841,7 @@ impl SyncEngine {
             && converged_to_record.is_empty()
             && upstream_deleted.is_empty()
             && both_deleted.is_empty()
+            && conflicted.is_empty()
         {
             return PullResult::Success(report);
         }
@@ -835,6 +861,33 @@ impl SyncEngine {
                 return PullResult::IoFailed { path: rel, reason };
             }
             project_state.record_file(&rel, ancestor_hash, ancestor_content);
+        }
+
+        let mut sidecars = HashSet::new();
+        for s in conflicted {
+            let rel = &s.relative_path;
+            let upstream_lf = s.upstream_content.as_deref().map(Self::normalize_eol);
+            let body = merge::render_conflict_sidecar(
+                rel,
+                conflict_side(
+                    project_state.get_ancestor_content(rel),
+                    project_state.get_ancestor_hash(rel),
+                ),
+                conflict_side(s.local_content.as_deref(), s.local_hash.as_deref()),
+                conflict_side(upstream_lf.as_deref(), s.upstream_hash.as_deref()),
+            );
+            let sidecar = sidecar_rel(rel);
+            // A missing local file yields REGULAR_MODE (or EXECUTABLE_MODE, masked to it).
+            let mode = staging::file_mode_for(rel, &local_root.join(rel)) & SIDECAR_EXEC_MASK;
+            if let Err(reason) = transaction.stage_write(&sidecar, body.as_bytes(), mode) {
+                return PullResult::IoFailed {
+                    path: sidecar,
+                    reason,
+                };
+            }
+            project_state.record_conflict(rel, s.upstream_hash.clone(), upstream_lf);
+            sidecars.insert(sidecar);
+            report.conflicts.push(rel.clone());
         }
 
         for (rel, hash, content) in converged_to_record {
@@ -875,7 +928,10 @@ impl SyncEngine {
             return state_pull_failure(format!("Failed to persist state: {e}"));
         }
 
-        report.applied = applied;
+        report.applied = applied
+            .into_iter()
+            .filter(|rel| !sidecars.contains(rel))
+            .collect();
         PullResult::Success(report)
     }
 

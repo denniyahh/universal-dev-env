@@ -630,7 +630,10 @@ fn main() {
                     );
                     match engine.pull_updates(&local_project, &root_template_dir, &sync_ctx) {
                         sync::PullResult::Success(report) => {
-                            if report.applied.is_empty() && report.deleted.is_empty() {
+                            if report.applied.is_empty()
+                                && report.deleted.is_empty()
+                                && report.conflicts.is_empty()
+                            {
                                 println!("  {} No pending upstream updates to apply.", "✓".green());
                             } else if !report.applied.is_empty() {
                                 println!(
@@ -653,17 +656,18 @@ fn main() {
                                     file.display()
                                 );
                             }
-                        }
-                        sync::PullResult::ConflictBlocked { path } => {
-                            eprintln!(
-                                "  {} Pull aborted: {} has conflicting local and upstream modifications.",
-                                "✗".red(),
-                                path.display()
-                            );
-                            eprintln!(
-                                "     Resolve local modifications or create a .local override before pulling."
-                            );
-                            std::process::exit(EXIT_DRIFT);
+                            for file in &report.conflicts {
+                                eprintln!(
+                                    "  {} {}: conflicting local and upstream changes; wrote {}.conflict",
+                                    "✗".red(),
+                                    file.display(),
+                                    file.display()
+                                );
+                                eprintln!("    resolve with: ude sync resolve {}", file.display());
+                            }
+                            if !report.conflicts.is_empty() {
+                                std::process::exit(EXIT_DRIFT);
+                            }
                         }
                         sync::PullResult::IoFailed { path, reason } => {
                             eprintln!(
