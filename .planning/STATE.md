@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 01
 current_phase_name: Sync Engine & State Hermeticity
 status: executing
-stopped_at: Completed 01-07-PLAN.md
-last_updated: "2026-10-19T11:14:57.941Z"
+stopped_at: Completed 01-08-PLAN.md
+last_updated: "2026-10-19T11:27:24.571Z"
 last_activity: 2026-10-18
 last_activity_desc: Phase 01 execution started
-state_head: 095e42717589b195f3c26ae51df99c2471097c26
+state_head: ce335dc0792e388a727614e2d457b7b3e3d46643
 progress:
   total_phases: 4
   completed_phases: 0
   total_plans: 11
-  completed_plans: 7
+  completed_plans: 8
   percent: 0
 ---
 
@@ -28,7 +28,7 @@ See: `.planning/PROJECT.md` (updated 2026-10-12)
 ## Current Position
 
 Phase: 01 (Sync Engine & State Hermeticity) — EXECUTING
-Plan: 8 of 11
+Plan: 9 of 11
 Status: Ready to execute
 Last activity: 2026-10-18 — Phase 01 execution started
 
@@ -65,6 +65,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 01 P05 | 15min | 3 tasks | 4 files |
 | Phase 01 P06 | 15min | 3 tasks | 2 files |
 | Phase 01 P07 | 16min | 3 tasks | 4 files |
+| Phase 01 P08 | 9min | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -90,6 +91,8 @@ Recent decisions affecting current work:
 - [Phase 01]: 01-07: scan_project treats only NotFound/NotADirectory reads as absent; any other read error fails the scan, so an unreadable file is never classified as deleted
 - [Phase 01]: 01-07: deletions follow the state table rows 1-11; pull deletes UpstreamDeleted copies via StagedTransaction::stage_delete (after writes, state.json last) and tombstones UpstreamDeleted/BothDeleted; LocalDeleted stays pending; record_file clears tombstones (I1)
 - [Phase 01]: 01-07: push deletes LocalDeleted upstream templates (BoundaryBlocked for local-only paths); both publication gates use --name-status --no-renames, fail closed on unparseable lines and scan every non-D blob
+- [Phase 01]: 01-08: merge_texts uses diffy =0.5.2 (Diff3, Git incomplete hunks); adjacent-line edits conflict (D-02); similar removed
+- [Phase 01]: 01-08: render_conflict_sidecar is pure: header (file, resolve command, legend, absent/binary notes in LOCAL, ANCESTOR, UPSTREAM order) then diff3 body, explicit block for deletions or clean-merging text, comment-only body if any side is binary
 
 ### Pending Todos
 
@@ -110,6 +113,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-19T11:14:57.864Z
-Stopped at: Completed 01-07-PLAN.md
+Last session: 2026-10-19T11:27:24.516Z
+Stopped at: Completed 01-08-PLAN.md
 Resume file: None
