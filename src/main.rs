@@ -952,7 +952,7 @@ fn open_sync_templates(
     match engine.ensure_remote_repo(r_url, branch, cache_dir) {
         Ok(cache) => {
             let tmpl_dir = cache.templates_dir.clone();
-            let checkout_dir = tmpl_dir.parent().unwrap_or(&tmpl_dir).to_path_buf();
+            let checkout_dir = cache.checkout_dir.clone();
             (tmpl_dir, Some(checkout_dir), Some(cache))
         }
         Err(e) => {
