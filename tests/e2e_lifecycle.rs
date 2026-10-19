@@ -963,3 +963,202 @@ fn test_sync_corrupt_state_fails_loudly() {
         describe(&out)
     );
 }
+
+/// Runs `ude init --type rust` at `path` and returns the generated mise.toml.
+fn init_rust_project(bin: &str, path: &Path) -> String {
+    fs::create_dir_all(path).unwrap();
+    let init = Command::new(bin)
+        .args(["init", "--path", &path.to_string_lossy(), "--type", "rust"])
+        .output()
+        .expect("ude init execution");
+    assert!(
+        init.status.success(),
+        "ude init failed: {}",
+        String::from_utf8_lossy(&init.stderr)
+    );
+    fs::read_to_string(path.join("mise.toml")).unwrap()
+}
+
+/// A bare remote at `<root>/<name>.git` whose main holds only
+/// templates/projects/agents/mise.toml.jinja with `mise`; returns its path.
+fn seed_mise_remote(git: &GitFixture, root: &Path, name: &str, mise: &str) -> PathBuf {
+    let bare = root.join(format!("{name}.git"));
+    let bare_url = bare.to_string_lossy().to_string();
+    git.run(root, &["init", "--bare", "-q", "-b", "main", &bare_url]);
+    let seed = root.join(format!("{name}-seed"));
+    git.run(root, &["init", "-q", "-b", "main", &seed.to_string_lossy()]);
+    let tdir = seed.join("templates/projects/agents");
+    fs::create_dir_all(&tdir).unwrap();
+    fs::write(tdir.join("mise.toml.jinja"), mise).unwrap();
+    git.run(&seed, &["add", "-A"]);
+    git.run(&seed, &["commit", "-q", "-m", "seed"]);
+    git.run(&seed, &["push", "-q", &bare_url, "main"]);
+    bare
+}
+
+/// Every file under `root` (relative) whose name ends in `.conflict`.
+fn conflict_sidecars(root: &Path) -> Vec<PathBuf> {
+    walkdir::WalkDir::new(root)
+        .into_iter()
+        .map(|entry| entry.expect("walk project"))
+        .filter(|entry| {
+            entry.file_type().is_file()
+                && entry.file_name().to_string_lossy().ends_with(".conflict")
+        })
+        .map(|entry| entry.path().strip_prefix(root).unwrap().to_path_buf())
+        .collect()
+}
+
+#[test]
+fn test_sync_pull_conflict_exits_1_and_writes_sidecar() {
+    let bin = env!("CARGO_BIN_EXE_ude");
+    let temp = tempdir().unwrap();
+    let git = GitFixture::new();
+
+    let fake_home = temp.path().join("fake_home");
+    let fake_config = fake_home.join(".config");
+    fs::create_dir_all(fake_config.join("git")).unwrap();
+    let gitconfig = fake_config.join("git/config");
+    fs::write(&gitconfig, FIXTURE_GITCONFIG).unwrap();
+    let cache_dir = temp.path().join("cache");
+    fs::create_dir_all(&cache_dir).unwrap();
+    let ude = |project: &Path, args: &[&str]| {
+        let mut cmd = Command::new(bin);
+        cmd.current_dir(project).args(args);
+        for name in FIXTURE_GIT_LOCAL_ENV_VARS {
+            cmd.env_remove(name);
+        }
+        cmd.env("HOME", &fake_home)
+            .env("XDG_CONFIG_HOME", &fake_config)
+            .env("GIT_CONFIG_GLOBAL", &gitconfig)
+            .env("XDG_CACHE_HOME", &cache_dir)
+            .stdin(Stdio::null())
+            .output()
+            .expect("ude execution")
+    };
+
+    // Project and remote agree on mise.toml; then both sides append different lines.
+    let project = temp.path().join("project");
+    let init_mise = init_rust_project(bin, &project);
+    assert!(
+        project.join(".gitconfig").is_file(),
+        "ude init creates .gitconfig"
+    );
+    let bare = seed_mise_remote(&git, temp.path(), "remote", &init_mise);
+    let bare_url = bare.to_string_lossy().to_string();
+    let local_mise = format!("{init_mise}# local edit\n");
+    fs::write(project.join("mise.toml"), &local_mise).unwrap();
+    let clone = temp.path().join("upstream-clone");
+    git.run(
+        temp.path(),
+        &["clone", "-q", &bare_url, &clone.to_string_lossy()],
+    );
+    fs::write(
+        clone.join("templates/projects/agents/mise.toml.jinja"),
+        format!("{init_mise}# upstream edit\n"),
+    )
+    .unwrap();
+    git.run(&clone, &["commit", "-q", "-am", "upstream edit"]);
+    git.run(&clone, &["push", "-q", "origin", "main"]);
+
+    let pull = ude(&project, &["sync", "pull", "--remote", &bare_url]);
+    let stdout = String::from_utf8_lossy(&pull.stdout);
+    let stderr = String::from_utf8_lossy(&pull.stderr);
+    assert_eq!(
+        pull.status.code(),
+        Some(1),
+        "a conflicted pull must exit 1. Out: {stdout}\nErr: {stderr}"
+    );
+    let sidecar = fs::read_to_string(project.join("mise.toml.conflict")).unwrap_or_else(|e| {
+        panic!("mise.toml.conflict missing ({e}). Out: {stdout}\nErr: {stderr}")
+    });
+    assert!(sidecar.contains("<<<<<<< LOCAL\n"), "{sidecar}");
+    assert!(sidecar.contains(">>>>>>> UPSTREAM\n"), "{sidecar}");
+    assert_eq!(
+        fs::read_to_string(project.join("mise.toml")).unwrap(),
+        local_mise,
+        "the conflicted local file must stay byte-identical"
+    );
+    assert!(
+        format!("{stdout}{stderr}").contains("ude sync resolve mise.toml"),
+        "pull output must point at the resolve command. Out: {stdout}\nErr: {stderr}"
+    );
+    // D-12 through the CLI: .gitconfig is unchanged locally and absent from the remote.
+    assert!(
+        !project.join(".gitconfig").exists(),
+        ".gitconfig must be removed. Out: {stdout}"
+    );
+    assert!(
+        stdout.contains("Removed .gitconfig (deleted upstream)"),
+        "Out: {stdout}"
+    );
+    // Negative control for that part: the conflicted file is not removed.
+    assert!(!stdout.contains("Removed mise.toml"), "Out: {stdout}");
+    assert!(project.join("mise.toml").is_file());
+    assert_eq!(
+        conflict_sidecars(&project),
+        vec![PathBuf::from("mise.toml.conflict")]
+    );
+
+    let status = ude(&project, &["sync", "status", "--remote", &bare_url]);
+    let status_out = String::from_utf8_lossy(&status.stdout);
+    assert!(
+        status_out.contains("mise.toml: Unresolved conflict"),
+        "Out: {status_out}\nErr: {}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+
+    // Negative control: a project and remote with no conflicting edit pull with exit 0
+    // and leave no sidecar.
+    let clean = temp.path().join("clean-project");
+    let clean_mise = init_rust_project(bin, &clean);
+    let clean_bare = seed_mise_remote(&git, temp.path(), "clean-remote", &clean_mise);
+    let clean_pull = ude(
+        &clean,
+        &["sync", "pull", "--remote", &clean_bare.to_string_lossy()],
+    );
+    assert_eq!(
+        clean_pull.status.code(),
+        Some(0),
+        "Out: {}\nErr: {}",
+        String::from_utf8_lossy(&clean_pull.stdout),
+        String::from_utf8_lossy(&clean_pull.stderr)
+    );
+    assert_eq!(conflict_sidecars(&clean), Vec::<PathBuf>::new());
+
+    // D-11: the managed gitignore template ignores sidecars and nothing they sit beside.
+    let template = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("templates/projects/generic/gitignore.repo"),
+    )
+    .unwrap();
+    assert!(
+        template.lines().any(|line| line == "*.conflict"),
+        "gitignore.repo lacks a `*.conflict` line"
+    );
+    assert!(
+        !template.contains("{{"),
+        "gitignore.repo must not be templated"
+    );
+    let probe = temp.path().join("ignore-probe");
+    git.run(temp.path(), &["init", "-q", &probe.to_string_lossy()]);
+    fs::write(probe.join(".gitignore"), &template).unwrap();
+    let ignored = |path: &str| {
+        let out = git
+            .cmd(&probe)
+            .args(["check-ignore", "-q", "--no-index", path])
+            .output()
+            .expect("git check-ignore");
+        match out.status.code() {
+            Some(0) => true,
+            Some(1) => false,
+            other => panic!("git check-ignore {path} failed ({other:?})"),
+        }
+    };
+    assert!(ignored(".gitconfig.conflict"));
+    assert!(ignored("scripts/hooks/pre-commit.conflict"));
+    assert!(
+        !ignored(".gitconfig"),
+        "the managed file itself must stay tracked"
+    );
+    assert!(!ignored("mise.toml"));
+}
