@@ -1180,7 +1180,9 @@ fn sync_cli(root: &Path) -> impl Fn(&Path, &[&str]) -> Output {
         for name in FIXTURE_GIT_LOCAL_ENV_VARS {
             cmd.env_remove(name);
         }
-        cmd.env("HOME", &fake_home)
+        // No host TypeSafe key: push must not reach the semantic drift API.
+        cmd.env_remove("TYPESAFE_API_KEY")
+            .env("HOME", &fake_home)
             .env("XDG_CONFIG_HOME", &fake_config)
             .env("GIT_CONFIG_GLOBAL", &gitconfig)
             .env("XDG_CACHE_HOME", &cache_dir)
@@ -1299,5 +1301,96 @@ fn test_sync_resolve_end_to_end() {
             .contains("no open conflict"),
         "{}",
         outputs(&again)
+    );
+}
+
+const GITIGNORE_TEMPLATE: &str = "templates/projects/generic/gitignore.repo";
+
+#[test]
+fn test_sync_push_skips_unresolved_conflict_exit_1() {
+    let bin = env!("CARGO_BIN_EXE_ude");
+    let temp = tempdir().unwrap();
+    let git = GitFixture::new();
+    let ude = sync_cli(temp.path());
+
+    // Remote holds the project's init mise.toml and .gitignore.
+    let project = temp.path().join("project");
+    let init_mise = init_rust_project(bin, &project);
+    let init_gitignore = fs::read_to_string(project.join(".gitignore")).unwrap();
+    let bare = seed_mise_remote(&git, temp.path(), "remote", &init_mise);
+    let bare_url = bare.to_string_lossy().to_string();
+    let clone = temp.path().join("upstream-clone");
+    commit_upstream(
+        &git,
+        &bare,
+        &clone,
+        &[(GITIGNORE_TEMPLATE, &init_gitignore)],
+    );
+
+    // Local-only .gitignore edit; conflicting mise.toml edits on both sides.
+    let local_gitignore = format!("{init_gitignore}# local ignore edit\n");
+    fs::write(project.join(".gitignore"), &local_gitignore).unwrap();
+    let local_mise = format!("{init_mise}# local edit\n");
+    fs::write(project.join("mise.toml"), &local_mise).unwrap();
+    let upstream_mise = format!("{init_mise}# upstream edit\n");
+    commit_upstream(&git, &bare, &clone, &[(MISE_TEMPLATE, &upstream_mise)]);
+
+    let pull = ude(&project, &["sync", "pull", "--remote", &bare_url]);
+    assert_eq!(pull.status.code(), Some(1), "{}", outputs(&pull));
+
+    let push = ude(&project, &["sync", "push", "--remote", &bare_url]);
+    let push_text = outputs(&push);
+    assert_eq!(
+        push.status.code(),
+        Some(1),
+        "a push that skipped a conflict must exit 1. {push_text}"
+    );
+    assert!(
+        push_text
+            .contains("mise.toml: unresolved conflict, skipped (run ude sync resolve mise.toml)"),
+        "{push_text}"
+    );
+    assert_eq!(
+        format!("{}\n", remote_file(&git, &bare, GITIGNORE_TEMPLATE)),
+        local_gitignore,
+        "the eligible .gitignore edit is published. {push_text}"
+    );
+    assert_eq!(
+        format!("{}\n", remote_file(&git, &bare, MISE_TEMPLATE)),
+        upstream_mise,
+        "the conflicted mise.toml is not published. {push_text}"
+    );
+    assert_eq!(
+        fs::read_to_string(project.join("mise.toml")).unwrap(),
+        local_mise,
+        "push never rewrites local files"
+    );
+
+    // --force keeps its agent-rule meaning only: the conflict is still skipped.
+    let forced = ude(
+        &project,
+        &["sync", "push", "--force", "--remote", &bare_url],
+    );
+    assert_eq!(forced.status.code(), Some(1), "{}", outputs(&forced));
+    assert_eq!(
+        format!("{}\n", remote_file(&git, &bare, MISE_TEMPLATE)),
+        upstream_mise,
+        "--force must not publish the conflicted file. {}",
+        outputs(&forced)
+    );
+
+    // Negative control: once resolved, the push publishes it and exits 0.
+    let resolve = ude(&project, &["sync", "resolve", "mise.toml"]);
+    assert_eq!(resolve.status.code(), Some(0), "{}", outputs(&resolve));
+    let resolved_push = ude(&project, &["sync", "push", "--remote", &bare_url]);
+    assert_eq!(
+        resolved_push.status.code(),
+        Some(0),
+        "{}",
+        outputs(&resolved_push)
+    );
+    assert_eq!(
+        format!("{}\n", remote_file(&git, &bare, MISE_TEMPLATE)),
+        local_mise
     );
 }
