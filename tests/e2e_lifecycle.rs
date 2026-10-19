@@ -1607,21 +1607,26 @@ fn seed_full_template_remote(git: &GitFixture, root: &Path, name: &str) -> PathB
     git.run(root, &["init", "--bare", "-q", "-b", "main", &bare_url]);
     let seed = root.join(format!("{name}-seed"));
     git.run(root, &["init", "-q", "-b", "main", &seed.to_string_lossy()]);
+    copy_repo_templates(&seed.join("templates"));
+    git.run(&seed, &["add", "-A"]);
+    git.run(&seed, &["commit", "-q", "-m", "seed"]);
+    git.run(&seed, &["push", "-q", &bare_url, "main"]);
+    bare
+}
+
+/// Copies this repository's `templates/` tree to `dest`.
+fn copy_repo_templates(dest: &Path) {
     let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("templates");
     for entry in walkdir::WalkDir::new(&source) {
         let entry = entry.expect("walk templates");
         let rel = entry.path().strip_prefix(&source).unwrap();
-        let target = seed.join("templates").join(rel);
+        let target = dest.join(rel);
         if entry.file_type().is_dir() {
             fs::create_dir_all(&target).unwrap();
         } else {
             fs::copy(entry.path(), &target).unwrap();
         }
     }
-    git.run(&seed, &["add", "-A"]);
-    git.run(&seed, &["commit", "-q", "-m", "seed"]);
-    git.run(&seed, &["push", "-q", &bare_url, "main"]);
-    bare
 }
 
 const GITCONFIG_TEMPLATE: &str = "templates/projects/generic/gitconfig.repo";
@@ -1807,5 +1812,94 @@ fn test_first_pull_keeps_custom_gitignore_preserved_by_init() {
     assert_eq!(
         fs::read_to_string(fresh.join(".gitignore")).unwrap(),
         fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(GITIGNORE_TEMPLATE)).unwrap()
+    );
+}
+
+/// A project at `<root>/<name>` holding a copy of this repository's `templates/`, so
+/// `ude` run inside it uses that copy for init and as the local sync upstream.
+fn project_with_local_templates(root: &Path, name: &str) -> PathBuf {
+    let project = root.join(name);
+    copy_repo_templates(&project.join("templates"));
+    project
+}
+
+/// `ude init --type rust` on `project`, run from inside it; panics on failure.
+fn reinit_rust(ude: &impl Fn(&Path, &[&str]) -> Output, project: &Path) {
+    let path = project.to_string_lossy().to_string();
+    let init = ude(project, &["init", "--path", &path, "--type", "rust"]);
+    assert_eq!(init.status.code(), Some(0), "{}", outputs(&init));
+}
+
+#[test]
+fn test_reinit_keeps_ancestor_of_unedited_gitignore() {
+    let temp = tempdir().unwrap();
+    let ude = sync_cli(temp.path());
+    let project = project_with_local_templates(temp.path(), "project");
+    let template = project.join(GITIGNORE_TEMPLATE);
+
+    reinit_rust(&ude, &project);
+    let status = outputs(&ude(&project, &["sync", "status"]));
+    assert!(status.contains(".gitignore: In Sync"), "{status}");
+
+    // Another developer changes the shared template.
+    let upstream = format!(
+        "{}new_upstream_rule/\n",
+        fs::read_to_string(&template).unwrap()
+    );
+    fs::write(&template, &upstream).unwrap();
+    let status = outputs(&ude(&project, &["sync", "status"]));
+    assert!(status.contains(".gitignore: Upstream Updated"), "{status}");
+
+    // Re-running init without editing .gitignore must not turn it into a local edit.
+    reinit_rust(&ude, &project);
+    let status = outputs(&ude(&project, &["sync", "status"]));
+    assert!(
+        status.contains(".gitignore: Upstream Updated")
+            && !status.contains(".gitignore: Locally Modified"),
+        "{status}"
+    );
+    let push = ude(&project, &["sync", "push"]);
+    assert_eq!(
+        fs::read_to_string(&template).unwrap(),
+        upstream,
+        "push must not revert the upstream change. {}",
+        outputs(&push)
+    );
+    assert_eq!(push.status.code(), Some(0), "{}", outputs(&push));
+    let pull = ude(&project, &["sync", "pull"]);
+    assert_eq!(pull.status.code(), Some(0), "{}", outputs(&pull));
+    assert_eq!(
+        fs::read_to_string(project.join(".gitignore")).unwrap(),
+        upstream,
+        "pull applies the upstream change. {}",
+        outputs(&pull)
+    );
+
+    // Negative control: a real edit survives a re-init as a local modification.
+    let edited = format!("{upstream}edited_rule/\n");
+    fs::write(project.join(".gitignore"), &edited).unwrap();
+    reinit_rust(&ude, &project);
+    let status = outputs(&ude(&project, &["sync", "status"]));
+    assert!(status.contains(".gitignore: Locally Modified"), "{status}");
+    assert_eq!(
+        fs::read_to_string(project.join(".gitignore")).unwrap(),
+        edited
+    );
+
+    // Negative control (CR-03): a custom .gitignore with no prior state reads as a
+    // local modification and pull keeps it.
+    let custom = project_with_local_templates(temp.path(), "custom");
+    let custom_rules = "custom_rule_one/\ngraphify-out/*\n";
+    fs::write(custom.join(".gitignore"), custom_rules).unwrap();
+    reinit_rust(&ude, &custom);
+    let status = outputs(&ude(&custom, &["sync", "status"]));
+    assert!(status.contains(".gitignore: Locally Modified"), "{status}");
+    let pull = ude(&custom, &["sync", "pull"]);
+    assert_eq!(pull.status.code(), Some(0), "{}", outputs(&pull));
+    assert_eq!(
+        fs::read_to_string(custom.join(".gitignore")).unwrap(),
+        custom_rules,
+        "{}",
+        outputs(&pull)
     );
 }
