@@ -216,6 +216,10 @@ fn main() {
                 std::process::exit(1);
             }
 
+            // Template of a managed file init kept instead of materializing; it becomes
+            // that file's recorded ancestor (CR-03).
+            let mut kept_gitignore_template: Option<PathBuf> = None;
+
             // 2. Materialize .gitconfig include & .gitignore
             if let Some(ref tdir) = root_template_dir {
                 if let Err(e) = copy_template_file(
@@ -230,6 +234,7 @@ fn main() {
                 let target_gitignore = project_path.join(".gitignore");
                 let src_gitignore = tdir.join("projects/generic/gitignore.repo");
                 if target_gitignore.exists() {
+                    kept_gitignore_template = Some(src_gitignore.clone());
                     let existing = fs::read_to_string(&target_gitignore).unwrap_or_default();
                     if !existing.contains("graphify-out/*") {
                         let append_block = "\n# Generated knowledge graphs / reports (allowlist pattern)\ngraphify-out/*\n!graphify-out/graph.json\n!graphify-out/manifest.json\n";
@@ -402,7 +407,14 @@ fn main() {
                 std::path::PathBuf::from(".agents/AGENTS.md"),
             ];
             for rel in &managed_rels {
-                let p = project_path.join(rel);
+                // A kept pre-existing .gitignore records the template as its ancestor,
+                // so the kept rules read as a local modification: pull then merges or
+                // conflicts instead of replacing them with the template (CR-03). No
+                // readable template means no ancestor, never the kept bytes.
+                let p = match &kept_gitignore_template {
+                    Some(template) if rel.as_path() == Path::new(".gitignore") => template.clone(),
+                    _ => project_path.join(rel),
+                };
                 if let Ok(bytes) = fs::read(&p) {
                     let hash = sync::SyncEngine::fingerprint(&bytes);
                     let content = String::from_utf8(bytes)
