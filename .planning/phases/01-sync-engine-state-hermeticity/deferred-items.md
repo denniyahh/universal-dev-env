@@ -47,3 +47,11 @@
   reproduced; a remote without `templates/` is not a supported layout today.
   **Fix:** have `RemoteCache` carry the checkout root explicitly instead of
   deriving it in main.rs.
+
+- init-kept files can be pushed over the shared template
+  status: open (operator accepted for phase 01 on 2026-10-19; fix deferred)
+  **Found during:** code-review fix for CR-03 (984f0c7)
+  **What:** a custom `.gitignore` kept by `ude init` now reads as Locally Modified,
+  so the next plain `ude sync push` publishes it as the shared `gitignore.repo` for
+  every project.
+  **Fix:** tracked as a GSD todo: .planning/todos/pending/2026-10-19-never-publish-files-that-init-kept-over-the-shared-template.md

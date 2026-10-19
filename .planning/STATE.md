@@ -105,7 +105,7 @@ Recent decisions affecting current work:
 
 ### Pending Todos
 
-None yet.
+- [2026-10-19] [general] Never publish files that init kept over the shared template — [todo file](.planning/todos/pending/2026-10-19-never-publish-files-that-init-kept-over-the-shared-template.md)
 
 ### Blockers/Concerns
 
