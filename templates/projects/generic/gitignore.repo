@@ -25,3 +25,6 @@ Thumbs.db
 graphify-out/*
 !graphify-out/graph.json
 !graphify-out/manifest.json
+
+# UDE sync conflict sidecars (resolve with: ude sync resolve <file>)
+*.conflict
