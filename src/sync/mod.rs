@@ -896,6 +896,7 @@ impl SyncEngine {
             Err(reason) => return state_push_failure(reason),
         };
         let mut candidates_to_write = Vec::new();
+        let mut deletions = Vec::new();
 
         // Pass 1: Strict atomic pre-validation across ALL modified candidates
         for state in &states {
@@ -908,6 +909,24 @@ impl SyncEngine {
 
             // Overridden files are never pushed upstream (Option B)
             if state.status == SyncStatus::Overridden {
+                continue;
+            }
+
+            // Deleted locally, unchanged upstream (D-14): delete the upstream template.
+            // Unmanaged, UpstreamDeleted, BothDeleted and Absent are never published.
+            if state.status == SyncStatus::LocalDeleted {
+                if self
+                    .sanitizer
+                    .is_local_only_path(&state.relative_path, allow_agent_rules)
+                {
+                    return PushResult::BoundaryBlocked {
+                        path: state.relative_path.clone(),
+                    };
+                }
+                if let Some(target_upstream) = map_to_upstream(upstream_root, &state.relative_path)
+                {
+                    deletions.push((state.relative_path.clone(), target_upstream));
+                }
                 continue;
             }
 
@@ -1007,6 +1026,28 @@ impl SyncEngine {
             updated_records.push((rel_path, Self::fingerprint(&raw_bytes), raw_local_str));
         }
 
+        let mut deleted = Vec::new();
+        let mut deleted_templates = Vec::new();
+        for (rel_path, target_upstream) in deletions {
+            let Ok(upstream_rel) = target_upstream.strip_prefix(upstream_root) else {
+                return PushResult::IoFailed {
+                    path: rel_path,
+                    reason: format!(
+                        "Upstream target {} is outside the upstream root",
+                        target_upstream.display()
+                    ),
+                };
+            };
+            if let Err(reason) = transaction.stage_delete(upstream_rel) {
+                return PushResult::IoFailed {
+                    path: rel_path,
+                    reason,
+                };
+            }
+            deleted.push(rel_path);
+            deleted_templates.push(target_upstream);
+        }
+
         let staged_state = if persist_ancestor_immediately {
             let mut project_state = match ProjectState::load_from_dir(local_root) {
                 Ok(state) => state,
@@ -1014,6 +1055,9 @@ impl SyncEngine {
             };
             for (rel, hash, content) in &updated_records {
                 project_state.record_file(rel, hash.clone(), content.clone());
+            }
+            for rel in &deleted {
+                project_state.remove_file(rel);
             }
             match project_state.stage_to_dir(local_root) {
                 Ok(staged) => Some(staged),
@@ -1041,13 +1085,14 @@ impl SyncEngine {
             return state_push_failure(format!("Failed to persist state: {e}"));
         }
 
-        let staged_files: Vec<PathBuf> =
+        let mut staged_files: Vec<PathBuf> =
             applied.iter().map(|rel| upstream_root.join(rel)).collect();
+        staged_files.extend(deleted_templates);
         PushResult::Success {
             synced_files: staged_files.len(),
             staged_files,
             updated_records,
-            deleted: Vec::new(), // RED scaffold: the GREEN commit reports deletions
+            deleted,
         }
     }
 
@@ -1097,9 +1142,10 @@ impl SyncEngine {
             }
         }
 
-        // Inspect staged index: assert that ONLY allowed files are staged
+        // Inspect staged index: assert that ONLY allowed files are staged. Renames are
+        // off so a deletion plus a similar addition is listed as two entries.
         let mut diff = self.git(Some(remote_checkout));
-        diff.args(["diff", "--cached", "--name-only"]);
+        diff.args(["diff", "--cached", "--name-status", "--no-renames"]);
         let diff_cached = self
             .run_local(diff, "git diff --cached")
             .map_err(|e| format!("Failed to inspect staged diff in remote checkout: {e}"))?;
@@ -1108,17 +1154,25 @@ impl SyncEngine {
         let expected_set: HashSet<PathBuf> = rel_staged_paths.into_iter().collect();
 
         for line in staged_output.lines() {
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
+            if line.trim().is_empty() {
                 continue;
             }
-            let p = PathBuf::from(trimmed);
+            let Some((status, p)) = parse_name_status(line) else {
+                self.reset_index(remote_checkout);
+                return Err(format!(
+                    "Publication gate violation: unparseable staged entry: {line}"
+                ));
+            };
             if !expected_set.contains(&p) {
                 self.reset_index(remote_checkout);
                 return Err(format!(
                     "Publication gate violation: unvalidated file staged in remote checkout: {}",
                     p.display()
                 ));
+            }
+            // A deletion publishes no blob; every other entry is scanned.
+            if status.starts_with('D') {
+                continue;
             }
 
             // Defense in depth: Check staged git index blob bytes for secrets
@@ -1326,7 +1380,8 @@ impl SyncEngine {
             "diff-tree",
             "--root",
             "--no-commit-id",
-            "--name-only",
+            "--name-status",
+            "--no-renames",
             "-r",
             "HEAD",
         ]);
@@ -1340,16 +1395,23 @@ impl SyncEngine {
 
         let committed_output = String::from_utf8_lossy(&diff_tree.stdout);
         for line in committed_output.lines() {
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
+            if line.trim().is_empty() {
                 continue;
             }
-            let p = PathBuf::from(trimmed);
+            let Some((status, p)) = parse_name_status(line) else {
+                return Err(format!(
+                    "Post-commit publication gate violation: unparseable committed entry: {line}"
+                ));
+            };
             if !paths.contains(&p) {
                 return Err(format!(
                     "Post-commit publication gate violation: unvalidated file committed in HEAD: {}",
                     p.display()
                 ));
+            }
+            // A deletion publishes no blob; every other entry is scanned.
+            if status.starts_with('D') {
+                continue;
             }
 
             let show_arg = format!("HEAD:{}", p.to_string_lossy());
@@ -1379,6 +1441,17 @@ impl SyncEngine {
 
         Ok(())
     }
+}
+
+/// Splits one `--name-status --no-renames` line into its status letter(s) and path.
+/// `None` when the line has no tab or an empty status or path (callers fail closed).
+fn parse_name_status(line: &str) -> Option<(&str, PathBuf)> {
+    let (status, path) = line.split_once('\t')?;
+    let status = status.trim();
+    if status.is_empty() || path.is_empty() {
+        return None;
+    }
+    Some((status, PathBuf::from(path)))
 }
 
 /// Appends the redacted stderr excerpt of a failed git/gh run to `message`.
@@ -3192,6 +3265,59 @@ mod tests {
             "{err}"
         );
         assert_eq!(remote_tree(), tree);
+    }
+
+    #[test]
+    fn test_parse_name_status_fails_closed() {
+        assert_eq!(
+            parse_name_status("D\ttemplates/a.repo"),
+            Some(("D", PathBuf::from("templates/a.repo")))
+        );
+        assert_eq!(
+            parse_name_status("M\ttemplates/a b.repo"),
+            Some(("M", PathBuf::from("templates/a b.repo")))
+        );
+        for malformed in [
+            "templates/a.repo",
+            "\ttemplates/a.repo",
+            "M\t",
+            "M templates/a.repo",
+        ] {
+            assert_eq!(parse_name_status(malformed), None, "{malformed:?}");
+        }
+    }
+
+    #[test]
+    fn test_push_local_deletion_respects_publish_boundary() {
+        let engine = SyncEngine::new();
+        let local = tempdir().unwrap();
+        let upstream = tempdir().unwrap();
+        let rel = "scratch/sync-personal-env.sh";
+        let text = "#!/bin/sh\n";
+        let mut state = ProjectState::default();
+        state.record_file(
+            Path::new(rel),
+            SyncEngine::fingerprint(text.as_bytes()),
+            Some(text.into()),
+        );
+        state.save_to_dir(local.path()).unwrap();
+        let template = upstream
+            .path()
+            .join("projects/agents/scratch/sync-personal-env.sh");
+        fs::create_dir_all(template.parent().unwrap()).unwrap();
+        fs::write(&template, text).unwrap();
+        assert_eq!(
+            scan_status(&engine, local.path(), upstream.path(), rel),
+            SyncStatus::LocalDeleted
+        );
+
+        assert_eq!(
+            push_dirs(&engine, local.path(), upstream.path()),
+            PushResult::BoundaryBlocked {
+                path: PathBuf::from(rel)
+            }
+        );
+        assert_eq!(fs::read_to_string(&template).unwrap(), text);
     }
 
     #[test]

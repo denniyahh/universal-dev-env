@@ -825,6 +825,9 @@ fn main() {
                                             for (rel, hash, content) in updated_records {
                                                 project_state.record_file(&rel, hash, content);
                                             }
+                                            for rel in &deleted {
+                                                project_state.remove_file(rel);
+                                            }
                                             if let Err(e) =
                                                 project_state.save_to_dir(&local_project)
                                             {
