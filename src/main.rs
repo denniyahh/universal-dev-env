@@ -806,6 +806,7 @@ fn main() {
                             skipped_conflicts,
                             skipped_merged,
                             skipped_boundary,
+                            skipped_templates,
                         } => {
                             println!(
                                 "  {} Sanitization gate passed: clean of secrets & parameters applied.",
@@ -855,6 +856,16 @@ fn main() {
                                     ),
                                 };
                                 eprintln!("  {} {}: {change}, {reason}", "✗".red(), file.display());
+                            }
+                            for file in &skipped_templates {
+                                let template = sync::map_to_upstream(&root_template_dir, file)
+                                    .unwrap_or_else(|| file.clone());
+                                eprintln!(
+                                    "  {} {}: upstream template {} contains template logic that a push of the rendered file would erase; skipped (edit the template upstream instead)",
+                                    "✗".red(),
+                                    file.display(),
+                                    template.display()
+                                );
                             }
 
                             if let Some(ref remote_checkout) = remote_checkout_root {
@@ -934,6 +945,7 @@ fn main() {
                             if !skipped_conflicts.is_empty()
                                 || !skipped_merged.is_empty()
                                 || !skipped_boundary.is_empty()
+                                || !skipped_templates.is_empty()
                             {
                                 std::process::exit(EXIT_DRIFT);
                             }
