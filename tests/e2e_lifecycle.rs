@@ -993,14 +993,26 @@ fn init_rust_project(bin: &str, path: &Path) -> String {
 /// A bare remote at `<root>/<name>.git` whose main holds only
 /// templates/projects/agents/mise.toml.jinja with `mise`; returns its path.
 fn seed_mise_remote(git: &GitFixture, root: &Path, name: &str, mise: &str) -> PathBuf {
+    seed_mise_remote_at(git, root, name, MISE_TEMPLATE, mise)
+}
+
+/// A bare remote at `<root>/<name>.git` whose main holds only `template` (a path under
+/// the repo root) with `mise`; returns its path.
+fn seed_mise_remote_at(
+    git: &GitFixture,
+    root: &Path,
+    name: &str,
+    template: &str,
+    mise: &str,
+) -> PathBuf {
     let bare = root.join(format!("{name}.git"));
     let bare_url = bare.to_string_lossy().to_string();
     git.run(root, &["init", "--bare", "-q", "-b", "main", &bare_url]);
     let seed = root.join(format!("{name}-seed"));
     git.run(root, &["init", "-q", "-b", "main", &seed.to_string_lossy()]);
-    let tdir = seed.join("templates/projects/agents");
-    fs::create_dir_all(&tdir).unwrap();
-    fs::write(tdir.join("mise.toml.jinja"), mise).unwrap();
+    let target = seed.join(template);
+    fs::create_dir_all(target.parent().unwrap()).unwrap();
+    fs::write(target, mise).unwrap();
     git.run(&seed, &["add", "-A"]);
     git.run(&seed, &["commit", "-q", "-m", "seed"]);
     git.run(&seed, &["push", "-q", &bare_url, "main"]);
@@ -1530,5 +1542,59 @@ fn test_ude_command_drops_host_typesafe_key() {
     assert!(
         removed,
         "ude_command must env_remove TYPESAFE_API_KEY so tests never use the host key"
+    );
+}
+
+/// Edits mise.toml in a fresh project whose remote keeps the template at `template`,
+/// pushes, then pulls. The push must publish the edit and the pull must keep it.
+fn assert_push_publishes_and_pull_keeps_edit(temp: &Path, layout: &str, template: &str) {
+    let bin = env!("CARGO_BIN_EXE_ude");
+    let git = GitFixture::new();
+    let root = temp.join(layout);
+    fs::create_dir_all(&root).unwrap();
+    let ude = sync_cli(&root);
+
+    let project = root.join("project");
+    let init_mise = init_rust_project(bin, &project);
+    let bare = seed_mise_remote_at(&git, &root, "remote", template, &init_mise);
+    let bare_url = bare.to_string_lossy().to_string();
+    let head_before = git.output(&bare, &["rev-parse", "refs/heads/main"]);
+    let local_mise = format!("{init_mise}# local edit\n");
+    fs::write(project.join("mise.toml"), &local_mise).unwrap();
+
+    let push = ude(&project, &["sync", "push", "--remote", &bare_url]);
+    let push_text = outputs(&push);
+    assert_eq!(push.status.code(), Some(0), "[{layout}] {push_text}");
+    assert_ne!(
+        git.output(&bare, &["rev-parse", "refs/heads/main"]),
+        head_before,
+        "[{layout}] push must move the remote branch. {push_text}"
+    );
+    assert_eq!(
+        format!("{}\n", remote_file(&git, &bare, template)),
+        local_mise,
+        "[{layout}] push must publish the local edit. {push_text}"
+    );
+
+    let pull = ude(&project, &["sync", "pull", "--remote", &bare_url]);
+    assert_eq!(pull.status.code(), Some(0), "[{layout}] {}", outputs(&pull));
+    assert_eq!(
+        fs::read_to_string(project.join("mise.toml")).unwrap(),
+        local_mise,
+        "[{layout}] a pull after a successful push must keep the local edit. {}",
+        outputs(&pull)
+    );
+}
+
+#[test]
+fn test_sync_push_root_layout_remote_publishes_and_pull_keeps_edit() {
+    let temp = tempdir().unwrap();
+    // Control: templates under `templates/` in the remote.
+    assert_push_publishes_and_pull_keeps_edit(temp.path(), "templates-layout", MISE_TEMPLATE);
+    // Templates at the remote's root (no `templates/` directory).
+    assert_push_publishes_and_pull_keeps_edit(
+        temp.path(),
+        "root-layout",
+        "projects/agents/mise.toml.jinja",
     );
 }
