@@ -122,6 +122,9 @@ pub enum PushResult {
         /// Locally deleted or edited files inside the private publish boundary, never
         /// published; the rest of the push goes ahead (CR-01, D-10 pattern).
         skipped_boundary: Vec<PathBuf>,
+        /// Locally edited files whose upstream `.jinja` template has logic a rendered
+        /// push would erase; the template must be edited upstream (CR-02).
+        skipped_templates: Vec<PathBuf>,
     },
     SecretBlocked {
         path: PathBuf,
@@ -1198,6 +1201,7 @@ impl SyncEngine {
         let mut skipped_conflicts = Vec::new();
         let mut skipped_merged = Vec::new();
         let mut skipped_boundary = Vec::new();
+        let mut skipped_templates = Vec::new();
 
         // Pass 1: Strict atomic pre-validation across ALL modified candidates
         for state in &states {
@@ -1246,6 +1250,22 @@ impl SyncEngine {
 
             if state.status == SyncStatus::LocallyModified {
                 let local_path = local_root.join(&state.relative_path);
+                let upstream_target = map_to_upstream(upstream_root, &state.relative_path);
+
+                // Gate 2: never replace template logic with rendered text (CR-02).
+                match upstream_target.as_deref().map(template_has_logic) {
+                    Some(Ok(true)) => {
+                        skipped_templates.push(state.relative_path.clone());
+                        continue;
+                    }
+                    Some(Err(reason)) => {
+                        return PushResult::IoFailed {
+                            path: state.relative_path.clone(),
+                            reason,
+                        };
+                    }
+                    Some(Ok(false)) | None => {}
+                }
 
                 let raw_bytes = match fs::read(&local_path) {
                     Ok(b) => b,
@@ -1257,10 +1277,9 @@ impl SyncEngine {
                     }
                 };
 
-                let upstream_target = map_to_upstream(upstream_root, &state.relative_path);
                 let (parameterized_bytes, raw_local_str) =
                     if let Ok(content) = std::str::from_utf8(&raw_bytes) {
-                        // Gate 2: Secret check (reject credentials)
+                        // Gate 3: Secret check (reject credentials)
                         match self.sanitizer.check_secrets(content) {
                             SanitizationResult::SecretDetected { reason, .. } => {
                                 return PushResult::SecretBlocked {
@@ -1271,7 +1290,7 @@ impl SyncEngine {
                             SanitizationResult::Clean(_) => {}
                         }
 
-                        // Gate 3: Path parameterization
+                        // Gate 4: Path parameterization
                         let parameterized = self
                             .sanitizer
                             .parameterize_paths(content, user_home, xdg_config);
@@ -1400,6 +1419,7 @@ impl SyncEngine {
             skipped_conflicts,
             skipped_merged,
             skipped_boundary,
+            skipped_templates,
         }
     }
 
@@ -2048,6 +2068,36 @@ fn remove_conflict_sidecar(local_root: &Path, rel: &Path) -> Result<(), String> 
             rel.display()
         )),
     }
+}
+
+/// Placeholders `parameterize_paths` writes back on push, so a template holding only
+/// these survives a push of its rendered text.
+const PARAMETERIZED_PLACEHOLDERS: [&str; 2] = ["{{ user.home }}", "{{ user.xdg_config }}"];
+
+/// Whether `template` is a `.jinja` file with template constructs (other than the
+/// parameterized path placeholders) that publishing rendered text would erase (CR-02).
+/// An absent template has none.
+fn template_has_logic(template: &Path) -> Result<bool, String> {
+    if template.extension().is_none_or(|ext| ext != "jinja") {
+        return Ok(false);
+    }
+    let bytes = match fs::read(template) {
+        Ok(bytes) => bytes,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(err) => {
+            return Err(format!(
+                "Failed to read upstream template {}: {err}",
+                template.display()
+            ));
+        }
+    };
+    let mut text = String::from_utf8_lossy(&bytes).into_owned();
+    for placeholder in PARAMETERIZED_PLACEHOLDERS {
+        text = text.replace(placeholder, "");
+    }
+    Ok(["{{", "{%", "{#"]
+        .iter()
+        .any(|marker| text.contains(marker)))
 }
 
 /// Upstream template path for the managed project path `rel`, or `None` when `rel`
@@ -4439,6 +4489,34 @@ mod tests {
     }
 
     #[test]
+    fn test_template_has_logic() {
+        let dir = tempdir().unwrap();
+        let check = |name: &str, text: Option<&str>| {
+            let path = dir.path().join(name);
+            if let Some(text) = text {
+                fs::write(&path, text).unwrap();
+            }
+            template_has_logic(&path).unwrap()
+        };
+        for logic in [
+            "{% if x %}a{% endif %}",
+            "a = {{ project_name }}",
+            "{# note #}",
+        ] {
+            assert!(check("logic.jinja", Some(logic)), "{logic}");
+        }
+        // Only the placeholders push writes back: a rendered push loses nothing.
+        assert!(!check(
+            "params.jinja",
+            Some("home = \"{{ user.home }}\"\ncfg = \"{{ user.xdg_config }}\"\n")
+        ));
+        assert!(!check("plain.jinja", Some("[tools]\nrust = \"latest\"\n")));
+        assert!(!check("absent.jinja", None));
+        // Not a .jinja template: never treated as template logic.
+        assert!(!check("gitconfig.repo", Some("{% if x %}a{% endif %}")));
+    }
+
+    #[test]
     fn test_push_never_overwrites_template_logic() {
         let engine = SyncEngine::new();
         let local = tempdir().unwrap();
@@ -4484,10 +4562,13 @@ mod tests {
         assert_eq!(mise_status, SyncStatus::LocallyModified);
 
         let result = push_dirs(&engine, local.path(), upstream.path());
-        assert!(
-            matches!(result, PushResult::Success { .. }),
-            "push: {result:?}"
-        );
+        let PushResult::Success {
+            skipped_templates, ..
+        } = &result
+        else {
+            panic!("push: {result:?}");
+        };
+        assert_eq!(skipped_templates, &vec![PathBuf::from("mise.toml")]);
         assert_eq!(
             fs::read_to_string(&template).unwrap(),
             template_text,
