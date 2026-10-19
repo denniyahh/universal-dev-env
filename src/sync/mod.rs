@@ -4539,6 +4539,310 @@ mod tests {
         ));
     }
 
+    fn load_state(local: &Path) -> ProjectState {
+        ProjectState::load_from_dir(local).unwrap()
+    }
+
+    fn gitconfig_conflict(local: &Path) -> Option<state::ConflictRecord> {
+        load_state(local).conflict(Path::new(".gitconfig")).cloned()
+    }
+
+    fn resolve_gitconfig(engine: &SyncEngine, local: &Path) -> Result<ResolveOutcome, String> {
+        engine.resolve_conflict(local, Path::new(".gitconfig"))
+    }
+
+    #[test]
+    fn test_resolve() {
+        let engine = SyncEngine::new();
+        let (local, upstream) = conflicted_gitconfig(&engine);
+        let sidecar = local.path().join(".gitconfig.conflict");
+        assert!(sidecar.is_file(), "fixture: pull wrote the sidecar");
+        let recorded = gitconfig_conflict(local.path()).expect("fixture: open conflict");
+
+        assert_eq!(
+            resolve_gitconfig(&engine, local.path()),
+            Ok(ResolveOutcome::KeptLocal)
+        );
+        let state = load_state(local.path());
+        assert_eq!(
+            state.get_ancestor_hash(Path::new(".gitconfig")),
+            recorded.upstream_hash.as_deref(),
+            "the recorded upstream version becomes the ancestor"
+        );
+        assert_eq!(
+            state.get_ancestor_content(Path::new(".gitconfig")),
+            Some(CONFLICT_UPSTREAM)
+        );
+        assert!(state.conflict(Path::new(".gitconfig")).is_none());
+        assert!(!sidecar.exists(), "resolve removes the sidecar");
+        assert_eq!(
+            fs::read_to_string(local.path().join(".gitconfig")).unwrap(),
+            CONFLICT_LOCAL,
+            "resolve never rewrites the local file"
+        );
+        let pushed = push_dirs(&engine, local.path(), upstream.path());
+        assert_eq!(push_skips(&pushed), (Vec::new(), Vec::new()));
+        assert_eq!(
+            fs::read_to_string(upstream_gitconfig_path(upstream.path())).unwrap(),
+            CONFLICT_LOCAL,
+            "the next push publishes the local content"
+        );
+
+        // Negative control: deleting the sidecar by hand does not resolve.
+        let (hand_local, hand_upstream) = conflicted_gitconfig(&engine);
+        fs::remove_file(hand_local.path().join(".gitconfig.conflict")).unwrap();
+        assert!(gitconfig_conflict(hand_local.path()).is_some());
+        let skipped = push_dirs(&engine, hand_local.path(), hand_upstream.path());
+        assert_eq!(
+            push_skips(&skipped),
+            (vec![PathBuf::from(".gitconfig")], Vec::new())
+        );
+        assert_eq!(
+            fs::read_to_string(upstream_gitconfig_path(hand_upstream.path())).unwrap(),
+            CONFLICT_UPSTREAM
+        );
+    }
+
+    /// A `.gitconfig` deletion conflict after the first conflicted pull.
+    fn deletion_conflict(
+        engine: &SyncEngine,
+        local: Option<&str>,
+        upstream: Option<&str>,
+    ) -> (tempfile::TempDir, tempfile::TempDir) {
+        let (local_dir, upstream_dir) =
+            deletion_fixture(Some(CONFLICT_BASE), None, local, upstream);
+        assert_eq!(
+            pull_dirs(engine, local_dir.path(), upstream_dir.path()),
+            conflicts_only(&[".gitconfig"])
+        );
+        assert!(local_dir.path().join(".gitconfig.conflict").is_file());
+        (local_dir, upstream_dir)
+    }
+
+    /// Asserts resolve cleared the conflict and its sidecar and left `tombstone`.
+    fn assert_resolved(local: &Path, tombstone: Option<(&str, bool)>) {
+        let state = load_state(local);
+        let rel = Path::new(".gitconfig");
+        assert!(state.conflict(rel).is_none(), "conflict record cleared");
+        assert!(
+            !local.join(".gitconfig.conflict").exists(),
+            "sidecar removed"
+        );
+        assert!(
+            state.get_ancestor_hash(rel).is_none(),
+            "files record removed"
+        );
+        let actual = state
+            .tombstone(rel)
+            .map(|t| (t.deleted_hash.clone(), t.kept_unmanaged));
+        let expected =
+            tombstone.map(|(text, kept)| (SyncEngine::fingerprint(text.as_bytes()), kept));
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn test_resolve_deletion_conflicts() {
+        let engine = SyncEngine::new();
+
+        // D-13, local copy kept: unmanaged, never republished.
+        let (local, upstream) = deletion_conflict(&engine, Some(CONFLICT_LOCAL), None);
+        assert_eq!(
+            resolve_gitconfig(&engine, local.path()),
+            Ok(ResolveOutcome::KeptUnmanaged)
+        );
+        assert_resolved(local.path(), Some((CONFLICT_BASE, true)));
+        assert_eq!(
+            scan_status(&engine, local.path(), upstream.path(), ".gitconfig"),
+            SyncStatus::Unmanaged
+        );
+        let pushed = push_dirs(&engine, local.path(), upstream.path());
+        assert_eq!(push_skips(&pushed), (Vec::new(), Vec::new()));
+        assert!(matches!(
+            pushed,
+            PushResult::Success {
+                synced_files: 0,
+                ..
+            }
+        ));
+        assert!(!upstream_gitconfig_path(upstream.path()).exists());
+
+        // D-13 after the user deleted the local copy: tracking ends.
+        let (local, _upstream) = deletion_conflict(&engine, Some(CONFLICT_LOCAL), None);
+        fs::remove_file(local.path().join(".gitconfig")).unwrap();
+        assert_eq!(
+            resolve_gitconfig(&engine, local.path()),
+            Ok(ResolveOutcome::DroppedDeleted)
+        );
+        assert_resolved(local.path(), Some((CONFLICT_BASE, false)));
+
+        // D-15 (deleted locally, changed upstream), resolved with the file absent: the
+        // next push deletes the upstream template.
+        let (local, upstream) = deletion_conflict(&engine, None, Some(CONFLICT_UPSTREAM));
+        assert_eq!(
+            resolve_gitconfig(&engine, local.path()),
+            Ok(ResolveOutcome::AcceptedLocalDeletion)
+        );
+        assert!(gitconfig_conflict(local.path()).is_none());
+        assert!(!local.path().join(".gitconfig.conflict").exists());
+        assert_eq!(
+            scan_status(&engine, local.path(), upstream.path(), ".gitconfig"),
+            SyncStatus::LocalDeleted
+        );
+        let pushed = push_dirs(&engine, local.path(), upstream.path());
+        let PushResult::Success { deleted, .. } = &pushed else {
+            panic!("expected a successful push, got {pushed:?}");
+        };
+        assert_eq!(deleted, &vec![PathBuf::from(".gitconfig")]);
+        assert!(!upstream_gitconfig_path(upstream.path()).exists());
+
+        // The same conflict after the user restored the upstream content: kept, in sync.
+        let (local, upstream) = deletion_conflict(&engine, None, Some(CONFLICT_UPSTREAM));
+        fs::write(local.path().join(".gitconfig"), CONFLICT_UPSTREAM).unwrap();
+        assert_eq!(
+            resolve_gitconfig(&engine, local.path()),
+            Ok(ResolveOutcome::KeptLocal)
+        );
+        assert_eq!(
+            scan_status(&engine, local.path(), upstream.path(), ".gitconfig"),
+            SyncStatus::InSync
+        );
+
+        // R4 with no files record: nothing to fingerprint, so no tombstone (row 16).
+        for with_record in [false, true] {
+            let local = tempdir().unwrap();
+            let upstream = tempdir().unwrap();
+            let mut state = ProjectState::default();
+            if with_record {
+                state.record_file(
+                    Path::new(".gitconfig"),
+                    SyncEngine::fingerprint(CONFLICT_BASE.as_bytes()),
+                    Some(CONFLICT_BASE.to_string()),
+                );
+            }
+            state.record_conflict(Path::new(".gitconfig"), None, None);
+            state.save_to_dir(local.path()).unwrap();
+            fs::write(local.path().join(".gitconfig.conflict"), "sidecar\n").unwrap();
+            assert_eq!(
+                resolve_gitconfig(&engine, local.path()),
+                Ok(ResolveOutcome::DroppedDeleted),
+                "with_record = {with_record}"
+            );
+            // Control: with a files record the ancestor fingerprint is tombstoned.
+            let tombstone = with_record.then_some((CONFLICT_BASE, false));
+            assert_resolved(local.path(), tombstone);
+            assert_eq!(
+                scan_status(&engine, local.path(), upstream.path(), ".gitconfig"),
+                SyncStatus::Absent
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_resolve_sidecar_failure_keeps_conflict() {
+        use std::os::unix::fs::symlink;
+        let engine = SyncEngine::new();
+        let outside = tempdir().unwrap();
+        let victim = outside.path().join("victim");
+        fs::write(&victim, "outside\n").unwrap();
+
+        for case in ["symlink", "directory"] {
+            let (local, _upstream) = conflicted_gitconfig(&engine);
+            let sidecar = local.path().join(".gitconfig.conflict");
+            fs::remove_file(&sidecar).unwrap();
+            if case == "symlink" {
+                symlink(&victim, &sidecar).unwrap();
+            } else {
+                fs::create_dir(&sidecar).unwrap();
+            }
+            let state_before = fs::read(local.path().join(STATE_FILE_REL)).unwrap();
+
+            let err = resolve_gitconfig(&engine, local.path())
+                .expect_err(&format!("a {case} sidecar must be refused"));
+            assert!(err.contains(".gitconfig.conflict"), "{case}: {err}");
+            assert!(err.contains("still unresolved"), "{case}: {err}");
+            assert_eq!(
+                fs::read(local.path().join(STATE_FILE_REL)).unwrap(),
+                state_before,
+                "{case}: state.json must be byte-identical"
+            );
+            assert!(gitconfig_conflict(local.path()).is_some(), "{case}");
+            let meta = fs::symlink_metadata(&sidecar).unwrap();
+            if case == "symlink" {
+                assert!(meta.file_type().is_symlink(), "the symlink is left alone");
+            } else {
+                assert!(meta.is_dir(), "the directory is left alone");
+            }
+        }
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "outside\n");
+
+        // Negative control: a regular sidecar resolves, so the errors above came from
+        // the sidecar step and not from the setup.
+        let (local, _upstream) = conflicted_gitconfig(&engine);
+        assert_eq!(
+            resolve_gitconfig(&engine, local.path()),
+            Ok(ResolveOutcome::KeptLocal)
+        );
+        assert!(!local.path().join(".gitconfig.conflict").exists());
+        assert!(gitconfig_conflict(local.path()).is_none());
+    }
+
+    #[test]
+    fn test_resolve_rejects_invalid_targets() {
+        let engine = SyncEngine::new();
+        let outside = tempdir().unwrap();
+        let (local, _upstream) = conflicted_gitconfig(&engine);
+        let state_path = local.path().join(STATE_FILE_REL);
+        let state_before = fs::read(&state_path).unwrap();
+        let escape = local.path().join("../x");
+        let outside_target = outside.path().join("x");
+        let cases: [(PathBuf, &str); 6] = [
+            (PathBuf::from("/etc/passwd"), "unsafe path"),
+            (outside_target.clone(), "unsafe path"),
+            (PathBuf::from("../x"), "unsafe path"),
+            (PathBuf::from("./.gitconfig"), "unsafe path"),
+            (PathBuf::from("README.md"), "not a UDE-managed file"),
+            (PathBuf::from("mise.toml"), "No open conflict"),
+        ];
+        for (target, expected) in &cases {
+            let err = engine
+                .resolve_conflict(local.path(), target)
+                .expect_err(&format!("{} must be refused", target.display()));
+            assert!(err.contains(expected), "{}: {err}", target.display());
+            assert_eq!(fs::read(&state_path).unwrap(), state_before);
+        }
+        assert!(!escape.exists() && !outside_target.exists());
+
+        // Control: the open .gitconfig conflict was untouched by every refusal, and a
+        // managed file with no open conflict is refused the same way after resolving.
+        assert!(local.path().join(".gitconfig.conflict").is_file());
+        assert_eq!(
+            resolve_gitconfig(&engine, local.path()),
+            Ok(ResolveOutcome::KeptLocal)
+        );
+        let resolved_state = fs::read(&state_path).unwrap();
+        let err = resolve_gitconfig(&engine, local.path()).unwrap_err();
+        assert!(err.contains("No open conflict for .gitconfig"), "{err}");
+        assert_eq!(fs::read(&state_path).unwrap(), resolved_state);
+
+        // A symlinked managed file is refused, not read through or treated as absent.
+        #[cfg(unix)]
+        {
+            let (linked, _upstream) = conflicted_gitconfig(&engine);
+            let victim = outside.path().join("victim");
+            fs::write(&victim, CONFLICT_LOCAL).unwrap();
+            fs::remove_file(linked.path().join(".gitconfig")).unwrap();
+            std::os::unix::fs::symlink(&victim, linked.path().join(".gitconfig")).unwrap();
+            let linked_state = linked.path().join(STATE_FILE_REL);
+            let before = fs::read(&linked_state).unwrap();
+            let err = resolve_gitconfig(&engine, linked.path()).unwrap_err();
+            assert!(err.contains("symlink"), "{err}");
+            assert_eq!(fs::read(&linked_state).unwrap(), before);
+            assert!(linked.path().join(".gitconfig.conflict").is_file());
+            assert_eq!(fs::read_to_string(&victim).unwrap(), CONFLICT_LOCAL);
+        }
+    }
+
     #[test]
     fn test_push_updates_clean_with_parameterization() {
         let engine = SyncEngine::new();
