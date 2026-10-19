@@ -131,6 +131,8 @@ pub struct PullReport {
     pub applied: Vec<PathBuf>,
     /// Files whose tracking ended because they were deleted upstream (D-12, D-16).
     pub deleted: Vec<PathBuf>,
+    /// Files deleted locally but not yet pushed; pull keeps them deleted (D-15).
+    pub locally_deleted_pending: Vec<PathBuf>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -312,6 +314,7 @@ impl SyncEngine {
         local_hash: Option<&str>,
         upstream_hash: Option<&str>,
         has_local_override: bool,
+        _tombstoned: bool, // RED scaffold: the GREEN commit classifies with it
     ) -> SyncStatus {
         let local_change = if has_local_override {
             SyncStatus::Overridden
@@ -362,6 +365,7 @@ impl SyncEngine {
             local.map(|v| v.fingerprint),
             upstream.map(|v| v.fingerprint),
             has_local_override,
+            false,
         );
         if status != SyncStatus::Conflicted {
             return (status, None);
@@ -1709,6 +1713,10 @@ mod tests {
                     report.deleted.is_empty(),
                     "unexpected deletions: {report:?}"
                 );
+                assert!(
+                    report.locally_deleted_pending.is_empty(),
+                    "unexpected pending local deletions: {report:?}"
+                );
                 report.applied.len()
             }
             other => panic!("expected a successful pull, got {other:?}"),
@@ -1779,8 +1787,8 @@ mod tests {
         assert_eq!(
             result,
             PullResult::Success(PullReport {
-                applied: vec![],
                 deleted: vec![PathBuf::from(".gitconfig")],
+                ..PullReport::default()
             })
         );
         assert!(
@@ -2763,6 +2771,291 @@ mod tests {
             vec![PathBuf::from(".gitconfig")]
         );
         assert_eq!(fs::read_to_string(&target).unwrap(), "new\n");
+    }
+
+    /// A project and upstream tree for `.gitconfig`: `ancestor` is recorded when given,
+    /// `tombstone` writes a tombstone instead (no record), and `local` / `upstream` are
+    /// written when given (absent otherwise).
+    fn deletion_fixture(
+        ancestor: Option<&str>,
+        tombstone: Option<&str>,
+        local: Option<&str>,
+        upstream: Option<&str>,
+    ) -> (tempfile::TempDir, tempfile::TempDir) {
+        let local_dir = tempdir().unwrap();
+        let upstream_dir = tempdir().unwrap();
+        let mut state = ProjectState::default();
+        let rel = Path::new(".gitconfig");
+        if let Some(base) = ancestor {
+            state.record_file(
+                rel,
+                SyncEngine::fingerprint(base.as_bytes()),
+                Some(base.into()),
+            );
+        }
+        if let Some(deleted) = tombstone {
+            state.record_tombstone(rel, SyncEngine::fingerprint(deleted.as_bytes()), false);
+        }
+        state.save_to_dir(local_dir.path()).unwrap();
+        if let Some(text) = local {
+            fs::write(local_dir.path().join(rel), text).unwrap();
+        }
+        if let Some(text) = upstream {
+            write_upstream_gitconfig(upstream_dir.path(), text.as_bytes());
+        }
+        (local_dir, upstream_dir)
+    }
+
+    fn pull_dirs(engine: &SyncEngine, local: &Path, upstream: &Path) -> PullResult {
+        let ctx = crate::template::TemplateContext::detect_for_project(local, "p", "rust");
+        engine.pull_updates(local, upstream, &ctx)
+    }
+
+    #[test]
+    fn test_pull_keeps_local_deletion() {
+        let engine = SyncEngine::new();
+        let base = "[core]\n\tautocrlf = input\n";
+        let (local, upstream) = deletion_fixture(Some(base), None, None, Some(base));
+
+        assert_eq!(
+            pull_dirs(&engine, local.path(), upstream.path()),
+            PullResult::Success(PullReport {
+                locally_deleted_pending: vec![PathBuf::from(".gitconfig")],
+                ..PullReport::default()
+            })
+        );
+        assert!(
+            !local.path().join(".gitconfig").exists(),
+            "pull must not recreate it"
+        );
+        let state = ProjectState::load_from_dir(local.path()).unwrap();
+        assert!(state.get_ancestor_hash(Path::new(".gitconfig")).is_some());
+
+        // Negative control (D-15 second clause): upstream changed meanwhile.
+        let (local, upstream) =
+            deletion_fixture(Some(base), None, None, Some("[core]\n\tautocrlf = false\n"));
+        assert_eq!(
+            scan_status(&engine, local.path(), upstream.path(), ".gitconfig"),
+            SyncStatus::Conflicted
+        );
+        assert_eq!(
+            pull_dirs(&engine, local.path(), upstream.path()),
+            PullResult::ConflictBlocked {
+                path: PathBuf::from(".gitconfig")
+            }
+        );
+        assert!(!local.path().join(".gitconfig").exists());
+    }
+
+    #[test]
+    fn test_both_deleted() {
+        let engine = SyncEngine::new();
+        let base = "[core]\n";
+        let (local, upstream) = deletion_fixture(Some(base), None, None, None);
+        let gitconfig = local.path().join(".gitconfig");
+        let state_path = local.path().join(STATE_FILE_REL);
+
+        assert_eq!(
+            pull_dirs(&engine, local.path(), upstream.path()),
+            PullResult::Success(PullReport {
+                deleted: vec![PathBuf::from(".gitconfig")],
+                ..PullReport::default()
+            })
+        );
+        assert!(
+            !gitconfig.exists(),
+            "a double deletion must not create a file"
+        );
+        let state = ProjectState::load_from_dir(local.path()).unwrap();
+        assert_eq!(state.get_ancestor_hash(Path::new(".gitconfig")), None);
+        let tombstone = state.tombstone(Path::new(".gitconfig")).expect("tombstone");
+        assert_eq!(
+            tombstone.deleted_hash,
+            SyncEngine::fingerprint(base.as_bytes())
+        );
+        assert!(!tombstone.kept_unmanaged);
+
+        // Row 11 afterwards: untracked, tombstoned, absent on both sides.
+        assert_eq!(
+            scan_status(&engine, local.path(), upstream.path(), ".gitconfig"),
+            SyncStatus::Absent
+        );
+        let state_before = fs::read(&state_path).unwrap();
+        assert_eq!(
+            applied_only(pull_dirs(&engine, local.path(), upstream.path())),
+            0
+        );
+        assert_eq!(fs::read(&state_path).unwrap(), state_before);
+        assert!(!gitconfig.exists());
+
+        // Negative control: an empty local file is present and edited, not deleted.
+        let (local, upstream) = deletion_fixture(Some(base), None, Some(""), None);
+        assert_eq!(
+            scan_status(&engine, local.path(), upstream.path(), ".gitconfig"),
+            SyncStatus::Conflicted
+        );
+        assert_eq!(
+            pull_dirs(&engine, local.path(), upstream.path()),
+            PullResult::ConflictBlocked {
+                path: PathBuf::from(".gitconfig")
+            }
+        );
+        assert_eq!(fs::read(local.path().join(".gitconfig")).unwrap(), b"");
+    }
+
+    #[test]
+    fn test_unmanaged_and_tombstone_clear() {
+        let engine = SyncEngine::new();
+        let rel = Path::new(".gitconfig");
+        // Row 7: tombstone, no record, present locally only.
+        let (local, upstream) = deletion_fixture(None, Some("old\n"), Some("recreated\n"), None);
+        assert_eq!(
+            scan_status(&engine, local.path(), upstream.path(), ".gitconfig"),
+            SyncStatus::Unmanaged
+        );
+        let state_path = local.path().join(STATE_FILE_REL);
+        let state_before = fs::read(&state_path).unwrap();
+        assert_eq!(
+            applied_only(pull_dirs(&engine, local.path(), upstream.path())),
+            0
+        );
+        assert_eq!(fs::read(&state_path).unwrap(), state_before);
+        assert_eq!(
+            fs::read_to_string(local.path().join(rel)).unwrap(),
+            "recreated\n"
+        );
+
+        // Row 9: upstream re-adds the file; pull writes and records it (I1 clears T).
+        fs::remove_file(local.path().join(rel)).unwrap();
+        write_upstream_gitconfig(upstream.path(), b"re-added\n");
+        assert_eq!(
+            scan_status(&engine, local.path(), upstream.path(), ".gitconfig"),
+            SyncStatus::UpstreamModified
+        );
+        assert_eq!(
+            applied_only(pull_dirs(&engine, local.path(), upstream.path())),
+            1
+        );
+        assert_eq!(
+            fs::read_to_string(local.path().join(rel)).unwrap(),
+            "re-added\n"
+        );
+        let state = ProjectState::load_from_dir(local.path()).unwrap();
+        assert_eq!(
+            state.get_ancestor_hash(rel),
+            Some(SyncEngine::fingerprint(b"re-added\n").as_str())
+        );
+        assert_eq!(state.tombstone(rel), None);
+
+        // Row 10: tombstone, equal local and upstream; pull reconciles the ancestor.
+        let (local, upstream) =
+            deletion_fixture(None, Some("old\n"), Some("same\n"), Some("same\n"));
+        assert_eq!(
+            scan_status(&engine, local.path(), upstream.path(), ".gitconfig"),
+            SyncStatus::InSync
+        );
+        assert_eq!(
+            applied_only(pull_dirs(&engine, local.path(), upstream.path())),
+            0
+        );
+        let state = ProjectState::load_from_dir(local.path()).unwrap();
+        assert_eq!(
+            state.get_ancestor_hash(rel),
+            Some(SyncEngine::fingerprint(b"same\n").as_str())
+        );
+        assert_eq!(state.tombstone(rel), None);
+    }
+
+    /// The C-less rows (1-11) of the phase sync state table, restated row by row.
+    /// A tombstone is consulted only without a files record (invariant I1).
+    fn state_table_oracle(
+        ancestor: Option<&str>,
+        local: Option<&str>,
+        upstream: Option<&str>,
+        has_override: bool,
+        tombstoned: bool,
+    ) -> SyncStatus {
+        use SyncStatus::*;
+        let with_override = |status| if has_override { Overridden } else { status };
+        match ancestor {
+            Some(a) => match (local, upstream) {
+                (Some(l), None) if l == a => UpstreamDeleted, // row 1
+                (Some(_), None) => Conflicted,                // row 2
+                (None, Some(u)) if u == a => LocalDeleted,    // row 3
+                (None, Some(_)) => Conflicted,                // row 4
+                (None, None) => BothDeleted,                  // row 5
+                (Some(l), Some(u)) => {
+                    // row 6: the existing three-way rules
+                    if l == u {
+                        with_override(InSync)
+                    } else if l == a {
+                        UpstreamModified
+                    } else if u == a {
+                        with_override(LocallyModified)
+                    } else {
+                        Conflicted
+                    }
+                }
+            },
+            None => match (local, upstream) {
+                (Some(_), None) if tombstoned => Unmanaged, // row 7
+                (Some(_), None) => with_override(LocallyModified), // row 8
+                (None, Some(_)) => UpstreamModified,        // row 9
+                (Some(l), Some(u)) if l == u => with_override(InSync), // row 10
+                (Some(_), Some(_)) => Conflicted,           // row 10
+                (None, None) => Absent,                     // row 11
+            },
+        }
+    }
+
+    #[test]
+    fn test_compare_3way_hashes_exhaustive() {
+        // Negative controls: the oracle agrees with hand-written rows.
+        assert_eq!(
+            state_table_oracle(Some("a"), Some("a"), None, false, false),
+            SyncStatus::UpstreamDeleted
+        );
+        assert_eq!(
+            state_table_oracle(Some("a"), None, None, true, false),
+            SyncStatus::BothDeleted
+        );
+        assert_eq!(
+            state_table_oracle(Some("a"), Some("b"), None, false, false),
+            SyncStatus::Conflicted
+        );
+
+        let values = [None, Some("a"), Some("b"), Some("c")];
+        let mut visited = 0;
+        for ancestor in values {
+            for local in values {
+                for upstream in values {
+                    for has_override in [false, true] {
+                        for tombstoned in [false, true] {
+                            visited += 1;
+                            assert_eq!(
+                                SyncEngine::compare_3way_hashes(
+                                    ancestor,
+                                    local,
+                                    upstream,
+                                    has_override,
+                                    tombstoned
+                                ),
+                                state_table_oracle(
+                                    ancestor,
+                                    local,
+                                    upstream,
+                                    has_override,
+                                    tombstoned
+                                ),
+                                "ancestor {ancestor:?}, local {local:?}, upstream {upstream:?}, \
+                                 override {has_override}, tombstone {tombstoned}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(visited, 256);
     }
 
     #[test]
