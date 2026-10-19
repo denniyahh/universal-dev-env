@@ -135,6 +135,8 @@ pub struct PullReport {
     pub deleted: Vec<PathBuf>,
     /// Files deleted locally but not yet pushed; pull keeps them deleted (D-15).
     pub locally_deleted_pending: Vec<PathBuf>,
+    /// Conflicted files left untouched, each with a `<file>.conflict` sidecar (D-08).
+    pub conflicts: Vec<PathBuf>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1905,18 +1907,31 @@ mod tests {
         );
         assert!(!tombstone.kept_unmanaged);
 
-        // Negative control (D-13): an edited local copy blocks the pull and keeps its bytes.
+        // Negative control (D-13): an edited local copy is a conflict: kept byte-identical,
+        // sidecar written, recorded against a deleted upstream, tracking unchanged.
         let edited = "[core]\n\tautocrlf = false\n";
         let (local, upstream) = upstream_deletion_fixture(base, edited);
         assert_eq!(
             engine.pull_updates(local.path(), upstream.path(), &ctx),
-            PullResult::ConflictBlocked {
-                path: PathBuf::from(".gitconfig")
-            }
+            PullResult::Success(PullReport {
+                conflicts: vec![PathBuf::from(".gitconfig")],
+                ..PullReport::default()
+            })
         );
         assert_eq!(
             fs::read_to_string(local.path().join(".gitconfig")).unwrap(),
             edited
+        );
+        assert!(local.path().join(".gitconfig.conflict").is_file());
+        let state = ProjectState::load_from_dir(local.path()).unwrap();
+        let record = state
+            .conflict(Path::new(".gitconfig"))
+            .expect("conflict record");
+        assert_eq!(record.upstream_hash, None);
+        assert_eq!(state.tombstone(Path::new(".gitconfig")), None);
+        assert_eq!(
+            state.get_ancestor_hash(Path::new(".gitconfig")),
+            Some(SyncEngine::fingerprint(base.as_bytes()).as_str())
         );
     }
 
@@ -2506,62 +2521,156 @@ mod tests {
         }
     }
 
+    /// Writes `bytes` as the upstream template `up_rel` (relative to the template root).
+    fn write_upstream(upstream: &Path, up_rel: &str, bytes: &[u8]) {
+        let path = upstream.join(up_rel);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, bytes).unwrap();
+    }
+
+    /// Every file under `root` (relative to it) whose name ends in `.conflict`.
+    fn conflict_files(root: &Path) -> Vec<PathBuf> {
+        let mut found = Vec::new();
+        let mut pending = vec![root.to_path_buf()];
+        while let Some(dir) = pending.pop() {
+            for entry in fs::read_dir(&dir).unwrap() {
+                let entry = entry.unwrap();
+                if entry.file_type().unwrap().is_dir() {
+                    pending.push(entry.path());
+                } else if entry.file_name().to_string_lossy().ends_with(".conflict") {
+                    found.push(entry.path().strip_prefix(root).unwrap().to_path_buf());
+                }
+            }
+        }
+        found.sort();
+        found
+    }
+
+    /// Asserts the sidecar of `rel` exists and carries the resolve hint and all four
+    /// diff3 markers, each starting a line.
+    fn assert_text_sidecar(local: &Path, rel: &str) -> String {
+        let sidecar = fs::read_to_string(local.join(format!("{rel}.conflict")))
+            .unwrap_or_else(|e| panic!("{rel}.conflict must exist: {e}"));
+        for marker in [
+            "\n<<<<<<< LOCAL\n",
+            "\n||||||| ANCESTOR\n",
+            "\n=======\n",
+            "\n>>>>>>> UPSTREAM\n",
+        ] {
+            assert!(
+                sidecar.contains(marker),
+                "{rel}.conflict lacks {marker:?}: {sidecar}"
+            );
+        }
+        assert!(
+            sidecar.contains(&format!("ude sync resolve {rel}")),
+            "{rel}.conflict lacks the resolve command: {sidecar}"
+        );
+        sidecar
+    }
+
     #[test]
-    fn test_pull_updates_conflict_blocked_no_partial_writes() {
+    fn test_pull_multiple_conflicts_sidecars() {
         let engine = SyncEngine::new();
         let local_dir = tempdir().unwrap();
         let upstream_dir = tempdir().unwrap();
+        let ctx =
+            crate::template::TemplateContext::detect_for_project(local_dir.path(), "p", "rust");
 
-        let ctx = crate::template::TemplateContext::detect_for_project(
-            local_dir.path(),
-            "test-proj",
-            "rust",
-        );
-
-        // Record ancestor for .gitconfig
+        // (local path, upstream template, ancestor, local edit, upstream edit): both
+        // sides change the same line, so each file conflicts.
+        let conflicted = [
+            (
+                ".gitconfig",
+                "projects/generic/gitconfig.repo",
+                "[core]\n  autocrlf = false\n",
+                "[core]\n  autocrlf = local_divergence\n",
+                "[core]\n  autocrlf = upstream_divergence\n",
+            ),
+            (
+                ".gitignore",
+                "projects/generic/gitignore.repo",
+                "target/\n",
+                "local/\n",
+                "upstream/\n",
+            ),
+        ];
         let mut state = ProjectState::default();
-        let base_content = "[core]\n  autocrlf = false\n";
-        let base_hash = SyncEngine::compute_hash(base_content.as_bytes());
-        state.record_file(
-            Path::new(".gitconfig"),
-            base_hash,
-            Some(base_content.to_string()),
-        );
+        for (rel, up_rel, base, local, upstream) in conflicted {
+            state.record_file(
+                Path::new(rel),
+                SyncEngine::fingerprint(base.as_bytes()),
+                Some(base.to_string()),
+            );
+            fs::write(local_dir.path().join(rel), local).unwrap();
+            write_upstream(upstream_dir.path(), up_rel, upstream.as_bytes());
+        }
         state.save_to_dir(local_dir.path()).unwrap();
-
-        // Local has modified .gitconfig
-        let loc_gitconfig = local_dir.path().join(".gitconfig");
-        fs::write(&loc_gitconfig, "[core]\n  autocrlf = local_divergence\n").unwrap();
-
-        // Upstream has ALSO modified .gitconfig
-        let up_gitconfig = upstream_dir.path().join("projects/generic/gitconfig.repo");
-        fs::create_dir_all(up_gitconfig.parent().unwrap()).unwrap();
-        fs::write(&up_gitconfig, "[core]\n  autocrlf = upstream_divergence\n").unwrap();
-
-        // Upstream also has a clean file that should NOT be written due to the conflict
-        let up_hook = upstream_dir
-            .path()
-            .join("projects/generic/hooks/pre-commit");
-        fs::create_dir_all(up_hook.parent().unwrap()).unwrap();
-        fs::write(&up_hook, "#!/bin/sh\nexit 0\n").unwrap();
+        // A clean upstream addition in the same pull.
+        write_upstream(
+            upstream_dir.path(),
+            "projects/generic/hooks/pre-commit",
+            b"#!/bin/sh\nexit 0\n",
+        );
 
         let res = engine.pull_updates(local_dir.path(), upstream_dir.path(), &ctx);
-        match res {
-            PullResult::ConflictBlocked { path } => {
-                assert_eq!(path, PathBuf::from(".gitconfig"));
-            }
-            _ => panic!("Expected ConflictBlocked, got {:?}", res),
-        }
 
-        // Negative control: Verify hook was NOT written to disk
-        assert!(
-            !local_dir.path().join("scripts/hooks/pre-commit").exists(),
-            "Atomicity violation: clean file was materialized despite conflict block!"
-        );
-        // Verify local gitconfig was NOT overwritten
         assert_eq!(
-            fs::read_to_string(&loc_gitconfig).unwrap(),
-            "[core]\n  autocrlf = local_divergence\n"
+            res,
+            PullResult::Success(PullReport {
+                applied: vec![PathBuf::from("scripts/hooks/pre-commit")],
+                conflicts: vec![PathBuf::from(".gitconfig"), PathBuf::from(".gitignore")],
+                ..PullReport::default()
+            }),
+            "every conflict is listed and the clean file is applied"
+        );
+        assert_eq!(
+            fs::read_to_string(local_dir.path().join("scripts/hooks/pre-commit")).unwrap(),
+            "#!/bin/sh\nexit 0\n"
+        );
+        let state = ProjectState::load_from_dir(local_dir.path()).unwrap();
+        for (rel, _, base, local, upstream) in conflicted {
+            assert_text_sidecar(local_dir.path(), rel);
+            assert_eq!(
+                fs::read_to_string(local_dir.path().join(rel)).unwrap(),
+                local,
+                "{rel}: a conflicted local file must stay byte-identical"
+            );
+            let record = state
+                .conflict(Path::new(rel))
+                .unwrap_or_else(|| panic!("{rel}: no conflict record"));
+            assert_eq!(
+                record.upstream_hash.as_deref(),
+                Some(SyncEngine::fingerprint(upstream.as_bytes()).as_str()),
+                "{rel}: conflict recorded against the wrong upstream"
+            );
+            assert_eq!(record.upstream_content.as_deref(), Some(upstream));
+            assert_eq!(
+                state.get_ancestor_hash(Path::new(rel)),
+                Some(SyncEngine::fingerprint(base.as_bytes()).as_str()),
+                "{rel}: the ancestor must not advance on a conflict"
+            );
+        }
+        assert_eq!(
+            conflict_files(local_dir.path()),
+            vec![
+                PathBuf::from(".gitconfig.conflict"),
+                PathBuf::from(".gitignore.conflict")
+            ]
+        );
+
+        // Negative control: a clean pull leaves no `.conflict` file anywhere.
+        let (clean_local, clean_upstream) = staging_failure_fixture(false);
+        assert_eq!(
+            applied_only(engine.pull_updates(clean_local.path(), clean_upstream.path(), &ctx)),
+            3
+        );
+        assert_eq!(conflict_files(clean_local.path()), Vec::<PathBuf>::new());
+        // Positive control for the walker: a planted nested sidecar is found.
+        fs::write(clean_local.path().join("scripts/hooks/x.conflict"), "x").unwrap();
+        assert_eq!(
+            conflict_files(clean_local.path()),
+            vec![PathBuf::from("scripts/hooks/x.conflict")]
         );
     }
 
@@ -2995,11 +3104,24 @@ mod tests {
         );
         assert_eq!(
             pull_dirs(&engine, local.path(), upstream.path()),
-            PullResult::ConflictBlocked {
-                path: PathBuf::from(".gitconfig")
-            }
+            PullResult::Success(PullReport {
+                conflicts: vec![PathBuf::from(".gitconfig")],
+                ..PullReport::default()
+            })
         );
-        assert!(!local.path().join(".gitconfig").exists());
+        assert!(
+            !local.path().join(".gitconfig").exists(),
+            "pull must not recreate it"
+        );
+        assert!(local.path().join(".gitconfig.conflict").is_file());
+        let state = ProjectState::load_from_dir(local.path()).unwrap();
+        assert_eq!(
+            state
+                .conflict(Path::new(".gitconfig"))
+                .expect("conflict record")
+                .upstream_hash,
+            Some(SyncEngine::fingerprint(b"[core]\n\tautocrlf = false\n"))
+        );
     }
 
     #[test]
@@ -3049,11 +3171,16 @@ mod tests {
             scan_status(&engine, local.path(), upstream.path(), ".gitconfig"),
             SyncStatus::Conflicted
         );
+        let result = pull_dirs(&engine, local.path(), upstream.path());
         assert_eq!(
-            pull_dirs(&engine, local.path(), upstream.path()),
-            PullResult::ConflictBlocked {
-                path: PathBuf::from(".gitconfig")
-            }
+            result,
+            PullResult::Success(PullReport {
+                conflicts: vec![PathBuf::from(".gitconfig")],
+                ..PullReport::default()
+            })
+        );
+        assert!(
+            matches!(&result, PullResult::Success(r) if !r.deleted.contains(&PathBuf::from(".gitconfig")))
         );
         assert_eq!(fs::read(local.path().join(".gitconfig")).unwrap(), b"");
     }
