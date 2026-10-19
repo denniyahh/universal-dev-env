@@ -5635,13 +5635,44 @@ mod tests {
         }
     }
 
-    /// Link targets of every open descriptor of `pid`, from /proc/<pid>/fd.
+    /// Scheduler state letter of `pid` (`S` = interruptible sleep), from /proc/<pid>/stat.
     #[cfg(target_os = "linux")]
-    fn open_fd_targets(pid: u32) -> Vec<PathBuf> {
-        fs::read_dir(format!("/proc/{pid}/fd"))
-            .expect("list /proc/<pid>/fd")
-            .map(|entry| fs::read_link(entry.expect("fd entry").path()).expect("read fd link"))
-            .collect()
+    fn proc_state(pid: u32) -> Option<char> {
+        let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        // The command name may contain spaces or parentheses; the state follows the
+        // last `)`.
+        stat[stat.rfind(')')? + 1..].trim_start().chars().next()
+    }
+
+    /// How long a spawned child may take to finish exec and its loader.
+    #[cfg(target_os = "linux")]
+    const CHILD_SETTLE_TIMEOUT: Duration = Duration::from_secs(10);
+
+    /// Link targets of every open descriptor of `pid` once it runs `exe` and sleeps.
+    /// Spawn can return before exec closes the close-on-exec descriptors, and the
+    /// dynamic loader opens and closes files after exec; /proc/<pid>/fd is unreadable
+    /// while exec runs. A process running `exe` in interruptible sleep is past all of
+    /// that, so its descriptor table is final. A descriptor that still closes between
+    /// listing and reading it is skipped.
+    #[cfg(target_os = "linux")]
+    fn settled_fd_targets(pid: u32, exe: &Path) -> Vec<PathBuf> {
+        let deadline = std::time::Instant::now() + CHILD_SETTLE_TIMEOUT;
+        loop {
+            if fs::read_link(format!("/proc/{pid}/exe")).is_ok_and(|target| target == exe)
+                && proc_state(pid) == Some('S')
+                && let Ok(entries) = fs::read_dir(format!("/proc/{pid}/fd"))
+            {
+                return entries
+                    .filter_map(|entry| fs::read_link(entry.ok()?.path()).ok())
+                    .collect();
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "process {pid} never settled into sleeping as {}",
+                exe.display()
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
     }
 
     #[test]
@@ -5706,22 +5737,23 @@ mod tests {
                 .expect("spawn sleep");
             ChildGuard(child)
         };
+        let sleep_exe =
+            fs::canonicalize(which::which("sleep").expect("sleep on PATH")).expect("resolve sleep");
         let temp = tempdir().unwrap();
         let lock_path = temp.path().join("inherit.lock");
         let _guard = RemoteLockGuard::acquire(&lock_path, 1).expect("acquire remote lock");
         let lock_file = fs::canonicalize(&lock_path).unwrap();
 
-        // std's spawn returns after exec, so the child's descriptor table is final.
         let plain = spawn_sleep(Stdio::null());
         assert!(
-            !open_fd_targets(plain.0.id()).contains(&lock_file),
+            !settled_fd_targets(plain.0.id(), &sleep_exe).contains(&lock_file),
             "a spawned child inherited the lock file descriptor"
         );
 
         // Negative control: a child handed the lock file as stdin is seen holding it.
         let inheriting = spawn_sleep(Stdio::from(fs::File::open(&lock_path).unwrap()));
         assert!(
-            open_fd_targets(inheriting.0.id()).contains(&lock_file),
+            settled_fd_targets(inheriting.0.id(), &sleep_exe).contains(&lock_file),
             "the descriptor scan missed an inherited lock file"
         );
     }
