@@ -310,6 +310,14 @@ impl ProjectState {
         self.conflicts.remove(&state_key(rel_path));
     }
 
+    /// Whether `rel_path` has any record: an ancestor, a tombstone or an open conflict.
+    pub fn has_record(&self, rel_path: &Path) -> bool {
+        let key = state_key(rel_path);
+        self.files.contains_key(&key)
+            || self.tombstones.contains_key(&key)
+            || self.conflicts.contains_key(&key)
+    }
+
     /// Removes a file record from tracked state.
     pub fn remove_file(&mut self, rel_path: &Path) {
         self.files.remove(&state_key(rel_path));

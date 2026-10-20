@@ -1227,32 +1227,26 @@ impl SyncEngine {
 
             // Gate 1: publish boundary. A local deletion or edit of a private path is
             // skipped and reported, like a conflict (D-10); the rest is still published.
-            if matches!(
+            // It is checked in two halves around Gate 2, the order the status hint
+            // reports: a local-only path first, then template logic, which --force
+            // cannot clear, then the --force requirement for agent rules.
+            let boundary_change = matches!(
                 state.status,
                 SyncStatus::LocalDeleted | SyncStatus::LocallyModified
-            ) && self
-                .sanitizer
-                .is_local_only_path(&state.relative_path, allow_agent_rules)
+            );
+            if boundary_change
+                && self
+                    .sanitizer
+                    .is_local_only_path(&state.relative_path, true)
             {
                 skipped_boundary.push(state.relative_path.clone());
                 continue;
             }
 
-            // Deleted locally, unchanged upstream (D-14): delete the upstream template.
-            // Unmanaged, UpstreamDeleted, BothDeleted and Absent are never published.
-            if state.status == SyncStatus::LocalDeleted {
-                if let Some(target_upstream) = map_to_upstream(upstream_root, &state.relative_path)
-                {
-                    deletions.push((state.relative_path.clone(), target_upstream));
-                }
-                continue;
-            }
+            let upstream_target = map_to_upstream(upstream_root, &state.relative_path);
 
+            // Gate 2: never replace template logic with rendered text (CR-02).
             if state.status == SyncStatus::LocallyModified {
-                let local_path = local_root.join(&state.relative_path);
-                let upstream_target = map_to_upstream(upstream_root, &state.relative_path);
-
-                // Gate 2: never replace template logic with rendered text (CR-02).
                 match upstream_target.as_deref().map(template_has_logic) {
                     Some(Ok(true)) => {
                         skipped_templates.push(state.relative_path.clone());
@@ -1266,6 +1260,28 @@ impl SyncEngine {
                     }
                     Some(Ok(false)) | None => {}
                 }
+            }
+
+            if boundary_change
+                && self
+                    .sanitizer
+                    .is_local_only_path(&state.relative_path, allow_agent_rules)
+            {
+                skipped_boundary.push(state.relative_path.clone());
+                continue;
+            }
+
+            // Deleted locally, unchanged upstream (D-14): delete the upstream template.
+            // Unmanaged, UpstreamDeleted, BothDeleted and Absent are never published.
+            if state.status == SyncStatus::LocalDeleted {
+                if let Some(target_upstream) = upstream_target {
+                    deletions.push((state.relative_path.clone(), target_upstream));
+                }
+                continue;
+            }
+
+            if state.status == SyncStatus::LocallyModified {
+                let local_path = local_root.join(&state.relative_path);
 
                 let raw_bytes = match fs::read(&local_path) {
                     Ok(b) => b,

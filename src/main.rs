@@ -169,9 +169,8 @@ fn main() {
                 std::process::exit(1);
             }
 
-            // Records of an earlier `ude init`, so a re-run keeps the ancestor of a file
-            // it keeps. Unreadable state is never reset (D-06), so init stops before
-            // touching any file.
+            // Records of an earlier `ude init` or sync. Unreadable state is never reset
+            // (D-06), so init stops before touching any file.
             let prior_state = match sync::ProjectState::load_from_dir(&project_path) {
                 Ok(state) => state,
                 Err(e) => {
@@ -179,6 +178,11 @@ fn main() {
                     std::process::exit(EXIT_HARD_FAILURE);
                 }
             };
+            // A managed file with any record (ancestor, tombstone or open conflict)
+            // belongs to sync: a re-run of init neither writes it nor replaces its
+            // record, so it cannot discard a local edit, resurrect a deletion or drop
+            // an open conflict. Pull brings it up to date.
+            let tracked = |rel: &str| prior_state.has_record(Path::new(rel));
 
             let project_name = project_path
                 .file_name()
@@ -233,10 +237,12 @@ fn main() {
 
             // 2. Materialize .gitconfig include & .gitignore
             if let Some(ref tdir) = root_template_dir {
-                if let Err(e) = copy_template_file(
-                    &tdir.join("projects/generic/gitconfig.repo"),
-                    &project_path.join(".gitconfig"),
-                ) {
+                if !tracked(".gitconfig")
+                    && let Err(e) = copy_template_file(
+                        &tdir.join("projects/generic/gitconfig.repo"),
+                        &project_path.join(".gitconfig"),
+                    )
+                {
                     eprintln!("  {} Initialization failed: {e}", "✗".red());
                     std::process::exit(1);
                 }
@@ -244,7 +250,9 @@ fn main() {
                 // Preserve existing customized .gitignore rules if already present
                 let target_gitignore = project_path.join(".gitignore");
                 let src_gitignore = tdir.join("projects/generic/gitignore.repo");
-                if target_gitignore.exists() {
+                if tracked(".gitignore") {
+                    // Sync owns it; init's graphify append would read as a local edit.
+                } else if target_gitignore.exists() {
                     kept_gitignore_template = Some(src_gitignore.clone());
                     let existing = fs::read_to_string(&target_gitignore).unwrap_or_default();
                     if !existing.contains("graphify-out/*") {
@@ -268,6 +276,9 @@ fn main() {
 
                 // Materialize hook suite
                 for hook in &["commit-msg", "pre-commit", "pre-push"] {
+                    if tracked(&format!("scripts/hooks/{hook}")) {
+                        continue;
+                    }
                     let src_hook = tdir.join(format!("projects/generic/hooks/{hook}"));
                     let dst_hook = hooks_dir.join(hook);
                     if let Err(e) = copy_template_file(&src_hook, &dst_hook) {
@@ -278,13 +289,15 @@ fn main() {
                 }
 
                 // Materialize container parity check
-                let src_cont = tdir.join("projects/generic/container/check-in-container.sh");
-                let dst_cont = container_dir.join("check-in-container.sh");
-                if let Err(e) = copy_template_file(&src_cont, &dst_cont) {
-                    eprintln!("  {} Initialization failed: {e}", "✗".red());
-                    std::process::exit(1);
+                if !tracked("scripts/check-in-container.sh") {
+                    let src_cont = tdir.join("projects/generic/container/check-in-container.sh");
+                    let dst_cont = container_dir.join("check-in-container.sh");
+                    if let Err(e) = copy_template_file(&src_cont, &dst_cont) {
+                        eprintln!("  {} Initialization failed: {e}", "✗".red());
+                        std::process::exit(1);
+                    }
+                    set_executable(&dst_cont);
                 }
-                set_executable(&dst_cont);
 
                 // Materialize scratch scripts
                 for s in &[
@@ -292,6 +305,9 @@ fn main() {
                     "new-worktree.sh",
                     "sync-personal-env.sh",
                 ] {
+                    if tracked(&format!("scratch/{s}")) {
+                        continue;
+                    }
                     let src_s = tdir.join(format!("projects/agents/scratch/{s}"));
                     let dst_s = scratch_dir.join(s);
                     if let Err(e) = copy_template_file(&src_s, &dst_s) {
@@ -302,22 +318,26 @@ fn main() {
                 }
 
                 // Materialize rendered templates (mise.toml, agents.md, mempalace)
-                if let Err(e) = render_and_write(
-                    &renderer,
-                    &tdir.join("projects/agents/mise.toml.jinja"),
-                    &project_path.join("mise.toml"),
-                    &ctx,
-                ) {
+                if !tracked("mise.toml")
+                    && let Err(e) = render_and_write(
+                        &renderer,
+                        &tdir.join("projects/agents/mise.toml.jinja"),
+                        &project_path.join("mise.toml"),
+                        &ctx,
+                    )
+                {
                     eprintln!("  {} Initialization failed: {e}", "✗".red());
                     std::process::exit(1);
                 }
 
-                if let Err(e) = render_and_write(
-                    &renderer,
-                    &tdir.join("projects/agents/agents.md.jinja"),
-                    &agents_dir.join("AGENTS.md"),
-                    &ctx,
-                ) {
+                if !tracked(".agents/AGENTS.md")
+                    && let Err(e) = render_and_write(
+                        &renderer,
+                        &tdir.join("projects/agents/agents.md.jinja"),
+                        &agents_dir.join("AGENTS.md"),
+                        &ctx,
+                    )
+                {
                     eprintln!("  {} Initialization failed: {e}", "✗".red());
                     std::process::exit(1);
                 }
@@ -399,11 +419,10 @@ fn main() {
                 }
             }
 
-            // 4. Record baseline ancestor checksums in .ude/state.json
-            let mut project_state = sync::ProjectState {
-                project_type: Some(init_args.project_type.clone()),
-                ..Default::default()
-            };
+            // 4. Record baseline ancestor checksums in .ude/state.json. Every prior
+            // record (files, tombstones, open conflicts) is carried forward unchanged.
+            let mut project_state = prior_state.clone();
+            project_state.project_type = Some(init_args.project_type.clone());
             let managed_rels = [
                 std::path::PathBuf::from(".gitconfig"),
                 std::path::PathBuf::from(".gitignore"),
@@ -418,19 +437,15 @@ fn main() {
                 std::path::PathBuf::from(".agents/AGENTS.md"),
             ];
             for rel in &managed_rels {
+                // A tracked file keeps its prior record: init did not write it, and a
+                // replacement ancestor (the current template or the local bytes) would
+                // turn a stale file into a local edit, or a local edit into In Sync.
+                if prior_state.has_record(rel) {
+                    continue;
+                }
                 let kept_template = kept_gitignore_template
                     .as_ref()
                     .filter(|_| rel.as_path() == Path::new(".gitignore"));
-                // A kept file with a prior record keeps that ancestor: replacing it
-                // with the current template would turn an unedited but stale file
-                // into a local modification that push publishes over upstream.
-                if kept_template.is_some()
-                    && let Some(hash) = prior_state.get_ancestor_hash(rel)
-                {
-                    let content = prior_state.get_ancestor_content(rel).map(String::from);
-                    project_state.record_file(rel, hash.to_string(), content);
-                    continue;
-                }
                 // A kept pre-existing .gitignore records the template as its ancestor,
                 // so the kept rules read as a local modification: pull then merges or
                 // conflicts instead of replacing them with the template (CR-03). No
@@ -1034,8 +1049,9 @@ fn push_boundary(path: &Path) -> PushBoundary {
     }
 }
 
-/// Status hint for a locally modified `file`, matching what `ude sync push` does with
-/// it: the publish boundary first, then the template-logic gate (CR-02).
+/// Status hint for a locally modified `file`, in the order `ude sync push` checks it:
+/// a local-only path first, then the template-logic gate (CR-02), which `--force`
+/// cannot clear, then the `--force` requirement for agent rules.
 fn locally_modified_hint(template_root: &Path, file: &Path) -> String {
     let boundary = push_boundary(file);
     if matches!(boundary, PushBoundary::Never) {
