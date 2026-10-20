@@ -2356,3 +2356,160 @@ fn test_reinit_keeps_open_conflict_with_no_ancestor() {
     let resolve = ude(&project, &["sync", "resolve", "scripts/hooks/pre-push"]);
     assert_eq!(resolve.status.code(), Some(0), "{}", outputs(&resolve));
 }
+
+/// `ude init --type rust` on `project`, run from inside it; returns both streams and
+/// panics unless it exits 0.
+fn init_output(ude: &impl Fn(&Path, &[&str]) -> Output, project: &Path) -> String {
+    let path = project.to_string_lossy().to_string();
+    let init = ude(project, &["init", "--path", &path, "--type", "rust"]);
+    let text = outputs(&init);
+    assert_eq!(init.status.code(), Some(0), "{text}");
+    text
+}
+
+#[test]
+fn test_project_gitignore_ignores_per_machine_state() {
+    let temp = tempdir().unwrap();
+    let git = GitFixture::new();
+    let ude = sync_cli(temp.path());
+    let project = project_with_local_templates(temp.path(), "project");
+    git.run(temp.path(), &["init", "-q", &project.to_string_lossy()]);
+    reinit_rust(&ude, &project);
+    assert!(project.join(".ude/state.json").is_file());
+
+    let ignored = |path: &str| {
+        let out = git
+            .cmd(&project)
+            .args(["check-ignore", "-q", path])
+            .output()
+            .expect("git check-ignore");
+        match out.status.code() {
+            Some(0) => true,
+            Some(1) => false,
+            other => panic!("git check-ignore {path} failed ({other:?})"),
+        }
+    };
+    // The ancestor ledger is per machine: committing it makes a second machine's init
+    // treat every uncommitted managed file as deleted locally.
+    assert!(
+        ignored(".ude/state.json"),
+        "init's .gitignore commits state.json"
+    );
+    // Negative controls: managed files and other `.ude/` content stay committable.
+    assert!(
+        !ignored(".gitconfig"),
+        "the managed file itself must stay tracked"
+    );
+    assert!(!ignored(".ude/overrides/mise.toml"));
+
+    // Second, independent count: what `git status` offers to commit.
+    let untracked = git.output(
+        &project,
+        &["status", "--porcelain", "--untracked-files=all"],
+    );
+    assert!(!untracked.contains(".ude/state.json"), "{untracked}");
+    assert!(untracked.contains("?? .gitconfig"), "{untracked}");
+}
+
+#[test]
+fn test_reinit_warns_that_push_deletes_template_of_missing_tracked_file() {
+    let temp = tempdir().unwrap();
+    let ude = sync_cli(temp.path());
+    let project = project_with_local_templates(temp.path(), "project");
+    let hook = project.join("scripts/hooks/pre-push");
+    reinit_rust(&ude, &project);
+
+    // Negative control: a re-init with every managed file present warns about none.
+    let clean = init_output(&ude, &project);
+    assert!(!clean.contains("tracked but missing"), "{clean}");
+    assert!(
+        clean.contains("Configured tracked .gitconfig & chained scripts/hooks"),
+        "{clean}"
+    );
+
+    fs::remove_file(&hook).unwrap();
+    let init = init_output(&ude, &project);
+    let warning = line_with(&init, "scripts/hooks/pre-push is tracked but missing");
+    assert!(
+        warning.contains("a plain ude sync push will delete its shared template"),
+        "{init}"
+    );
+    assert!(
+        !hook.exists(),
+        "init must not recreate a deleted tracked file (D-15)"
+    );
+    assert!(
+        !init.contains("Configured tracked .gitconfig & chained scripts/hooks"),
+        "init claims the hooks are in place: {init}"
+    );
+    assert!(
+        init.contains("Initialized workflow tasks (mise.toml, scratch/)"),
+        "{init}"
+    );
+
+    let status = outputs(&ude(&project, &["sync", "status"]));
+    let hint = line_with(&status, "scripts/hooks/pre-push: Deleted locally");
+    assert!(
+        hint.contains("push deletes the shared template"),
+        "{status}"
+    );
+
+    // The warning's claim: a plain push deletes the shared template.
+    let push = ude(&project, &["sync", "push"]);
+    assert_eq!(push.status.code(), Some(0), "{}", outputs(&push));
+    assert!(
+        !project.join(PRE_PUSH_TEMPLATE).exists(),
+        "{}",
+        outputs(&push)
+    );
+}
+
+#[test]
+fn test_reinit_missing_file_warning_follows_push_boundary() {
+    let temp = tempdir().unwrap();
+    let ude = sync_cli(temp.path());
+    let project = project_with_local_templates(temp.path(), "project");
+    reinit_rust(&ude, &project);
+    for rel in [".agents/AGENTS.md", "scratch/new-worktree.sh", "mise.toml"] {
+        fs::remove_file(project.join(rel)).unwrap();
+    }
+
+    let init = init_output(&ude, &project);
+    let agents = line_with(&init, ".agents/AGENTS.md is tracked but missing");
+    assert!(
+        agents.contains("ude sync push --force will delete its shared template")
+            && !agents.contains("a plain ude sync push will delete"),
+        "{init}"
+    );
+    let scratch = line_with(&init, "scratch/new-worktree.sh is tracked but missing");
+    assert!(
+        scratch.contains("never publishes") && !scratch.contains("will delete"),
+        "{init}"
+    );
+    let mise = line_with(&init, "mise.toml is tracked but missing");
+    assert!(
+        mise.contains("a plain ude sync push will delete its shared template"),
+        "{init}"
+    );
+    for rel in [".agents/AGENTS.md", "scratch/new-worktree.sh", "mise.toml"] {
+        assert!(!project.join(rel).exists(), "init recreated {rel}: {init}");
+    }
+    assert!(
+        !init.contains("Initialized workflow tasks (mise.toml, scratch/)"),
+        "init claims mise.toml and scratch/ are in place: {init}"
+    );
+
+    let status = outputs(&ude(&project, &["sync", "status"]));
+    let hint = line_with(&status, ".agents/AGENTS.md: Deleted locally");
+    assert!(hint.contains("deletes the shared template"), "{status}");
+
+    // A plain push refuses the agent rules deletion and never publishes scratch/.
+    let push = ude(&project, &["sync", "push"]);
+    assert!(project.join(AGENTS_TEMPLATE).exists(), "{}", outputs(&push));
+    assert!(
+        project.join(NEW_WORKTREE_TEMPLATE).exists(),
+        "{}",
+        outputs(&push)
+    );
+    assert!(!project.join(MISE_TEMPLATE).exists(), "{}", outputs(&push));
+}
