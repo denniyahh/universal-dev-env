@@ -19,6 +19,7 @@ awaiting: user response
 ### 1. Windows — bounded runner kills a hung git (JobObject branch)
 expected: Compiles; the command returns within ~60 s with the timeout message and no git / git-remote-https process is left running (WINDOWS.md #1, T-01-04 / AR-01-01)
 result: [pending]
+note: compile part settled 2026-10-20 by the orchestrator — `cargo check` and `cargo clippy -D warnings --target x86_64-pc-windows-msvc --all-targets` pass at b75c186, cross-checked on Linux (no link, nothing run). The timeout and process-cleanup parts still need a Windows host.
 
 ### 2. Windows — remote cache lock released on process death
 expected: Two `ude sync` commands on the same remote and branch; killing the first while it holds the lock lets the second proceed after waiting (std File::try_lock / LockFileEx) (WINDOWS.md #2)
