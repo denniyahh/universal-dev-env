@@ -55,3 +55,15 @@
   so the next plain `ude sync push` publishes it as the shared `gitignore.repo` for
   every project.
   **Fix:** tracked as a GSD todo: .planning/todos/pending/2026-10-19-never-publish-files-that-init-kept-over-the-shared-template.md
+
+- State-preserving re-init side effects (confirmed by 01-REVIEW-REINIT.md, both binaries)
+  status: open (not fixed in phase 01; candidate for Phase 4, safe re-initialization)
+  **Found during:** review of cdfa567/956c5e7 (re-init never writes a recorded file)
+  **What:**
+  1. `ude init --type <other>` on re-init no longer applies the new type's templates
+     (e.g. node over rust leaves `mise.toml` as rust); status shows Upstream Updated and
+     a separate pull is needed, but init reports success.
+  2. Re-init still runs `git update-index --add --chmod=+x` for every hook, so an
+     uncommitted local edit of a tracked hook is staged into the index.
+  3. Re-init no longer restores a tracked hook's lost executable bit; sync cannot see a
+     mode change, so status stays In Sync while git ignores the hook.
