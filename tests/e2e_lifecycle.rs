@@ -1995,3 +1995,324 @@ fn test_status_and_push_agree_on_edit_under_template_logic() {
     let push = ude(&project, &["sync", "push", "--remote", &bare_url]);
     assert_eq!(push.status.code(), Some(0), "{}", outputs(&push));
 }
+
+/// `.ude/state.json` of `project`, parsed.
+fn state_json(project: &Path) -> serde_json::Value {
+    let text = fs::read_to_string(project.join(".ude/state.json")).expect("read state.json");
+    serde_json::from_str(&text).expect("parse state.json")
+}
+
+/// Appends `text` to the file at `path` and returns the new content.
+fn append_to(path: &Path, text: &str) -> String {
+    let content = format!("{}{text}", fs::read_to_string(path).unwrap());
+    fs::write(path, &content).unwrap();
+    content
+}
+
+const PRE_PUSH_TEMPLATE: &str = "templates/projects/generic/hooks/pre-push";
+const COMMIT_MSG_TEMPLATE: &str = "templates/projects/generic/hooks/commit-msg";
+const PRE_COMMIT_TEMPLATE: &str = "templates/projects/generic/hooks/pre-commit";
+const AGENTS_TEMPLATE: &str = "templates/projects/agents/agents.md.jinja";
+
+#[test]
+fn test_reinit_leaves_tracked_gitignore_without_graphify_block() {
+    let temp = tempdir().unwrap();
+    let ude = sync_cli(temp.path());
+    let project = project_with_local_templates(temp.path(), "project");
+    let template = project.join(GITIGNORE_TEMPLATE);
+
+    reinit_rust(&ude, &project);
+    // Another developer drops the graphify block from the shared template.
+    let upstream: String = fs::read_to_string(&template)
+        .unwrap()
+        .lines()
+        .filter(|line| !line.contains("graphify-out"))
+        .map(|line| format!("{line}\n"))
+        .collect();
+    fs::write(&template, &upstream).unwrap();
+    let status = outputs(&ude(&project, &["sync", "status"]));
+    assert!(status.contains(".gitignore: Upstream Updated"), "{status}");
+    let pull = ude(&project, &["sync", "pull"]);
+    assert_eq!(pull.status.code(), Some(0), "{}", outputs(&pull));
+    assert_eq!(
+        fs::read_to_string(project.join(".gitignore")).unwrap(),
+        upstream
+    );
+
+    // Re-running init must leave the tracked file to sync: no graphify append.
+    reinit_rust(&ude, &project);
+    assert_eq!(
+        fs::read_to_string(project.join(".gitignore")).unwrap(),
+        upstream,
+        "re-init must not rewrite a tracked .gitignore"
+    );
+    let status = outputs(&ude(&project, &["sync", "status"]));
+    assert!(
+        status.contains(".gitignore: In Sync") && !status.contains(".gitignore: Locally Modified"),
+        "{status}"
+    );
+    let push = ude(&project, &["sync", "push"]);
+    assert_eq!(push.status.code(), Some(0), "{}", outputs(&push));
+    assert_eq!(
+        fs::read_to_string(&template).unwrap(),
+        upstream,
+        "push must not re-add the graphify block upstream. {}",
+        outputs(&push)
+    );
+
+    // Negative control: a fresh project starts In Sync with the template as is.
+    let fresh = project_with_local_templates(temp.path(), "fresh");
+    reinit_rust(&ude, &fresh);
+    let status = outputs(&ude(&fresh, &["sync", "status"]));
+    assert!(status.contains(".gitignore: In Sync"), "{status}");
+    assert_eq!(
+        fs::read_to_string(fresh.join(".gitignore")).unwrap(),
+        fs::read_to_string(fresh.join(GITIGNORE_TEMPLATE)).unwrap()
+    );
+
+    // Negative control (CR-03): a custom .gitignore with no prior record still gets
+    // the graphify block appended on first init and reads as a local modification.
+    let custom = project_with_local_templates(temp.path(), "custom");
+    fs::write(custom.join(".gitignore"), "custom_rule_one/\n").unwrap();
+    reinit_rust(&ude, &custom);
+    let kept = fs::read_to_string(custom.join(".gitignore")).unwrap();
+    assert!(
+        kept.starts_with("custom_rule_one/\n") && kept.contains("graphify-out/*"),
+        "{kept}"
+    );
+    let status = outputs(&ude(&custom, &["sync", "status"]));
+    assert!(status.contains(".gitignore: Locally Modified"), "{status}");
+}
+
+#[test]
+fn test_reinit_keeps_record_of_file_whose_template_is_missing() {
+    let temp = tempdir().unwrap();
+    let ude = sync_cli(temp.path());
+    let project = project_with_local_templates(temp.path(), "project");
+    let template = project.join(PRE_PUSH_TEMPLATE);
+    let hook = project.join("scripts/hooks/pre-push");
+
+    reinit_rust(&ude, &project);
+    let edited = append_to(&hook, "# local hook edit\n");
+    let record_before = state_json(&project)["files"]["scripts/hooks/pre-push"].clone();
+    assert!(record_before.is_object(), "{record_before}");
+
+    // The template is missing while init re-runs.
+    let parked = temp.path().join("parked-pre-push");
+    fs::rename(&template, &parked).unwrap();
+    reinit_rust(&ude, &project);
+    fs::rename(&parked, &template).unwrap();
+
+    assert_eq!(fs::read_to_string(&hook).unwrap(), edited);
+    assert_eq!(
+        state_json(&project)["files"]["scripts/hooks/pre-push"],
+        record_before,
+        "re-init must carry the record forward unchanged"
+    );
+    let status = outputs(&ude(&project, &["sync", "status"]));
+    assert!(
+        status.contains("scripts/hooks/pre-push: Locally Modified"),
+        "{status}"
+    );
+    let pull = ude(&project, &["sync", "pull"]);
+    assert_eq!(pull.status.code(), Some(0), "{}", outputs(&pull));
+    assert_eq!(
+        fs::read_to_string(&hook).unwrap(),
+        edited,
+        "pull must not overwrite the local edit. {}",
+        outputs(&pull)
+    );
+}
+
+#[test]
+fn test_reinit_keeps_local_edit_of_file_it_would_rewrite() {
+    let temp = tempdir().unwrap();
+    let ude = sync_cli(temp.path());
+    let project = project_with_local_templates(temp.path(), "project");
+
+    reinit_rust(&ude, &project);
+    let edited = append_to(&project.join(".gitconfig"), "# local edit\n");
+    // An unedited file whose template changed upstream since the first init.
+    let pre_commit = project.join("scripts/hooks/pre-commit");
+    let init_pre_commit = fs::read_to_string(&pre_commit).unwrap();
+    let upstream_pre_commit = append_to(&project.join(PRE_COMMIT_TEMPLATE), "# upstream edit\n");
+
+    reinit_rust(&ude, &project);
+    assert_eq!(
+        fs::read_to_string(project.join(".gitconfig")).unwrap(),
+        edited,
+        "re-init must not overwrite a local edit"
+    );
+    assert_eq!(
+        fs::read_to_string(&pre_commit).unwrap(),
+        init_pre_commit,
+        "re-init leaves a tracked file to sync"
+    );
+    let status = outputs(&ude(&project, &["sync", "status"]));
+    assert!(
+        status.contains(".gitconfig: Locally Modified (ready to push)"),
+        "{status}"
+    );
+    assert!(
+        status.contains("scripts/hooks/pre-commit: Upstream Updated"),
+        "{status}"
+    );
+    let pull = ude(&project, &["sync", "pull"]);
+    assert_eq!(pull.status.code(), Some(0), "{}", outputs(&pull));
+    assert_eq!(
+        fs::read_to_string(&pre_commit).unwrap(),
+        upstream_pre_commit
+    );
+    assert_eq!(
+        fs::read_to_string(project.join(".gitconfig")).unwrap(),
+        edited
+    );
+}
+
+#[test]
+fn test_open_conflict_survives_reinit() {
+    let temp = tempdir().unwrap();
+    let ude = sync_cli(temp.path());
+    let project = project_with_local_templates(temp.path(), "project");
+
+    reinit_rust(&ude, &project);
+    let local = append_to(&project.join(".gitignore"), "local_rule/\n");
+    append_to(&project.join(GITIGNORE_TEMPLATE), "upstream_rule/\n");
+    let pull = ude(&project, &["sync", "pull"]);
+    assert_eq!(pull.status.code(), Some(1), "{}", outputs(&pull));
+    let sidecar = project.join(".gitignore.conflict");
+    let notes = append_to(&sidecar, "# my resolution notes\n");
+    let conflict_before = state_json(&project)["conflicts"][".gitignore"].clone();
+    assert!(conflict_before.is_object(), "{conflict_before}");
+
+    reinit_rust(&ude, &project);
+    assert_eq!(fs::read_to_string(&sidecar).unwrap(), notes);
+    assert_eq!(
+        fs::read_to_string(project.join(".gitignore")).unwrap(),
+        local
+    );
+    assert_eq!(
+        state_json(&project)["conflicts"][".gitignore"],
+        conflict_before,
+        "re-init must keep the open conflict"
+    );
+
+    let resolve = ude(&project, &["sync", "resolve", ".gitignore"]);
+    assert_eq!(resolve.status.code(), Some(0), "{}", outputs(&resolve));
+    assert!(!sidecar.exists(), "{}", outputs(&resolve));
+    let status = outputs(&ude(&project, &["sync", "status"]));
+    assert!(status.contains(".gitignore: Locally Modified"), "{status}");
+}
+
+#[test]
+fn test_tombstones_survive_reinit() {
+    let temp = tempdir().unwrap();
+    let ude = sync_cli(temp.path());
+    let project = project_with_local_templates(temp.path(), "project");
+
+    reinit_rust(&ude, &project);
+    // Upstream deletes two hook templates: commit-msg is unedited locally (D-12),
+    // pre-push is edited locally and then kept as an unmanaged file (D-13).
+    append_to(
+        &project.join("scripts/hooks/pre-push"),
+        "# local hook edit\n",
+    );
+    fs::remove_file(project.join(COMMIT_MSG_TEMPLATE)).unwrap();
+    fs::remove_file(project.join(PRE_PUSH_TEMPLATE)).unwrap();
+    let pull = ude(&project, &["sync", "pull"]);
+    assert_eq!(pull.status.code(), Some(1), "{}", outputs(&pull));
+    let resolve = ude(&project, &["sync", "resolve", "scripts/hooks/pre-push"]);
+    assert_eq!(resolve.status.code(), Some(0), "{}", outputs(&resolve));
+    assert!(!project.join("scripts/hooks/commit-msg").exists());
+    let before = state_json(&project);
+    let tombstones = before["tombstones"].clone();
+    assert_eq!(
+        tombstones["scripts/hooks/pre-push"]["kept_unmanaged"],
+        serde_json::Value::Bool(true),
+        "{before}"
+    );
+    assert!(
+        tombstones["scripts/hooks/commit-msg"].is_object(),
+        "{before}"
+    );
+    let status_before =
+        String::from_utf8_lossy(&ude(&project, &["sync", "status"]).stdout).into_owned();
+
+    reinit_rust(&ude, &project);
+    let after = state_json(&project);
+    assert_eq!(after["tombstones"], tombstones, "{after}");
+    assert!(
+        after["files"]["scripts/hooks/pre-push"].is_null(),
+        "{after}"
+    );
+    assert!(
+        after["files"]["scripts/hooks/commit-msg"].is_null(),
+        "{after}"
+    );
+    let status_after =
+        String::from_utf8_lossy(&ude(&project, &["sync", "status"]).stdout).into_owned();
+    assert_eq!(status_after, status_before);
+}
+
+#[test]
+fn test_status_and_push_agree_on_agent_rules_under_template_logic() {
+    let temp = tempdir().unwrap();
+    let ude = sync_cli(temp.path());
+    let agents = Path::new(".agents/AGENTS.md");
+
+    // Agent rules (published only with --force) under a template with logic.
+    let project = project_with_local_templates(temp.path(), "project");
+    let template = project.join(AGENTS_TEMPLATE);
+    let logic = append_to(
+        &template,
+        "{% if project_type %}<!-- typed -->{% endif %}\n",
+    );
+    reinit_rust(&ude, &project);
+    append_to(&project.join(agents), "local agent rule\n");
+
+    let status = outputs(&ude(&project, &["sync", "status"]));
+    let status_line = line_with(&status, ".agents/AGENTS.md: Locally Modified");
+    assert!(
+        status_line.contains("template has logic")
+            && status_line.contains(".agents/AGENTS.local.md")
+            && !status_line.contains("--force"),
+        "{status}"
+    );
+    for args in [&["sync", "push"][..], &["sync", "push", "--force"][..]] {
+        let push = ude(&project, args);
+        let push_text = outputs(&push);
+        assert_eq!(push.status.code(), Some(1), "{args:?}: {push_text}");
+        let skip_line = line_with(&push_text, ".agents/AGENTS.md:");
+        assert!(
+            skip_line.contains("template logic")
+                && skip_line.contains(".agents/AGENTS.local.md")
+                && !skip_line.contains("--force"),
+            "{args:?}: {push_text}"
+        );
+        assert_eq!(fs::read_to_string(&template).unwrap(), logic, "{push_text}");
+    }
+
+    // Negative control: under a template without logic, --force is the remedy and it
+    // publishes the edit.
+    let plain = project_with_local_templates(temp.path(), "plain");
+    reinit_rust(&ude, &plain);
+    let edited = append_to(&plain.join(agents), "local agent rule\n");
+    let status = outputs(&ude(&plain, &["sync", "status"]));
+    assert!(
+        status.contains(".agents/AGENTS.md: Locally Modified (push with --force to publish)"),
+        "{status}"
+    );
+    let push = ude(&plain, &["sync", "push"]);
+    let push_text = outputs(&push);
+    assert_eq!(push.status.code(), Some(1), "{push_text}");
+    assert!(
+        line_with(&push_text, ".agents/AGENTS.md:").contains("re-run with --force"),
+        "{push_text}"
+    );
+    let push = ude(&plain, &["sync", "push", "--force"]);
+    assert_eq!(push.status.code(), Some(0), "{}", outputs(&push));
+    assert_eq!(
+        fs::read_to_string(plain.join(AGENTS_TEMPLATE)).unwrap(),
+        edited
+    );
+}
