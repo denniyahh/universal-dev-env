@@ -2950,4 +2950,27 @@ fn test_reinit_missing_file_warning_follows_upstream() {
         "{}",
         outputs(&push)
     );
+
+    // The both-deleted remedy: pull first, then restore; the next pull keeps the copy
+    // and push never republishes it.
+    let both = line_with(&init, "To keep it in this project only");
+    assert!(
+        both.contains("git restore scripts/hooks/commit-msg"),
+        "{init}"
+    );
+    ude(&project, &["sync", "pull"]);
+    let commit_msg = project.join("scripts/hooks/commit-msg");
+    fs::write(&commit_msg, "#!/bin/sh\n").unwrap();
+    let pull = ude(&project, &["sync", "pull"]);
+    assert!(
+        commit_msg.exists(),
+        "pull deleted the restored copy: {}",
+        outputs(&pull)
+    );
+    let push = ude(&project, &["sync", "push"]);
+    assert!(
+        !project.join(COMMIT_MSG_TEMPLATE).exists(),
+        "{}",
+        outputs(&push)
+    );
 }

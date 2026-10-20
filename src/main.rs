@@ -528,8 +528,25 @@ fn main() {
             // A tracked file that is missing stays missing (D-15). Say so, and what
             // push will do with it, instead of reporting it as set up.
             let missing = missing_tracked_files(&project_path, &prior_state, &managed_rels);
+            // What sync sees for each missing file decides what push will do with it.
+            let scanned = match (&root_template_dir, missing.is_empty()) {
+                (Some(tdir), false) => sync::SyncEngine::new()
+                    .scan_project(&project_path, tdir, Some(&ctx))
+                    .unwrap_or_else(|e| {
+                        eprintln!(
+                            "  {} Could not compare missing files with their templates: {e}",
+                            "!".yellow()
+                        );
+                        Vec::new()
+                    }),
+                _ => Vec::new(),
+            };
             for rel in &missing {
-                print_missing_tracked_warning(root_template_dir.as_deref(), rel);
+                let status = scanned
+                    .iter()
+                    .find(|state| &state.relative_path == rel)
+                    .map(|state| &state.status);
+                print_missing_tracked_warning(root_template_dir.as_deref(), rel, status);
             }
             // (line when every file is present, label when some are missing, which
             // managed paths the line covers)
@@ -1220,9 +1237,28 @@ fn missing_tracked_files(
 
 /// Warns that init left the tracked file `rel` missing, what `ude sync push` will do
 /// with its shared template, and how to restore the file.
-fn print_missing_tracked_warning(template_root: Option<&Path>, rel: &Path) {
+fn print_missing_tracked_warning(
+    template_root: Option<&Path>,
+    rel: &Path,
+    status: Option<&sync::SyncStatus>,
+) {
     let template = template_root.and_then(|root| sync::map_to_upstream(root, rel));
+    if status == Some(&sync::SyncStatus::BothDeleted) {
+        println!(
+            "  {} {} is tracked but missing; init does not recreate it, and its shared template is deleted too, so ude sync push deletes nothing and ude sync pull stops tracking it",
+            "!".yellow(),
+            rel.display()
+        );
+        println!(
+            "    To keep it in this project only, run ude sync pull first, then restore it (git restore {} if it is committed)",
+            rel.display()
+        );
+        return;
+    }
     let consequence = match push_boundary(rel) {
+        _ if status == Some(&sync::SyncStatus::Conflicted) => {
+            "its shared template changed since it was recorded, so ude sync push skips it as a conflict and ude sync pull records the conflict"
+        }
         PushBoundary::Publishable => "a plain ude sync push will delete its shared template",
         PushBoundary::ForceOnly => {
             "a plain ude sync push refuses the deletion, but ude sync push --force will delete its shared template"
