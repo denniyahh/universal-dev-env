@@ -2758,6 +2758,116 @@ fn test_init_refuses_symlinked_template() {
 
 #[cfg(unix)]
 #[test]
+fn test_init_refuses_symlinked_destination_file() {
+    use std::os::unix::fs::symlink;
+    let temp = tempdir().unwrap();
+    let ude = sync_cli(temp.path());
+    let project = project_with_local_templates(temp.path(), "project");
+    let outside = temp.path().join("CLAUDE.md");
+    fs::write(&outside, "# precious shared rules\n").unwrap();
+    fs::create_dir_all(project.join(".agents")).unwrap();
+    let agents = project.join(".agents/AGENTS.md");
+    symlink(&outside, &agents).unwrap();
+
+    let path = project.to_string_lossy().to_string();
+    let init = ude(&project, &["init", "--path", &path, "--type", "rust"]);
+    let text = outputs(&init);
+    assert_eq!(init.status.code(), Some(2), "{text}");
+    assert!(text.contains("symlink"), "{text}");
+    assert_eq!(
+        fs::read_to_string(&outside).unwrap(),
+        "# precious shared rules\n",
+        "init wrote through the symlink"
+    );
+    assert!(
+        !project.join(".gitconfig").exists(),
+        "init wrote files before refusing"
+    );
+
+    // Negative control: a regular file at the same path is written.
+    fs::remove_file(&agents).unwrap();
+    reinit_rust(&ude, &project);
+    let meta = fs::symlink_metadata(&agents).unwrap();
+    assert!(meta.file_type().is_file(), "{meta:?}");
+    assert_ne!(fs::read_to_string(&agents).unwrap(), "");
+}
+
+#[cfg(unix)]
+#[test]
+fn test_init_refuses_symlinked_destination_dir() {
+    use std::os::unix::fs::symlink;
+    let temp = tempdir().unwrap();
+    let ude = sync_cli(temp.path());
+    let project = project_with_local_templates(temp.path(), "project");
+    let outside = temp.path().join("outside_scripts");
+    fs::create_dir_all(&outside).unwrap();
+    let scripts = project.join("scripts");
+    symlink(&outside, &scripts).unwrap();
+
+    let path = project.to_string_lossy().to_string();
+    let init = ude(&project, &["init", "--path", &path, "--type", "rust"]);
+    let text = outputs(&init);
+    assert_eq!(init.status.code(), Some(2), "{text}");
+    assert!(text.contains("symlink"), "{text}");
+    let leaked: Vec<_> = fs::read_dir(&outside).unwrap().collect();
+    assert!(
+        leaked.is_empty(),
+        "init created {leaked:?} outside the project"
+    );
+
+    // Negative control: a regular directory at the same path is written into.
+    fs::remove_file(&scripts).unwrap();
+    reinit_rust(&ude, &project);
+    assert!(project.join("scripts/hooks/pre-commit").is_file());
+}
+
+#[test]
+fn test_init_keeps_non_utf8_gitignore_rules() {
+    let temp = tempdir().unwrap();
+    let ude = sync_cli(temp.path());
+    let project = project_with_local_templates(temp.path(), "project");
+    let original: &[u8] = b"# caf\xe9 rules\nsecrets/\n.env\n";
+    fs::write(project.join(".gitignore"), original).unwrap();
+
+    reinit_rust(&ude, &project);
+    let after = fs::read(project.join(".gitignore")).unwrap();
+    assert!(
+        after.starts_with(original),
+        "existing rules lost: {}",
+        String::from_utf8_lossy(&after)
+    );
+    assert!(
+        String::from_utf8_lossy(&after).contains("graphify-out/*"),
+        "{}",
+        String::from_utf8_lossy(&after)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_init_refuses_unreadable_gitignore() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempdir().unwrap();
+    let ude = sync_cli(temp.path());
+    let project = project_with_local_templates(temp.path(), "project");
+    let gitignore = project.join(".gitignore");
+    fs::write(&gitignore, "secrets/\n.env\n").unwrap();
+    fs::set_permissions(&gitignore, fs::Permissions::from_mode(0o200)).unwrap();
+    // Negative control: the fixture really is unreadable (not the case as root).
+    let readable = fs::read(&gitignore).is_ok();
+
+    let path = project.to_string_lossy().to_string();
+    let init = ude(&project, &["init", "--path", &path, "--type", "rust"]);
+    fs::set_permissions(&gitignore, fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(!readable, "fixture .gitignore is readable; run as non-root");
+    let text = outputs(&init);
+    assert_eq!(init.status.code(), Some(2), "{text}");
+    assert!(text.contains(".gitignore"), "{text}");
+    assert_eq!(fs::read_to_string(&gitignore).unwrap(), "secrets/\n.env\n");
+}
+
+#[cfg(unix)]
+#[test]
 fn test_push_refuses_symlinked_local_file() {
     use std::os::unix::fs::symlink;
     let temp = tempdir().unwrap();

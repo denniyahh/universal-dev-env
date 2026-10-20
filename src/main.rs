@@ -221,6 +221,32 @@ fn main() {
                     .any(|kept| kept.as_path() == Path::new(rel))
             };
 
+            // Init writes only inside the project: a symlinked destination, or a
+            // symlinked directory on the way to one, would be written through. Every
+            // path init may create or write is checked before anything is touched.
+            let mut write_targets: Vec<PathBuf> = ["scripts/hooks", "scratch", ".agents"]
+                .iter()
+                .map(PathBuf::from)
+                .collect();
+            write_targets.extend(
+                managed_rels
+                    .iter()
+                    .filter(|rel| !prior_state.has_record(rel) && !kept_committed.contains(rel))
+                    .cloned(),
+            );
+            if init_args.mempalace {
+                write_targets.push(PathBuf::from(".planning/.mempalace-stage/mempalace.yaml"));
+            }
+            if init_args.graphify {
+                write_targets.push(PathBuf::from("graphify-out/.graphify_root"));
+            }
+            for rel in &write_targets {
+                if let Err(e) = sync::refuse_symlink_under(&project_path, &project_path.join(rel)) {
+                    eprintln!("  {} Initialization failed: {e}", "✗".red());
+                    std::process::exit(EXIT_HARD_FAILURE);
+                }
+            }
+
             let project_name = project_path
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())
@@ -294,14 +320,23 @@ fn main() {
                     // local edit.
                 } else if target_gitignore.exists() {
                     kept_gitignore = true;
-                    let existing = fs::read_to_string(&target_gitignore).unwrap_or_default();
-                    if !existing.contains("graphify-out/*") {
+                    // Opaque bytes: a non-UTF-8 file is appended to, and an unreadable
+                    // one stops init instead of being replaced by the block alone.
+                    let existing = match fs::read(&target_gitignore) {
+                        Ok(bytes) => bytes,
+                        Err(e) => {
+                            eprintln!("  {} Cannot read existing .gitignore: {e}", "✗".red());
+                            std::process::exit(EXIT_HARD_FAILURE);
+                        }
+                    };
+                    let marker = b"graphify-out/*";
+                    if !existing.windows(marker.len()).any(|w| w == marker) {
                         let append_block = "\n# Generated knowledge graphs / reports (allowlist pattern)\ngraphify-out/*\n!graphify-out/graph.json\n!graphify-out/manifest.json\n";
                         let mut updated = existing;
-                        if !updated.ends_with('\n') {
-                            updated.push('\n');
+                        if !updated.ends_with(b"\n") {
+                            updated.push(b'\n');
                         }
-                        updated.push_str(append_block);
+                        updated.extend_from_slice(append_block.as_bytes());
                         if let Err(e) = fs::write(&target_gitignore, updated) {
                             eprintln!("  {} Failed to update existing .gitignore: {e}", "✗".red());
                             std::process::exit(1);
