@@ -3048,6 +3048,45 @@ fn test_first_init_on_fresh_clone_keeps_committed_edits() {
 }
 
 #[test]
+fn test_first_init_in_monorepo_subdir_keeps_committed_edits() {
+    let temp = tempdir().unwrap();
+    let git = GitFixture::new();
+    let ude = sync_cli(temp.path());
+    let mono_a = temp.path().join("mono_a");
+    git.run(temp.path(), &["init", "-q", &mono_a.to_string_lossy()]);
+    let svc_a = project_with_local_templates(&mono_a, "svc");
+    reinit_rust(&ude, &svc_a);
+    let gitconfig = append_to(&svc_a.join(".gitconfig"), "[alias]\n\tco = checkout\n");
+    git.run(&mono_a, &["add", "-A"]);
+    commit_without_project_hooks(&git, &mono_a, "chore: add svc");
+
+    // A fresh clone has no state.json; the project has no .git of its own.
+    let mono_b = temp.path().join("mono_b");
+    git.run(
+        temp.path(),
+        &[
+            "clone",
+            "-q",
+            &mono_a.to_string_lossy(),
+            &mono_b.to_string_lossy(),
+        ],
+    );
+    let svc_b = mono_b.join("svc");
+    assert!(!svc_b.join(".ude/state.json").exists());
+    assert!(!svc_b.join(".git").exists());
+    let init = init_output(&ude, &svc_b);
+
+    assert_eq!(
+        fs::read_to_string(svc_b.join(".gitconfig")).unwrap(),
+        gitconfig,
+        "init overwrote a committed edit: {init}"
+    );
+    assert!(init.contains("Kept committed .gitconfig"), "{init}");
+    let diff = git.output(&mono_b, &["diff", "--name-only"]);
+    assert!(diff.is_empty(), "init changed committed files: {diff}");
+}
+
+#[test]
 fn test_reinit_missing_file_warning_follows_upstream() {
     let temp = tempdir().unwrap();
     let ude = sync_cli(temp.path());
