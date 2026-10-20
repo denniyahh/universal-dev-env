@@ -2559,3 +2559,132 @@ fn test_reinit_does_not_warn_of_deletion_for_open_conflict() {
         outputs(&push)
     );
 }
+
+/// Exit 0 of `git check-ignore -q <path>` in `project`: true when ignored, false when
+/// not, panics on any other outcome.
+fn check_ignored(git: &GitFixture, project: &Path, path: &str) -> bool {
+    let out = git
+        .cmd(project)
+        .args(["check-ignore", "-q", path])
+        .output()
+        .expect("git check-ignore");
+    match out.status.code() {
+        Some(0) => true,
+        Some(1) => false,
+        other => panic!("git check-ignore {path} failed ({other:?})"),
+    }
+}
+
+/// Commits the index of `project` with `message`. The hooks and commit signing that
+/// `ude init` configures are not under test here and would make the fixture depend on
+/// host tools (gitleaks) and signing keys.
+fn commit_without_project_hooks(git: &GitFixture, project: &Path, message: &str) {
+    git.run(
+        project,
+        &[
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-q",
+            "-m",
+            message,
+        ],
+    );
+}
+
+/// `ude doctor --repo <project>`; returns both streams.
+fn doctor_output(ude: &impl Fn(&Path, &[&str]) -> Output, project: &Path) -> String {
+    let path = project.to_string_lossy().to_string();
+    outputs(&ude(project, &["doctor", "--repo", &path]))
+}
+
+/// Status (`Pass`, `Warning`, ...) of doctor's per-machine state check on `project`,
+/// read from `ude doctor --format json`; panics if the check is absent.
+fn state_check_status(ude: &impl Fn(&Path, &[&str]) -> Output, project: &Path) -> String {
+    let path = project.to_string_lossy().to_string();
+    let json = ude(project, &["doctor", "--repo", &path, "--format", "json"]);
+    let report: serde_json::Value = serde_json::from_slice(&json.stdout).expect("doctor json");
+    let state_check = report["repo"]
+        .as_array()
+        .expect("repo reports")
+        .iter()
+        .find(|r| r["name"] == "Per-machine sync state (.ude/state.json)")
+        .unwrap_or_else(|| panic!("no state check: {report}"));
+    state_check["status"]["status"]
+        .as_str()
+        .unwrap_or_else(|| panic!("state check has no status: {state_check}"))
+        .to_string()
+}
+
+#[test]
+fn test_doctor_reports_tracked_per_machine_state_with_remedy() {
+    let temp = tempdir().unwrap();
+    let git = GitFixture::new();
+    let ude = sync_cli(temp.path());
+    let project = project_with_local_templates(temp.path(), "project");
+    git.run(temp.path(), &["init", "-q", &project.to_string_lossy()]);
+    reinit_rust(&ude, &project);
+    assert!(check_ignored(&git, &project, ".ude/state.json"));
+    let remedy = "git rm --cached .ude/state.json";
+
+    // Negative control (a): fresh init leaves state.json untracked, so no finding.
+    let fresh = doctor_output(&ude, &project);
+    assert!(fresh.contains("Per-machine sync state"), "{fresh}");
+    assert!(!fresh.contains(remedy), "{fresh}");
+    assert_eq!(state_check_status(&ude, &project), "Pass");
+
+    // Committed despite the ignore rule (as before the template ignored it).
+    git.run(&project, &["add", "-f", ".ude/state.json"]);
+    commit_without_project_hooks(&git, &project, "chore: track state");
+    let tracked = doctor_output(&ude, &project);
+    assert!(
+        tracked.contains(".ude/state.json is tracked by git"),
+        "{tracked}"
+    );
+    assert!(tracked.contains(remedy), "{tracked}");
+    // Same severity as doctor's other repository findings: a warning, which leaves the
+    // exit code to the other checks.
+    assert_eq!(state_check_status(&ude, &project), "Warning");
+
+    // Negative control (b): after the remedy the finding is gone and the file stays.
+    git.run(&project, &["rm", "-q", "--cached", ".ude/state.json"]);
+    commit_without_project_hooks(&git, &project, "chore: untrack state");
+    assert!(project.join(".ude/state.json").is_file());
+    let fixed = doctor_output(&ude, &project);
+    assert!(fixed.contains("Per-machine sync state"), "{fixed}");
+    assert!(!fixed.contains(remedy), "{fixed}");
+    assert_eq!(state_check_status(&ude, &project), "Pass");
+}
+
+#[test]
+fn test_project_gitignore_ignores_state_staging_temp_files() {
+    let temp = tempdir().unwrap();
+    let git = GitFixture::new();
+    let ude = sync_cli(temp.path());
+    let project = project_with_local_templates(temp.path(), "project");
+    git.run(temp.path(), &["init", "-q", &project.to_string_lossy()]);
+    reinit_rust(&ude, &project);
+
+    // tempfile's NamedTempFile::new_in(".ude") names: ".tmp" + 6 random characters.
+    let staging_temp = ".ude/.tmpQ1w2E3";
+    let override_file = ".ude/overrides/mise.toml";
+    assert!(check_ignored(&git, &project, staging_temp));
+    // Negative control: committed `.ude/` content is not ignored.
+    assert!(!check_ignored(&git, &project, override_file));
+
+    // Second, independent count: what `git status` offers to commit.
+    fs::write(project.join(staging_temp), "{}").unwrap();
+    fs::create_dir_all(project.join(".ude/overrides")).unwrap();
+    fs::write(project.join(override_file), "[tools]\n").unwrap();
+    let untracked = git.output(
+        &project,
+        &["status", "--porcelain", "--untracked-files=all"],
+    );
+    assert!(!untracked.contains(".tmpQ1w2E3"), "{untracked}");
+    assert!(
+        untracked.contains("?? .ude/overrides/mise.toml"),
+        "{untracked}"
+    );
+}
