@@ -1527,14 +1527,17 @@ fn kept_ancestor(
     }
 }
 
-/// The paths in `rels` that git tracks in `project`'s index; empty when `project` has
-/// no `.git`. A git failure is an error: init must not overwrite files it could not
+/// The paths in `rels` that git tracks in `project`'s index; empty when neither
+/// `project` nor any parent has a `.git` (a project in a monorepo subdirectory has none
+/// of its own). A git failure is an error: init must not overwrite files it could not
 /// check.
 fn committed_paths(
     project: &Path,
     rels: &[PathBuf],
 ) -> Result<std::collections::HashSet<PathBuf>, String> {
-    if !project.join(".git").exists() {
+    let absolute = fs::canonicalize(project)
+        .map_err(|e| format!("Failed to resolve {}: {e}", project.display()))?;
+    if !absolute.ancestors().any(|dir| dir.join(".git").exists()) {
         return Ok(std::collections::HashSet::new());
     }
     let mut cmd = Command::new("git");
