@@ -1,0 +1,46 @@
+# Supply-chain scans: secrets (gitleaks) and dependency policy (cargo-deny, deny.toml).
+# Scanner versions come from mise.toml, the same pins the local hooks use.
+name: supply-chain
+
+on:
+  push:
+  pull_request:
+  schedule:
+    # Weekly, because advisories appear against code nobody touched. GitHub runs
+    # scheduled workflows from the default branch only.
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  secrets:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Full history: a secret removed in a later commit is still published.
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: jdx/mise-action@7a4e45a543138629540c9a1616d08632b893e492 # v5.0.1
+        with:
+          version: 2026.10.3
+          install_args: gitleaks
+      - name: Scan all commits for secrets
+        run: '"$(mise which gitleaks)" git --redact'
+
+  dependencies:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@7a4e45a543138629540c9a1616d08632b893e492 # v5.0.1
+        with:
+          version: 2026.10.3
+          install_args: cargo-deny
+      - name: Advisories, bans, licenses, sources
+        run: mise run supply-chain
