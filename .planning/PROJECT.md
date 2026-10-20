@@ -18,11 +18,11 @@ Reliable, hermetic, bidirectional developer environment and agent baseline synch
 - ✓ **Anti-Symlink Traversal Validation** — Target paths and parent directories validated to block writes through malicious external symlinks. (`src/sync/mod.rs`)
 - ✓ **Binary & Non-UTF-8 State Tracking** — Raw byte SHA-256 fingerprinting and converged ancestor reconciliation in `.ude/state.json`. (`src/sync/mod.rs`, `src/sync/state.rs`)
 - ✓ **Machine & Repository Doctor Audits** — System checks for SSH signing keys, tools (`git`, `gh`, `mise`, `gitleaks`), hooks, and global configs with text/JSON outputs and exit-code contracts. (`src/audit/mod.rs`)
+- ✓ **Track 1: Sync Engine & State Hermeticity** — Deletion tombstones, two-phase staged materialization, push continuity checks, CRLF normalization, diff3 `.conflict` sidecars with `ude sync resolve`, and bounded subprocess timeouts. — Phase 1 (verified 12/12 on Linux; Windows runtime checks deferred to Phase 999.1)
 - ✓ **Jinja Archetype Scaffolding** — Project initialization across Rust, Node, and Polyglot archetypes using Minijinja with embedded hooks and agent guidelines. (`src/template/mod.rs`, `src/manifest/mod.rs`)
 
 ### Active
 
-- [ ] **Track 1: Sync Engine & State Hermeticity** — Implement deletion lifecycle propagation with tombstones, two-phase transactional shadow materialization, merge candidate push reconciliation, CRLF line-ending normalization, structured `.conflict` diff generation, and bounded subprocess execution timeouts.
 - [ ] **Track 2: Sanitizer, Boundaries & Security** — Implement Shannon entropy and Base64 credential screening, strict word and punctuation boundary matching for path parameterization, and TypeSafe System One confidence guardrails.
 - [ ] **Track 3: Doctor & CLI Hardening** — Implement strict OpenSSH public key parsing, dual disk/git-index executable bit auditing for hooks, relative include path resolution against repository roots, and strict exit code contracts (1 for warnings, 2 for critical errors).
 - [ ] **Track 4: Templates, Archetypes & Manifest** — Decouple personal repository URLs into parameterized manifest variables, implement safe re-initialization with backup semantics, enforce strict Minijinja undefined variable checking, and wire `.ude.toml` policy loading.
@@ -54,6 +54,9 @@ Reliable, hermetic, bidirectional developer environment and agent baseline synch
 | Offline Git fixtures for sync verification | Eliminates network flakiness and allows high-assurance regression testing of sync protocols | ✓ Good |
 | SHA-256 raw byte fingerprinting for state ledger | Disambiguates local modifications from upstream updates without parsing non-UTF-8 files | ✓ Good |
 | Native Rust Minijinja instead of external template engine | Avoids external runtime dependencies (Python/Node) for core CLI scaffolding | ✓ Good |
+| Fresh-clone init keeps committed managed files; one with no template is left Unmanaged (kept tombstone) | Without state.json a clone cannot tell a template deleted upstream from one that never existed; Unmanaged is the only state that neither deletes data nor resurrects a template | — Pending (Phase 1; stale copies stay on clones) |
+| Init refuses any symlinked write destination (exit 2) before writing anything | Hermeticity: init must never write outside the project | ✓ Good (Phase 1) |
+| Supply-chain advisories block pushes (pre-push and CI); Dependabot alerts only until git flow | A known-vulnerable dependency should not ship; security-fix PRs would bypass a future `develop` branch | — Pending |
 
 ## Evolution
 
@@ -73,4 +76,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-10-12 after initialization*
+*Last updated: 2026-10-20 after Phase 1*

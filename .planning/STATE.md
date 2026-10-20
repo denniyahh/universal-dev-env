@@ -1,43 +1,43 @@
 ---
 gsd_state_version: "1.0"
-current_phase: 01
-current_phase_name: Sync Engine & State Hermeticity
-status: verifying
-stopped_at: Completed 01-11-PLAN.md
-last_updated: "2026-10-19T12:19:35.138Z"
-last_activity: 2026-10-18
-last_activity_desc: Phase 01 execution started
-state_head: be0510ce9f7138bfec8af848ffe89f0170824efd
+current_phase: 2
+current_phase_name: Sanitizer, Boundaries & Security Hardening
+status: planning
+stopped_at: Phase 01 complete, ready to plan Phase 2
+last_updated: "2026-10-20T20:52:03.752Z"
+last_activity: 2026-10-20
+last_activity_desc: Phase 01 complete, transitioned to Phase 2
+state_head: 77e216c14b22601a676a4e4740acd9c850798201
 progress:
   total_phases: 4
-  completed_phases: 0
+  completed_phases: 1
   total_plans: 11
   completed_plans: 11
-  percent: 0
+  percent: 25
 ---
 
 # Project State
 
 ## Project Reference
 
-See: `.planning/PROJECT.md` (updated 2026-10-12)
+See: `.planning/PROJECT.md` (updated 2026-10-20)
 
 **Core value:** Reliable, hermetic, bidirectional developer environment and agent baseline synchronization with cryptographic ancestor state tracking and zero credential leakage.
-**Current focus:** Phase 01 — Sync Engine & State Hermeticity
+**Current focus:** Phase 2 — Sanitizer, Boundaries & Security Hardening
 
 ## Current Position
 
-Phase: 01 (Sync Engine & State Hermeticity) — EXECUTING
-Plan: 11 of 11
-Status: Phase complete — ready for verification
-Last activity: 2026-10-18 — Phase 01 execution started
+Phase: 2 — Sanitizer, Boundaries & Security Hardening
+Plan: Not started
+Status: Ready to plan
+Last activity: 2026-10-20 — Phase 01 complete, transitioned to Phase 2
 
-Progress: [░░░░░░░░░░] 0%
+Progress: [███░░░░░░░] 25%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 0
+- Total plans completed: 11
 - Average duration: 0 min
 - Total execution time: 0.0 hours
 
@@ -49,6 +49,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 2: Sanitizer, Boundaries & Security Hardening | 0/3 | - | - |
 | Phase 3: Doctor & CLI Hardening | 0/3 | - | - |
 | Phase 4: Templates, Archetypes & Manifest Decoupling | 0/3 | - | - |
+| 01 | 11 | - | - |
 
 **Recent Trend:**
 - Trend: Stable
@@ -102,6 +103,10 @@ Recent decisions affecting current work:
 - [Phase 01]: 01-10: push skips Conflicted / ConflictPending (skipped_conflicts) and Merged (skipped_merged) files, publishes the rest, and the CLI exits 1 when it skipped anything; --force still only feeds allow_agent_rules
 - [Phase 01]: 01-11: direct push verifies continuity (cache commit parent == fetched head; mismatch = rollback + exit 2) and pushes with plain git push --porcelain, never forced; a ! line with a [rejected] summary rolls the commit back and exits 1 with 'upstream changed, run ude sync pull' (D-18); PR mode is not subject to the abort
 - [Phase 01]: 01-11: classify_push_porcelain reads only the flag field (exactly !) and the summary prefix ([rejected]); any [rejected] line decides regardless of order; other ! lines are hard failures
+- [Phase 01 verify]: init refuses symlinked write destinations before touching anything (exit 2); an unreadable .gitignore stops init, a non-UTF-8 one is appended to
+- [Phase 01 verify]: re-init without --type keeps the recorded project type; committed-file detection looks for .git in parents (monorepo subdirectories)
+- [Phase 01 verify]: a committed managed file with no template is left Unmanaged at init (kept tombstone): never deleted by pull, never published by push
+- [Phase 01 verify]: push skips the TypeSafe drift check for a symlinked AGENTS.md
 
 ### Pending Todos
 
@@ -113,7 +118,9 @@ Recent decisions affecting current work:
 
 ### Blockers/Concerns
 
-None. Top 5 critical P1 security and sync defects previously remediated in commit `26f5d0e`.
+- ⚠️ [Phase 01] Windows runtime behavior (bounded-runner kill, lock release, state.json replace) is unverified: compile-checked only, deferred to Phase 999.1
+- ⚠️ [Phase 01] One symlinked managed file stops status/pull/push for all files (review WR-01): todo logged, no phase owns it
+- ⚠️ [Phase 01] Seven info-level review findings (IN-01..IN-07) are untriaged; IN-01: a local deletion of a templated file deletes the shared .jinja template
 
 ## Deferred Items
 
@@ -126,6 +133,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-19T12:19:26.833Z
-Stopped at: Completed 01-11-PLAN.md
+Last session: 2026-10-20T20:55:00Z
+Stopped at: Phase 01 complete, ready to plan Phase 2
 Resume file: None
