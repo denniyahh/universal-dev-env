@@ -1420,6 +1420,7 @@ fn test_sync_push_skips_unresolved_conflict_exit_1() {
 
 /// The single remote cache checkout under `<cache>/ude` (named `remote-*`, not the
 /// `.lock` file).
+#[cfg(unix)]
 fn remote_cache_checkout(cache: &Path) -> PathBuf {
     let checkouts: Vec<PathBuf> = fs::read_dir(cache.join("ude"))
         .unwrap()
@@ -1438,6 +1439,7 @@ fn remote_cache_checkout(cache: &Path) -> PathBuf {
 }
 
 /// mise.toml's ancestor hash in the project's state.json.
+#[cfg(unix)]
 fn mise_ancestor(project: &Path) -> String {
     let state: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(project.join(".ude/state.json")).unwrap())
@@ -2691,6 +2693,7 @@ fn test_project_gitignore_ignores_state_staging_temp_files() {
 
 /// A file outside every project and template tree holding `HOST_SECRET`, standing in
 /// for a host file a planted symlink points at.
+#[cfg(unix)]
 const HOST_SECRET: &str = "HOST_ONLY_SECRET_CONTENT\n";
 
 #[cfg(unix)]
