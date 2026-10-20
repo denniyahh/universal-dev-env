@@ -474,19 +474,63 @@ fn main() {
                 );
             }
 
-            println!(
-                "  {} Created project directories and scaffolding",
-                "✓".green()
-            );
-            println!(
-                "  {} Configured tracked .gitconfig & chained scripts/hooks",
-                "✓".green()
-            );
-            println!(
-                "  {} Initialized workflow tasks (mise.toml, scratch/)",
-                "✓".green()
-            );
-            println!("{}", "==> Project initialization complete.".bold());
+            // A tracked file that is missing stays missing (D-15). Say so, and what
+            // push will do with it, instead of reporting it as set up.
+            let missing = missing_tracked_files(&project_path, &prior_state, &managed_rels);
+            for rel in &missing {
+                print_missing_tracked_warning(root_template_dir.as_deref(), rel);
+            }
+            // (line when every file is present, label when some are missing, which
+            // managed paths the line covers)
+            type InitStep = (&'static str, &'static str, fn(&str) -> bool);
+            let steps: [InitStep; 3] = [
+                (
+                    "Created project directories and scaffolding",
+                    "Project scaffolding",
+                    |rel| {
+                        matches!(
+                            rel,
+                            ".gitignore" | "scripts/check-in-container.sh" | ".agents/AGENTS.md"
+                        )
+                    },
+                ),
+                (
+                    "Configured tracked .gitconfig & chained scripts/hooks",
+                    ".gitconfig & scripts/hooks",
+                    |rel| rel == ".gitconfig" || rel.starts_with("scripts/hooks/"),
+                ),
+                (
+                    "Initialized workflow tasks (mise.toml, scratch/)",
+                    "Workflow tasks (mise.toml, scratch/)",
+                    |rel| rel == "mise.toml" || rel.starts_with("scratch/"),
+                ),
+            ];
+            for (done, label, covers) in steps {
+                let absent = missing
+                    .iter()
+                    .filter(|rel| covers(&rel.to_string_lossy()))
+                    .count();
+                if absent == 0 {
+                    println!("  {} {done}", "✓".green());
+                } else {
+                    println!(
+                        "  {} {label}: {absent} tracked file(s) missing, see warnings above",
+                        "!".yellow()
+                    );
+                }
+            }
+            if missing.is_empty() {
+                println!("{}", "==> Project initialization complete.".bold());
+            } else {
+                println!(
+                    "{}",
+                    format!(
+                        "==> Project initialization complete; {} tracked file(s) missing.",
+                        missing.len()
+                    )
+                    .bold()
+                );
+            }
         }
         cli::Commands::Sync(sync_args) => {
             let engine = sync::SyncEngine::new();
@@ -606,8 +650,12 @@ fn main() {
                             }
                             sync::SyncStatus::LocalDeleted => {
                                 let hint = match push_boundary(&s.relative_path) {
-                                    PushBoundary::Publishable => "push to propagate",
-                                    PushBoundary::ForceOnly => "push with --force to propagate",
+                                    PushBoundary::Publishable => {
+                                        "push to propagate; push deletes the shared template, restore the file to keep it"
+                                    }
+                                    PushBoundary::ForceOnly => {
+                                        "push with --force to propagate; that deletes the shared template, restore the file to keep it"
+                                    }
                                     PushBoundary::Never => {
                                         "local-only path, push never publishes it; restore it to clear"
                                     }
@@ -1094,6 +1142,70 @@ fn template_logic_remedy(file: &Path, template: &Path) -> String {
         "for this project only, {project_only}; for every project, edit {} upstream",
         template.display()
     )
+}
+
+/// Managed files in `rels` that `state` tracks with an ancestor record and no open
+/// conflict but that are absent locally (read like `scan_project` does): sync reads
+/// each as deleted locally, and init leaves it deleted (D-15).
+fn missing_tracked_files(
+    project: &Path,
+    state: &sync::ProjectState,
+    rels: &[PathBuf],
+) -> Vec<PathBuf> {
+    rels.iter()
+        .filter(|rel| state.get_ancestor_hash(rel).is_some() && state.conflict(rel).is_none())
+        .filter(|rel| {
+            matches!(
+                fs::metadata(project.join(rel)),
+                Err(e) if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                )
+            )
+        })
+        .cloned()
+        .collect()
+}
+
+/// Warns that init left the tracked file `rel` missing, what `ude sync push` will do
+/// with its shared template, and how to restore the file.
+fn print_missing_tracked_warning(template_root: Option<&Path>, rel: &Path) {
+    let template = template_root.and_then(|root| sync::map_to_upstream(root, rel));
+    let consequence = match push_boundary(rel) {
+        PushBoundary::Publishable => "a plain ude sync push will delete its shared template",
+        PushBoundary::ForceOnly => {
+            "a plain ude sync push refuses the deletion, but ude sync push --force will delete its shared template"
+        }
+        PushBoundary::Never => "ude sync push never publishes this path",
+    };
+    println!(
+        "  {} {} is tracked but missing; init does not recreate it, and {consequence}",
+        "!".yellow(),
+        rel.display()
+    );
+    let recovery = match (push_boundary(rel), template) {
+        (PushBoundary::Never, Some(template)) => {
+            format!("Restore it from {} to clear this", template.display())
+        }
+        (PushBoundary::Never, None) => "Restore it locally to clear this".to_string(),
+        (_, Some(template)) if template.extension().is_some_and(|ext| ext == "jinja") => {
+            format!(
+                "To keep it, restore it before pushing (git restore {} if it is committed; init does not re-render its template {} while it is tracked), then check ude sync status",
+                rel.display(),
+                template.display()
+            )
+        }
+        (_, Some(template)) => format!(
+            "To keep it, restore it before pushing (git restore {} if it is committed, or copy {}), then check ude sync status",
+            rel.display(),
+            template.display()
+        ),
+        (_, None) => format!(
+            "To keep it, restore it before pushing (git restore {} if it is committed), then check ude sync status",
+            rel.display()
+        ),
+    };
+    println!("    {recovery}");
 }
 
 /// How to clear a local change push will never publish: restore the file to the
