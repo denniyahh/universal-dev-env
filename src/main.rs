@@ -514,6 +514,7 @@ fn main() {
             // record (files, tombstones, open conflicts) is carried forward unchanged.
             let mut project_state = prior_state.clone();
             project_state.project_type = Some(project_type);
+            let mut unmanaged_kept: Vec<&PathBuf> = Vec::new();
             for rel in &managed_rels {
                 // A tracked file keeps its prior record: init did not write it, and a
                 // replacement ancestor (the current template or the local bytes) would
@@ -525,16 +526,23 @@ fn main() {
                 // what init would have written from the template as its ancestor, so
                 // kept content reads as a local modification: pull then merges or
                 // conflicts instead of replacing it (CR-03). With no readable template, a
-                // committed file records its own bytes, as the machine that committed it
-                // would have: it reads as Deleted upstream, so push cannot resurrect the
-                // template. An uncommitted kept .gitignore records nothing, so pull never
-                // deletes it.
+                // fresh clone cannot tell a template deleted upstream from one that never
+                // existed, so a committed file is left unmanaged (a kept tombstone): pull
+                // never deletes it, push never resurrects or creates a template from it.
+                // An uncommitted kept .gitignore records nothing.
                 let committed_keep = keep(&rel.to_string_lossy());
                 let kept =
                     committed_keep || (kept_gitignore && rel.as_path() == Path::new(".gitignore"));
                 let recorded = if kept {
                     match kept_ancestor(&renderer, root_template_dir.as_deref(), rel, &ctx) {
-                        Ok(None) if committed_keep => fs::read(project_path.join(rel)).ok(),
+                        Ok(None) if committed_keep => {
+                            if let Ok(bytes) = fs::read(project_path.join(rel)) {
+                                let hash = sync::SyncEngine::fingerprint(&bytes);
+                                project_state.record_tombstone(rel, hash, true);
+                                unmanaged_kept.push(rel);
+                            }
+                            None
+                        }
                         Ok(bytes) => bytes,
                         Err(e) => {
                             eprintln!("  {} Initialization failed: {e}", "✗".red());
@@ -565,11 +573,19 @@ fn main() {
             }
 
             for rel in &kept_committed {
-                println!(
-                    "  {} Kept committed {} (not overwritten); sync status compares it with the template",
-                    "✓".green(),
-                    rel.display()
-                );
+                if unmanaged_kept.contains(rel) {
+                    println!(
+                        "  {} Kept committed {} (not overwritten); no shared template, so sync leaves it unmanaged",
+                        "✓".green(),
+                        rel.display()
+                    );
+                } else {
+                    println!(
+                        "  {} Kept committed {} (not overwritten); sync status compares it with the template",
+                        "✓".green(),
+                        rel.display()
+                    );
+                }
             }
 
             // A tracked file that is missing stays missing (D-15). Say so, and what
