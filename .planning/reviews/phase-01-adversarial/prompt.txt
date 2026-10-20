@@ -1,0 +1,28 @@
+You are an adversarial reviewer. Attack the following code change. Do not summarize or praise it. Find, with the exact file and the exact line/quoted text for each:
+1. Contradictions between the documents or between requirements and plans.
+2. Unstated assumptions that would break under real use or edge loads.
+3. Decisions or steps that do not survive contact with the actual codebase or tools.
+4. Scope leaks (work that belongs in another phase, item, or abstraction layer).
+5. Acceptance criteria that are not falsifiable or have no negative control.
+6. Missing edge cases, concurrency hazards, or unhandled failure modes.
+
+Be specific and hostile. Prefer 5 sharp, reproducible findings with file:line citations to 20 vague ones. Where a finding is speculation, label it explicitly as speculation.
+
+## What you are reviewing
+The current working directory is a read-only snapshot of a Rust CLI ("ude", a developer-environment template sync engine). Phase 01 changed it; the full phase diff (source, tests, templates; planning docs excluded) is in `REVIEW-DIFF.patch` at the snapshot root. Read the actual source files under `src/` and `tests/` for context — do not review from the patch alone.
+
+Phase goal: bidirectional template sync that is hermetic (immune to inherited GIT_DIR etc.), crash-resilient, and atomic, with no phantom drift (CRLF) and no zombie file resurrections (tombstones).
+
+Key files: src/process.rs (bounded subprocess runner, group kill, env scrub), src/sync/mod.rs (engine: scan/classify, pull, push, publication gate, conflicts, resolve, push continuity), src/sync/state.rs (state.json ledger, v1->v2 migration, has_record), src/sync/staging.rs (staged multi-file transaction), src/sync/merge.rs (diffy 3-way merge, conflict sidecar renderer), src/main.rs (CLI wiring, init, re-init), src/audit/mod.rs (ude doctor), templates/projects/generic/gitignore.repo, tests/e2e_lifecycle.rs.
+
+PRIORITY: the two newest commits were never code-reviewed — `git show` is unavailable in the snapshot, so focus on these behaviours in the current source:
+- re-running `ude init` warns, per tracked-but-missing managed file, that a plain `ude sync push` will delete its shared template (src/main.rs init path), and `ude sync status`'s "Deleted locally" hint says the same;
+- `ude doctor` warns when `.ude/state.json` is tracked by git AND ignored, printing `git rm --cached .ude/state.json` (src/audit/mod.rs);
+- `.ude/state.json` and `.ude/.tmp*` are ignored by templates/projects/generic/gitignore.repo.
+
+Locked design decisions (do not report these as defects, but DO report code that violates them): D-01 no fsync, rename phase not atomic as a whole; D-05 staged temp files beside each target; D-06/D-07 a corrupt/unreadable/newer state.json is an error and is never reset; D-10 push skips conflicted/blocked files, lists them, exits 1; exit code 1 = conflict/skip/race, 2 = hard failure; D-12..D-16 deletion lifecycle (upstream deletion with unchanged local removes it and writes a tombstone; local deletion is kept, never resurrected, and a plain push propagates it upstream; double deletion drops tracking); D-18 direct push never force-pushes and aborts on upstream movement. Full text: .planning/phases/01-sync-engine-state-hermeticity/01-CONTEXT.md.
+
+Already known and tracked — do NOT re-report: Windows paths never compiled/run; crash mid-rename partial update (accepted); custom .gitignore kept by init with no prior record can be pushed over the shared template; {{ user.home }} placeholder round-trip leak; template-logic push guard only checks .jinja; re-init does not apply a changed --type, stages uncommitted hook edits, does not restore a lost exec bit; a project with its own pre-existing .gitignore never gets the .ude/state.json ignore rule; and the 7 info findings IN-01..IN-07 in .planning/phases/01-sync-engine-state-hermeticity/01-REVIEW.md. Prior review rounds are in that directory (01-REVIEW*.md) — read them to avoid duplicates.
+
+## Output format
+Write your answer as Markdown with two sections, `## CONFIRMED` (you traced the exact code path; give file:line and quoted code, and the concrete input/state that triggers it) and `## SUSPECTED` (plausible but not fully traced). For each finding: severity (critical/warning/info), file:line, the failing scenario, and why existing tests do not catch it. You may run read-only commands (cargo check/test is allowed in this snapshot). Do NOT modify any file outside a scratch directory you create under /tmp, and remove it afterwards.
