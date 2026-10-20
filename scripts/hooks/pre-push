@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Dependency policy (deny.toml) with the cargo-deny version pinned in mise.toml.
-# Bans, licenses and sources block the push. Advisories only warn: a new advisory
-# against an untouched dependency should not block unrelated work.
+# Every check blocks the push, advisories included; an advisory that cannot be
+# fixed yet must be listed under [advisories] ignore in deny.toml with a reason.
 set -euo pipefail
 
 # Hooks started from GUI clients may not inherit the login PATH.
@@ -16,7 +16,4 @@ cd "$(git rev-parse --show-toplevel)"
 # `mise which` names the pinned install (or fails); `mise exec` would let an
 # unpinned cargo-deny earlier on PATH win.
 cargo_deny=$(mise which cargo-deny)
-"$cargo_deny" check --hide-inclusion-graph bans licenses sources
-if ! "$cargo_deny" check --hide-inclusion-graph advisories; then
-    echo "pre-push: WARNING: cargo deny advisories failed (see above); push not blocked" >&2
-fi
+exec "$cargo_deny" check --hide-inclusion-graph
