@@ -2316,3 +2316,43 @@ fn test_status_and_push_agree_on_agent_rules_under_template_logic() {
         edited
     );
 }
+
+#[test]
+fn test_reinit_keeps_open_conflict_with_no_ancestor() {
+    let temp = tempdir().unwrap();
+    let ude = sync_cli(temp.path());
+    let project = project_with_local_templates(temp.path(), "project");
+    let template = project.join(PRE_PUSH_TEMPLATE);
+    let hook = project.join("scripts/hooks/pre-push");
+
+    // The template is missing at first init, so the hook gets no record; the user
+    // writes their own, and the template then appears with different content.
+    let parked = temp.path().join("parked-pre-push");
+    fs::rename(&template, &parked).unwrap();
+    reinit_rust(&ude, &project);
+    fs::write(&hook, "#!/bin/sh\n# user hook\n").unwrap();
+    fs::rename(&parked, &template).unwrap();
+    let pull = ude(&project, &["sync", "pull"]);
+    assert_eq!(pull.status.code(), Some(1), "{}", outputs(&pull));
+    let before = state_json(&project);
+    assert!(
+        before["conflicts"]["scripts/hooks/pre-push"].is_object()
+            && before["files"]["scripts/hooks/pre-push"].is_null(),
+        "{before}"
+    );
+
+    reinit_rust(&ude, &project);
+    assert_eq!(
+        fs::read_to_string(&hook).unwrap(),
+        "#!/bin/sh\n# user hook\n",
+        "re-init must not overwrite the conflicted local file"
+    );
+    let after = state_json(&project);
+    assert_eq!(after["conflicts"], before["conflicts"], "{after}");
+    assert!(
+        after["files"]["scripts/hooks/pre-push"].is_null(),
+        "{after}"
+    );
+    let resolve = ude(&project, &["sync", "resolve", "scripts/hooks/pre-push"]);
+    assert_eq!(resolve.status.code(), Some(0), "{}", outputs(&resolve));
+}
