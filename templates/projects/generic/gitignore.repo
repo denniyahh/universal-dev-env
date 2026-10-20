@@ -28,3 +28,7 @@ graphify-out/*
 
 # UDE sync conflict sidecars (resolve with: ude sync resolve <file>)
 *.conflict
+
+# UDE sync ancestor state is per machine; committing it makes init on another
+# machine treat every uncommitted managed file as deleted locally
+.ude/state.json
