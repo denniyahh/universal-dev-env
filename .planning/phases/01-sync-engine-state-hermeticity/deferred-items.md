@@ -77,3 +77,29 @@
   per-missing-file warning still fires, so an upstream deletion is warned, not silent.
   **Fix options:** init appends the `.ude/` rules to a kept `.gitignore`, or doctor flags
   a tracked state.json regardless of ignore status.
+  2026-10-20 external review (item 6): the copier template `template/.gitignore` and this
+  repository's own `.gitignore` also lack the `.ude/state.json` rule.
+
+- First init reports success when template sources are missing
+  status: open (pre-existing; external review 2026-10-20, item 5)
+  **What:** `copy_template_file` / `render_and_write` do nothing when the template is absent, yet
+  init prints its ✓ lines.
+
+- Staged temp files outside `.ude/` are not ignored
+  status: open (external review 2026-10-20, item 7)
+  **What:** `NamedTempFile::new_in(parent)` beside each target (src/sync/staging.rs); an
+  interrupted run can leave a `.tmp*` file that `git add -A` commits.
+
+- Init judges missing files against its own template source, not the sync remote
+  status: open (external review 2026-10-20 residual; now load-bearing after 4dd94e4)
+  **What:** init reads templates from the local/bundled dir; push uses `--remote` or the manifest's
+  central repo when set, so the missing-file warning can predict a different outcome there.
+
+- Fresh-clone keep (42803ee) uses the current template as the ancestor
+  status: open (known limit of the fix)
+  **What:** an upstream change made between machine A's init and machine B's first init counts as
+  already in B's base, so B's pull will not bring it in. A kept edit reads as Locally Modified, so a
+  plain push publishes it, as on machine A (see the init-kept-files todo).
+
+- Doctor's per-machine state warning leaves exit 0 (external review residual)
+  status: open (same severity as doctor's other repository warnings, by design in 1ed695c)

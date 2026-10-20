@@ -49,3 +49,13 @@ Dropped lanes: none. Every item below was checked against source by the orchestr
   offline the sidecar cannot be regenerated until the next pull.
 - Doctor's state warning keeps exit 0 and "All required baselines verified" (pi).
 - Init's warning resolves templates from the local/bundled dir, never `--remote` (pi, speculation).
+
+## Disposition (2026-10-20, operator: fix 1-4 now, log the rest)
+- 1 fixed: 3b70773 (red), 2023d5b — every sync/init read refuses a symlink at the path or a parent
+  below its root.
+- 2 fixed: 3b70773 (red), 42803ee — first init keeps managed files git tracks; ancestor = what init
+  would have written from the template.
+- 3 fixed: 3b70773 (red), 4dd94e4 — the warning follows the file's sync status (conflict,
+  both-deleted, deletion).
+- 4 fixed by 2023d5b (dangling file and dangling state.json links are refused).
+- 5, 6, 7 and the residual risks: logged in the phase's deferred-items.md.
