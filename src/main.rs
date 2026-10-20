@@ -239,6 +239,7 @@ fn main() {
             if let Some(ref tdir) = root_template_dir {
                 if !tracked(".gitconfig")
                     && let Err(e) = copy_template_file(
+                        tdir,
                         &tdir.join("projects/generic/gitconfig.repo"),
                         &project_path.join(".gitconfig"),
                     )
@@ -268,7 +269,7 @@ fn main() {
                         }
                     }
                 } else if src_gitignore.exists()
-                    && let Err(e) = copy_template_file(&src_gitignore, &target_gitignore)
+                    && let Err(e) = copy_template_file(tdir, &src_gitignore, &target_gitignore)
                 {
                     eprintln!("  {} Initialization failed: {e}", "✗".red());
                     std::process::exit(1);
@@ -281,7 +282,7 @@ fn main() {
                     }
                     let src_hook = tdir.join(format!("projects/generic/hooks/{hook}"));
                     let dst_hook = hooks_dir.join(hook);
-                    if let Err(e) = copy_template_file(&src_hook, &dst_hook) {
+                    if let Err(e) = copy_template_file(tdir, &src_hook, &dst_hook) {
                         eprintln!("  {} Initialization failed: {e}", "✗".red());
                         std::process::exit(1);
                     }
@@ -292,7 +293,7 @@ fn main() {
                 if !tracked("scripts/check-in-container.sh") {
                     let src_cont = tdir.join("projects/generic/container/check-in-container.sh");
                     let dst_cont = container_dir.join("check-in-container.sh");
-                    if let Err(e) = copy_template_file(&src_cont, &dst_cont) {
+                    if let Err(e) = copy_template_file(tdir, &src_cont, &dst_cont) {
                         eprintln!("  {} Initialization failed: {e}", "✗".red());
                         std::process::exit(1);
                     }
@@ -310,7 +311,7 @@ fn main() {
                     }
                     let src_s = tdir.join(format!("projects/agents/scratch/{s}"));
                     let dst_s = scratch_dir.join(s);
-                    if let Err(e) = copy_template_file(&src_s, &dst_s) {
+                    if let Err(e) = copy_template_file(tdir, &src_s, &dst_s) {
                         eprintln!("  {} Initialization failed: {e}", "✗".red());
                         std::process::exit(1);
                     }
@@ -321,6 +322,7 @@ fn main() {
                 if !tracked("mise.toml")
                     && let Err(e) = render_and_write(
                         &renderer,
+                        tdir,
                         &tdir.join("projects/agents/mise.toml.jinja"),
                         &project_path.join("mise.toml"),
                         &ctx,
@@ -333,6 +335,7 @@ fn main() {
                 if !tracked(".agents/AGENTS.md")
                     && let Err(e) = render_and_write(
                         &renderer,
+                        tdir,
                         &tdir.join("projects/agents/agents.md.jinja"),
                         &agents_dir.join("AGENTS.md"),
                         &ctx,
@@ -350,6 +353,7 @@ fn main() {
                     }
                     if let Err(e) = render_and_write(
                         &renderer,
+                        tdir,
                         &tdir.join("projects/agents/mempalace.yaml.jinja"),
                         &stage_dir.join("mempalace.yaml"),
                         &ctx,
@@ -1316,7 +1320,8 @@ fn find_templates_dir() -> Option<PathBuf> {
     None
 }
 
-fn copy_template_file(src: &Path, dst: &Path) -> Result<(), String> {
+fn copy_template_file(root: &Path, src: &Path, dst: &Path) -> Result<(), String> {
+    sync::refuse_symlink_under(root, src)?;
     if src.exists() {
         if let Some(parent) = dst.parent() {
             fs::create_dir_all(parent).map_err(|e| {
@@ -1334,10 +1339,12 @@ fn copy_template_file(src: &Path, dst: &Path) -> Result<(), String> {
 
 fn render_and_write(
     renderer: &template::TemplateRenderer,
+    root: &Path,
     src: &Path,
     dst: &Path,
     ctx: &template::TemplateContext,
 ) -> Result<(), String> {
+    sync::refuse_symlink_under(root, src)?;
     if src.exists() {
         let content = fs::read_to_string(src)
             .map_err(|e| format!("Failed to read template {}: {e}", src.display()))?;
