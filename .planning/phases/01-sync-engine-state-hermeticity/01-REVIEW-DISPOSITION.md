@@ -5,11 +5,11 @@ titles: json
 findings:
   - id: CR-01
     severity: critical
-    disposition: open
+    disposition: fixed
     title: "`ude init` writes through symlinked managed paths, overwriting files outside the project"
   - id: CR-02
     severity: critical
-    disposition: open
+    disposition: fixed
     title: "Init replaces an unreadable or non-UTF-8 `.gitignore` with only the graphify block (pre-existing)"
   - id: WR-01
     severity: warning
@@ -59,7 +59,7 @@ findings:
     severity: info
     disposition: open
     title: "Test hermeticity gaps (pre-existing pattern, now on new tests)"
-open: 13
+open: 11
 total: 14
 recorded: 2026-10-20T16:38:47.095Z
 ---
@@ -68,8 +68,8 @@ recorded: 2026-10-20T16:38:47.095Z
 
 | Finding | Severity | Disposition | Source |
 |---------|----------|-------------|--------|
-| CR-01 | critical | open | - |
-| CR-02 | critical | open | - |
+| CR-01 | critical | fixed | operator-approved fix ("fix now", 2026-10-20), bc0cce5 |
+| CR-02 | critical | fixed | operator-approved fix ("fix now", 2026-10-20), bc0cce5 |
 | WR-01 | warning | open | - |
 | WR-02 | warning | open | - |
 | WR-03 | warning | open | - |
