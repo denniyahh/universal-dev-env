@@ -67,3 +67,13 @@
      uncommitted local edit of a tracked hook is staged into the index.
   3. Re-init no longer restores a tracked hook's lost executable bit; sync cannot see a
      mode change, so status stays In Sync while git ignores the hook.
+
+- `.ude/state.json` ignore rule never reaches a project that had its own .gitignore
+  status: open (candidate for Phase 4, safe re-initialization)
+  **Found during:** final phase 01 verification at cfa26b2 (reproduced with the binary)
+  **What:** init keeps a pre-existing project `.gitignore` and never adds the
+  `.ude/state.json` / `.ude/.tmp*` lines, so `git add -A` commits state.json; the doctor
+  check only flags a state.json that is tracked AND ignored, so it reports Pass. Init's
+  per-missing-file warning still fires, so an upstream deletion is warned, not silent.
+  **Fix options:** init appends the `.ude/` rules to a kept `.gitignore`, or doctor flags
+  a tracked state.json regardless of ignore status.
