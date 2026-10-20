@@ -13,19 +13,19 @@ findings:
     title: "Init replaces an unreadable or non-UTF-8 `.gitignore` with only the graphify block (pre-existing)"
   - id: WR-01
     severity: warning
-    disposition: open
+    disposition: deferred
     title: "One symlinked managed file disables every sync command, and init keeps a committed symlink as if sync could manage it"
   - id: WR-02
     severity: warning
-    disposition: open
+    disposition: fixed
     title: "The fresh-clone keep is skipped for projects in a git subdirectory (monorepo), so init overwrites committed files"
   - id: WR-03
     severity: warning
-    disposition: open
+    disposition: fixed
     title: "A plain re-run of `ude init` silently overwrites the recorded project type with the CLI default `rust`; the next pull rewrites `mise.toml`"
   - id: WR-04
     severity: warning
-    disposition: open
+    disposition: fixed
     title: "The TypeSafe drift check reads `.agents/AGENTS.md` through symlinks and sends it to the external API before push's symlink refusal runs"
   - id: IN-01
     severity: info
@@ -59,7 +59,7 @@ findings:
     severity: info
     disposition: open
     title: "Test hermeticity gaps (pre-existing pattern, now on new tests)"
-open: 11
+open: 7
 total: 14
 recorded: 2026-10-20T16:38:47.095Z
 ---
@@ -70,10 +70,10 @@ recorded: 2026-10-20T16:38:47.095Z
 |---------|----------|-------------|--------|
 | CR-01 | critical | fixed | operator-approved fix ("fix now", 2026-10-20), bc0cce5 |
 | CR-02 | critical | fixed | operator-approved fix ("fix now", 2026-10-20), bc0cce5 |
-| WR-01 | warning | open | - |
-| WR-02 | warning | open | - |
-| WR-03 | warning | open | - |
-| WR-04 | warning | open | - |
+| WR-01 | warning | deferred | operator chose to log it (2026-10-20); todo 5b2841e, needs a per-file refused status |
+| WR-02 | warning | fixed | operator-approved fix (2026-10-20), 8e7c6dd |
+| WR-03 | warning | fixed | operator-approved fix (2026-10-20), 6d6b652 |
+| WR-04 | warning | fixed | operator-approved fix (2026-10-20), 374a208 |
 | IN-01 | info | open | - |
 | IN-02 | info | open | - |
 | IN-03 | info | open | - |
