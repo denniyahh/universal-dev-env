@@ -108,6 +108,7 @@ Recent decisions affecting current work:
 - [2026-10-19] [general] Home-path placeholders leak the pusher's home path into shared templates — [todo file](.planning/todos/pending/2026-10-19-home-path-placeholders-leak-the-pusher-s-home-path-into-shar.md)
 - [2026-10-19] [general] Never publish files that init kept over the shared template — [todo file](.planning/todos/pending/2026-10-19-never-publish-files-that-init-kept-over-the-shared-template.md)
 - [2026-10-19] [general] Template-logic push guard only checks .jinja files — [todo file](.planning/todos/pending/2026-10-19-template-logic-push-guard-only-checks-jinja-files.md)
+- [2026-10-20] [tooling] Make generated projects' secret-scan hook self-sufficient — [todo file](.planning/todos/pending/2026-10-20-make-generated-projects-secret-scan-hook-self-sufficient.md) — Needs Test-first:.
 
 ### Blockers/Concerns
 
