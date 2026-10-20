@@ -126,6 +126,17 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 | 3. Doctor & CLI Hardening | 0/3 | Not started | - |
 | 4. Templates, Archetypes & Manifest Decoupling | 0/3 | Not started | - |
 
+## Backlog
+
+### Phase 999.1: Windows runtime checks for the phase 01 sync engine (BACKLOG)
+
+**Goal:** On a Windows host, run the three checks waived for phase 01 on 2026-10-20 (operator): (1) the bounded runner kills a hung git through the JobObject branch: `ude sync status --remote <unreachable https URL>` returns within about 60 s with the timeout message and leaves no git / git-remote-https process; (2) the remote cache lock is released when the holding process dies (File::try_lock / LockFileEx), so a second `ude sync` proceeds; (3) `ude sync pull` replaces an existing `.ude/state.json` (NamedTempFile persist) and it reloads as version 2. Compile part already settled: cargo check and clippy -D warnings pass for x86_64-pc-windows-msvc at b75c186. Source: phase 01 01-UAT.md tests 1-3, WINDOWS.md, accepted risk AR-01-01.
+**Requirements:** TBD
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (promote with /gsd-review-backlog when ready)
+
 ---
 *Roadmap created: 2026-10-12*
 *Last updated: 2026-10-12*
