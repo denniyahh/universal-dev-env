@@ -1190,6 +1190,14 @@ fn test_sync_pull_conflict_exits_1_and_writes_sidecar() {
 /// gitconfig as the only global config (no system config), inherited repo-local git
 /// variables removed.
 fn sync_cli(root: &Path) -> impl Fn(&Path, &[&str]) -> Output {
+    sync_cli_with_env(root, Vec::new())
+}
+
+/// [`sync_cli`] with `extra` variables set on every run.
+fn sync_cli_with_env(
+    root: &Path,
+    extra: Vec<(String, String)>,
+) -> impl Fn(&Path, &[&str]) -> Output {
     let bin = env!("CARGO_BIN_EXE_ude");
     let fake_home = root.join("fake_home");
     let fake_config = fake_home.join(".config");
@@ -1209,6 +1217,7 @@ fn sync_cli(root: &Path) -> impl Fn(&Path, &[&str]) -> Output {
             .env("GIT_CONFIG_GLOBAL", &gitconfig)
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("XDG_CACHE_HOME", &cache_dir)
+            .envs(extra.iter().map(|(name, value)| (name, value)))
             .stdin(Stdio::null())
             .output()
             .expect("ude execution")
@@ -2930,6 +2939,66 @@ fn test_push_refuses_symlinked_local_file() {
     let push = ude(&project, &["sync", "push"]);
     assert_eq!(push.status.code(), Some(0), "{}", outputs(&push));
     assert_eq!(fs::read_to_string(&template).unwrap(), edited);
+}
+
+/// A `ude` runner whose TypeSafe check is on, with a fake key, and whose `curl` is a
+/// stub that saves the request body to the returned log and fails, so nothing leaves
+/// the machine.
+#[cfg(unix)]
+fn typesafe_stub_cli(root: &Path) -> (impl Fn(&Path, &[&str]) -> Output, PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+    let stub_dir = root.join("stub_bin");
+    fs::create_dir_all(&stub_dir).unwrap();
+    let log = root.join("curl_request.json");
+    let curl = stub_dir.join("curl");
+    fs::write(
+        &curl,
+        format!("#!/bin/sh\ncat > '{}'\nexit 1\n", log.display()),
+    )
+    .unwrap();
+    fs::set_permissions(&curl, fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!(
+        "{}:{}",
+        stub_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let ude = sync_cli_with_env(
+        root,
+        vec![
+            ("PATH".to_string(), path),
+            ("TYPESAFE_API_KEY".to_string(), "stub-key".to_string()),
+        ],
+    );
+    (ude, log)
+}
+
+#[cfg(unix)]
+#[test]
+fn test_push_typesafe_check_does_not_follow_symlinked_agents() {
+    use std::os::unix::fs::symlink;
+    let temp = tempdir().unwrap();
+    let (ude, log) = typesafe_stub_cli(temp.path());
+    let project = project_with_local_templates(temp.path(), "project");
+    reinit_rust(&ude, &project);
+    let private = temp.path().join("private_notes.md");
+    fs::write(&private, "PRIVATE_PROSE_MARKER\n").unwrap();
+    let agents = project.join(".agents/AGENTS.md");
+    fs::remove_file(&agents).unwrap();
+    symlink(&private, &agents).unwrap();
+
+    let push = ude(&project, &["sync", "push"]);
+    let text = outputs(&push);
+    assert_eq!(push.status.code(), Some(2), "{text}");
+    assert!(text.contains("symlink"), "{text}");
+    let sent = fs::read_to_string(&log).unwrap_or_default();
+    assert!(!sent.contains("PRIVATE_PROSE_MARKER"), "sent: {sent}");
+
+    // Negative control: the same text as a regular file reaches the stub.
+    fs::remove_file(&agents).unwrap();
+    fs::write(&agents, "PRIVATE_PROSE_MARKER\n").unwrap();
+    let push = ude(&project, &["sync", "push"]);
+    let sent = fs::read_to_string(&log).unwrap_or_default();
+    assert!(sent.contains("PRIVATE_PROSE_MARKER"), "{}", outputs(&push));
 }
 
 #[cfg(unix)]
