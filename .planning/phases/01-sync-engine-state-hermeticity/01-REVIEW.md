@@ -1,182 +1,188 @@
 ---
 phase: 01-sync-engine-state-hermeticity
-reviewed: 2026-10-19T17:51:28Z
+reviewed: 2026-10-20T15:45:00Z
 depth: deep
-files_reviewed: 15
+files_reviewed: 13
 files_reviewed_list:
+  - README.md
+  - deny.toml
+  - mise.toml
+  - scripts/hooks/pre-commit
+  - scripts/hooks/pre-push
+  - src/audit/mod.rs
+  - src/main.rs
   - src/process.rs
   - src/sync/mod.rs
-  - src/sync/state.rs
   - src/sync/staging.rs
-  - src/sync/merge.rs
-  - src/main.rs
-  - src/cli/mod.rs
-  - src/audit/mod.rs
-  - src/template/mod.rs
-  - src/sanitizer/mod.rs
-  - src/semantic/mod.rs
-  - tests/e2e_lifecycle.rs
-  - Cargo.toml
-  - .config/nextest.toml
+  - src/sync/state.rs
   - templates/projects/generic/gitignore.repo
+  - tests/e2e_lifecycle.rs
 findings:
-  critical: 3
-  warning: 1
-  info: 7
+  critical: 2
+  warning: 4
+  info: 5
   total: 11
 status: issues_found
 ---
 
-# Phase 01: Code Review Report
+# Phase 01: Code Review Report (incremental re-review)
 
-**Reviewed:** 2026-10-19T17:51:28Z (HEAD 0c3ff71, diff base eaa0afe)
+**Reviewed:** 2026-10-20T15:45:00Z (HEAD 0e808cf, diff base 1ebc2a7)
 **Depth:** deep
-**Files Reviewed:** 15
+**Files Reviewed:** 13
 **Status:** issues_found
+
+**Scope note:** the evaluation-scope resolver reported `degraded` (reason `no-task-commits-since`) and widened the scope to the phase-directory range. The review therefore covers `git diff 1ebc2a7..HEAD` over the 13 listed files, with whole files read for context.
 
 ## Summary
 
-I reviewed the phase diff (`eaa0afe..HEAD`) and the call chains it touches: process runner, then scan, pull, push, publication and resolve, state load, migration and save, staging, and the CLI dispatch in `main.rs`. `src/sanitizer` and `src/semantic` only got formatting changes; I skimmed them and read just the boundary and parameterization functions that push calls.
+This pass covers the fixes that followed the previous review and the external review. Those are: the CR-01, CR-02 and CR-03 fixes; init keeping prior records when re-run; init keeping git-tracked managed files on the first init of a fresh clone; symlink refusal on reads; init's missing-file warning, which now follows sync status; Windows cfg-gating; and the new supply-chain tooling.
 
-The phase's core mechanisms hold up. That covers the bounded runner and group kill, the env scrub, staged writes with re-validation, the corrupt and newer-version state guards, conflict sidecars and convergence, porcelain classification, and the D-18 rollback. I found no defect in them. Accepted risks AR-01-01..03 and the fixed root-layout push bug are not re-reported.
+The previous review's CR-01..CR-03 and WR-01 fixes hold as far as I traced them: boundary skips, the template-logic gate and the fd-settle probe. I re-ran none of their tests. Items already logged in `deferred-items.md` or the pending todos are not re-reported. That includes init-kept files being publishable, re-init with an explicit `--type`, the fresh-clone ancestor being the current template, and the doctor and gitignore-layer gaps.
 
-Three blocking defects were reproduced by running the built binary in a scratch project. Only CR-01 was introduced by this phase; CR-02 and CR-03 already existed but sit on the same pull and push paths:
-- **CR-01 (phase):** a locally deleted scratch script blocks every push, and the tool offers no way out.
-- **CR-02 (pre-existing):** push overwrites `.jinja` templates with rendered text, destroying their logic.
-- **CR-03 (pre-existing):** `ude init` "preserves" a custom `.gitignore`, and the first `ude sync pull` then silently replaces it.
+Five scenarios were reproduced with `target/debug/ude` at HEAD in scratch projects, with HOME and git config isolated. The fixtures have been removed.
+- **CR-01:** `ude init` still writes through symlinks. It overwrote a file outside the project and put hooks in a directory outside the project. The phase's symlink hardening covered reads only.
+- **CR-02:** `ude init` replaces a non-UTF-8 `.gitignore` with just the graphify block, which drops rules such as `.env` and `secrets/`. This bug already existed before the phase.
+- **WR-01:** a committed symlinked `.agents/AGENTS.md` (a common AGENTS.md -> CLAUDE.md layout) makes init report "Kept committed". After that, every sync command exits 2 for all 11 files.
+- **WR-02:** the fresh-clone keep does nothing for a project in a git subdirectory (monorepo). Committed `mise.toml` and `.gitconfig` were overwritten.
+- **WR-03:** re-running a plain `ude init` on a node project changes the recorded type to `rust`. The next pull then rewrites `mise.toml`.
 
-One unit test is flaky: measured 3/200 failures run alone and 24/480 under 8-way parallel load. It also failed once in a full `cargo test` run during this review.
-
-Baseline checks: `cargo clippy --all-targets -- -D warnings` exits 0. `cargo test` passes apart from that flaky test.
+What these runs do not establish: they ran on Linux only, and I did not run `cargo test` or clippy in this pass. The supply-chain hooks were checked by reading them plus one real run of the pinned `cargo-deny check bans licenses sources`, which exited 0. No negative control was run for gitleaks or cargo-deny in this pass.
 
 ## Critical Issues
 
-### CR-01: A locally deleted boundary file blocks every push and the tool offers no way out (phase-introduced)
+### CR-01: `ude init` writes through symlinked managed paths, overwriting files outside the project
 
-**File:** `src/sync/mod.rs:1224-1232` (new LocalDeleted branch), also `src/sync/mod.rs:1244-1251` (pre-existing LocallyModified branch), `src/main.rs:643-649`, `src/sync/mod.rs:688-693`
+**File:** `src/main.rs:1406-1421` (`copy_template_file`: `fs::copy(src, dst)`), `src/main.rs:1423-1442` (`render_and_write`: `fs::write(dst, ..)`), `src/main.rs:305` (`.gitignore` append), `src/main.rs:254-269` (`create_dir_all` through a linked `scripts/`)
 
-**Issue:** Push returns `PushResult::BoundaryBlocked` as soon as any `LocalDeleted` file is a publish-boundary path. Those paths are `scratch/*`, which covers 3 of the 11 managed files, and `.agents/AGENTS.md` without `--force`. The early return aborts the whole push, so no other file is published, and `--force` does not help for `scratch/` (`sanitizer/mod.rs:137-138`). At the same time:
-- pull keeps the deletion (D-15) and tells the user "deleted locally — push to propagate", which is advice the next push refuses;
-- `ude sync resolve` refuses because no conflict record exists;
-- so every later push exits 1 until the user restores the file by hand.
+**Issue:** Commit 2023d5b refuses symlinks on the *source* side only: template reads, state.json and local reads in scan, pull and push. Init's *destination* writes still follow links. A managed path with no state record that is not git-tracked gets written through `fs::copy` / `fs::write`, which overwrite the link target. This applies to a symlinked file, or to a file under a symlinked directory (`scripts/`, `.agents/`, `scratch/`). The case of a fresh clone with an untracked symlink, or a project not under git, is reachable on the first init. Pull already refuses this through `validate_safe_write_target` (`test_pull_updates_refuses_to_write_through_symlink`), so init is the remaining write path that does not.
 
-This contradicts D-10's skip-and-publish-the-rest model and D-14. Editing a scratch file instead of deleting it hits the same early return; that variant already existed before this phase.
+**Reproduced:** in a project with no git repo, `.agents/AGENTS.md -> <outside>/CLAUDE.md` holding "# precious shared rules", and `scripts -> <outside>/scripts`. `ude init --type rust` exits 0. The outside `CLAUDE.md` is replaced by the rendered agents template, and `commit-msg`, `pre-commit`, `pre-push` and `check-in-container.sh` are created in `<outside>/scripts`. After that, `ude sync status` exits 2 ("Refusing to follow symlink ./scripts"), so the damage happens before any check fires.
 
-**Failure scenario (confirmed via binary in a scratch project):** `ude init`, then `rm scratch/new-worktree.sh`, then append a line to `.gitconfig`. `ude sync push` exits 1 ("within private publish boundary") and the `.gitconfig` edit never reaches `gitconfig.repo`. `ude sync pull` exits 0 and prints "push to propagate". `ude sync resolve scratch/new-worktree.sh` exits 2 ("No open conflict"). Pushing again still exits 1. Existing unit test `test_push_local_deletion_respects_publish_boundary` asserts the abort, so the test suite pins this behavior.
-
-**Fix:** Treat boundary paths like D-10 skips: collect them, publish the rest, list them, and exit 1. Make pull's message conditional on the path being publishable:
+**Fix:** Validate every init destination with the same guard pull uses, before any directory is created or any file is written. Report the refused path and fail:
 ```rust
-SyncStatus::LocalDeleted | SyncStatus::LocallyModified
-    if self.sanitizer.is_local_only_path(&state.relative_path, allow_agent_rules) =>
-{
-    skipped_boundary.push(state.relative_path.clone());
-    continue;
-}
+// in copy_template_file / render_and_write / the .gitignore append, before writing
+let rel = dst.strip_prefix(&project_path).map_err(|_| format!("{} escapes the project", dst.display()))?;
+let dst = sync::validate_safe_write_target(&project_path, rel)?; // refuses symlinked file or parent
 ```
-Separately, decide what a local deletion of a never-publishable managed file should mean. One option is to tombstone it locally (Unmanaged), so it stops reporting as pending.
+Also check `scripts/`, `scripts/hooks/`, `scratch/` and `.agents/` with `refuse_symlink_under(&project_path, dir)` before the `create_dir_all` calls at 254-269. Add an e2e test for a symlinked destination file and one for a symlinked destination directory, each with a negative control showing a regular file is still written.
 
-### CR-02: Push replaces `.jinja` templates with rendered output, erasing template logic for every consumer (pre-existing)
+### CR-02: Init replaces an unreadable or non-UTF-8 `.gitignore` with only the graphify block (pre-existing)
 
-**File:** `src/sync/mod.rs:1263-1303`, `src/sync/mod.rs:2069-2072` (`mise.toml` maps to `mise.toml.jinja`, `.agents/AGENTS.md` maps to `agents.md.jinja`)
+**File:** `src/main.rs:297-308`
 
-**Issue:** `push_updates` publishes the parameterized local file, which is the rendered text, as the new upstream template bytes. For a `.jinja` source this deletes every `{% if %}` and `{{ }}` construct except the home and XDG paths that `parameterize_paths` re-inserts. Other projects and machines then pull a template specialized to one project type.
+**Issue:** `fs::read_to_string(&target_gitignore).unwrap_or_default()` turns every read error into `""`, including `InvalidData` for non-UTF-8 bytes and `PermissionDenied`. The empty string does not contain `graphify-out/*`, so init writes `"\n" + append_block` over the file and loses every existing rule. Since CR-03, the kept `.gitignore` also gets the template as its ancestor (lines 487-505). The now-truncated file therefore reads as Locally Modified, so a plain `ude sync push` would publish this five-line `.gitignore` as the shared `gitignore.repo`. That publish step is from code trace; push was not run.
 
-**Failure scenario (confirmed via binary):** `ude init --type rust`, append `[env]` to `mise.toml`, run `ude sync push` (exit 0). `templates/projects/agents/mise.toml.jinja` now begins `[tools]\n\nrust = "latest"` with no `{%` left. A node project's next pull drops `node = "24"`.
+**Reproduced:** a `.gitignore` of `# caf\xe9 rules\nsecrets/\n.env\n` (Latin-1). `ude init` exits 0, and the file now holds only the graphify lines. `secrets/` and `.env` are no longer ignored, so a following `git add -A` would stage them.
 
-**Fix:** Never write rendered text over a template that contains template syntax. Either block push for files whose upstream source has `{%` or `{{` constructs (report them like a D-17 skip, telling the user to edit the template directly), or make a 3-way merge against the raw template a precondition. The minimal safe change is a guard:
+**Fix:** Never write when the read failed. Treat the bytes as opaque and append to them:
 ```rust
-if upstream_target.as_deref().is_some_and(|p| template_has_logic(p)) {
-    skipped_templated.push(state.relative_path.clone());
-    continue;
+let existing = match fs::read(&target_gitignore) {
+    Ok(bytes) => bytes,
+    Err(e) => {
+        eprintln!("  {} Cannot read existing .gitignore: {e}", "✗".red());
+        std::process::exit(EXIT_HARD_FAILURE);
+    }
+};
+if !existing.windows(b"graphify-out/*".len()).any(|w| w == b"graphify-out/*") {
+    let mut updated = existing;
+    if !updated.ends_with(b"\n") { updated.push(b'\n'); }
+    updated.extend_from_slice(append_block.as_bytes());
+    // write via the CR-01 safe-target guard
 }
-```
-
-### CR-03: `ude init` keeps a custom `.gitignore` but records it as the ancestor, so the first pull silently overwrites it (pre-existing)
-
-**File:** `src/main.rs:229-251` (preserve-existing branch), `src/main.rs:404-413` (ancestor = current local bytes)
-
-**Issue:** Init deliberately keeps an existing `.gitignore`, appending only the graphify block. It then records that customized file as the ancestor. The upstream template differs from that ancestor, so scan classifies the file `UpstreamModified` (`l == o`, `u != o`), and pull replaces the user's rules with the template, exiting 0 and reporting only "materialized 1 upstream update(s)". The phase's `*.conflict` rule (D-11) reaches such projects only through this destructive overwrite.
-
-**Failure scenario (confirmed via binary):** create a project directory whose `.gitignore` holds two custom rules, run `ude init`, then `ude sync pull`. Status first shows ".gitignore: Upstream Updated". After the pull, neither custom rule remains.
-
-**Fix:** For a preserved file, record the template's rendered fingerprint and content as the ancestor, not the local bytes. The custom file then reads as `LocallyModified`, or merges or conflicts properly, instead of being overwritten:
-```rust
-// for a preserved .gitignore
-let template = fs::read(&src_gitignore)?;
-project_state.record_file(rel, SyncEngine::fingerprint(&template),
-    String::from_utf8(template).ok().map(|t| SyncEngine::normalize_eol(&t)));
 ```
 
 ## Warnings
 
-### WR-01: `test_remote_lock_not_inherited_by_children` is flaky (it races the child's exec and loader)
+### WR-01: One symlinked managed file disables every sync command, and init keeps a committed symlink as if sync could manage it
 
-**File:** `src/sync/mod.rs:5463-5468` (`open_fd_targets`), `src/sync/mod.rs:5518-5550`
+**File:** `src/sync/mod.rs:600` (`read_if_present(local_root, ..)?` aborts `scan_project`), `src/sync/mod.rs:1963-1982`; `src/main.rs:210-217` (`kept_committed` accepts any `symlink_metadata`), `src/main.rs:520-526`
 
-**Issue:** The comment at line 5537 claims "std's spawn returns after exec, so the child's descriptor table is final". In reality the dynamic loader opens and closes descriptors after exec, and `/proc/<pid>/fd` is briefly inaccessible while exec runs. `open_fd_targets` `expect`s on every `read_dir` and `read_link`, so a descriptor that closes between listing and reading it, or a read during exec, panics the test.
+**Issue:** `scan_project` propagates the symlink refusal with `?`. A single linked managed file therefore makes status, pull and push fail with exit 2 for all 11 files, and the tool offers no per-file way out. Init's fresh-clone keep counts a committed symlink (git mode 120000) as "present" and prints "Kept committed .agents/AGENTS.md (not overwritten); sync status compares it with the template". In fact sync status never runs to completion afterwards. `AGENTS.md -> CLAUDE.md` is a common committed layout.
 
-**Failure scenario (confirmed):** running the compiled test binary in a loop gave 3/200 failures alone and 24/480 with 8 parallel copies. The failures were `read fd link: NotFound` at 5466:73 and `list /proc/<pid>/fd: PermissionDenied` at 5465:14. It also failed once in a full `cargo test` run during this review.
+**Reproduced:** commit `CLAUDE.md` and the link `.agents/AGENTS.md -> ../CLAUDE.md`, then run `ude init --type rust`. Init exits 0 and prints the "Kept committed" line. `ude sync status` exits 2 with "Refusing to follow symlink ./.agents/AGENTS.md".
 
-**Fix:** Tolerate transient entries and retry until the fd set is stable:
+**Fix:** Keep refusing to *follow* the link, but classify it per file instead of aborting the scan. One option is a `SyncStatus::Refused { reason }` (or reuse `Unmanaged`) that status prints and that push and pull skip with exit 1, following the D-10 pattern. In init, exclude symlinks from `kept_committed` and warn that sync will not manage that path:
 ```rust
-fn open_fd_targets(pid: u32) -> Vec<PathBuf> {
-    for _ in 0..50 {
-        if let Ok(dir) = fs::read_dir(format!("/proc/{pid}/fd")) {
-            return dir.filter_map(|e| e.ok().and_then(|e| fs::read_link(e.path()).ok())).collect();
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    panic!("/proc/{pid}/fd stayed unreadable");
+.filter(|rel| fs::symlink_metadata(project_path.join(rel)).is_ok_and(|m| m.file_type().is_file()))
+```
+
+### WR-02: The fresh-clone keep is skipped for projects in a git subdirectory (monorepo), so init overwrites committed files
+
+**File:** `src/main.rs:1495-1497` (`if !project.join(".git").exists() { return Ok(empty) }`)
+
+**Issue:** `committed_paths` decides "not a git repo" by looking for `<project>/.git`. A project at `<repo>/svc` has no `.git` of its own. `committed` is then empty, nothing is kept, and the pre-42803ee overwrite returns for exactly the fresh-clone case 42803ee was meant to fix. Uncommitted edits to those committed files are lost as well.
+
+**Reproduced:** in a repo with committed `svc/mise.toml` (node pin) and `svc/.gitconfig`, `ude init svc --type rust` exits 0 and prints no "Kept committed" line. `git status` shows both files modified. The control at the repo root (`ude init .`) keeps `mise.toml`.
+
+**Fix:** Ask git rather than the filesystem. Run `git ls-files` unconditionally, and treat only a "not a git repository" result as "nothing committed":
+```rust
+let out = process::run_bounded(cmd, "git ls-files", process::LOCAL_TIMEOUT)?;
+if !out.status.success() {
+    let err = String::from_utf8_lossy(&out.stderr);
+    if err.contains("not a git repository") { return Ok(HashSet::new()); }
+    return Err(format!("git ls-files failed: {}", err.trim()));
 }
 ```
-Also wait for `/proc/<pid>/exe` to resolve to `sleep`, so the loader phase is over before sampling.
+The same `.git` check gates the git-registration block at line 425, which leaves `include.path` and `core.hooksPath` unset for subdirectory projects. That is consistent but is a separate gap.
+
+### WR-03: A plain re-run of `ude init` silently overwrites the recorded project type with the CLI default `rust`; the next pull rewrites `mise.toml`
+
+**File:** `src/main.rs:474` (`project_state.project_type = Some(init_args.project_type.clone())`), `src/cli/mod.rs:67` (`default_value = "rust"`)
+
+**Issue:** Re-init promises that it "neither writes [a tracked file] nor replaces its record" (lines 181-184), but it unconditionally replaces `project_type` with whatever clap supplied. When `--type` is omitted, that value is the default `rust`. Status, pull and push take the type from state (`template/mod.rs:104-112`). The next pull then renders `mise.toml.jinja` for rust, sees the unedited node file as Upstream Updated, and replaces it, exiting 0. The deferred item "State-preserving re-init side effects" #1 covers a user who *explicitly* passes another `--type`. This trigger needs no intent to change type.
+
+**Reproduced:** `ude init . --type node`, then `ude init .`. `state.json` now has `"project_type": "rust"`, status reports "mise.toml: Upstream Updated", and pull rewrites `node = "24"` to `rust = "latest"`.
+
+**Fix:** Make `--type` an `Option<String>` with no default. On re-init, keep `prior_state.project_type` unless `--type` was given explicitly. On first init, fall back to detection or `rust`:
+```rust
+project_state.project_type = init_args.project_type.clone()
+    .or(prior_state.project_type.clone())
+    .or(Some("rust".into()));
+```
+
+### WR-04: The TypeSafe drift check reads `.agents/AGENTS.md` through symlinks and sends it to the external API before push's symlink refusal runs
+
+**File:** `src/main.rs:880-906` (runs before `engine.push_updates` at 957)
+
+**Issue:** The phase's stated symlink policy (`refuse_symlink_under` doc, `src/sync/mod.rs:1959-1962`) is that following a link "would copy or publish whatever it points at". The TypeSafe pre-step does `candidate_rules.exists()` and `fs::read_to_string(&candidate_rules)`, both of which follow links. It then transmits the content to the TypeSafe API whenever it differs from the raw `.jinja` text. Because local text is rendered and upstream text is raw, the two almost always differ. Only the secret pre-scan stands in the way, and it catches credential patterns, not private prose. Push's own symlink refusal fires afterwards, so it is too late to stop the transmission. This only applies when `TYPESAFE_API_KEY` is configured. Found by code trace; not exercised.
+
+**Fix:** Before the read, call `sync::refuse_symlink_under(&local_project, &candidate_rules)` and do the same for `upstream_rules` under `root_template_dir`. On refusal, skip the semantic check with a warning. Better still, run the drift check only for files `push_updates` has already validated.
 
 ## Info
 
-### IN-01: A successful git command is reported as a hard failure when an escaped descendant holds the pipes
+### IN-01: A local deletion of a templated file deletes the shared `.jinja` template; the CR-02 gate covers edits only
 
-**File:** `src/process.rs:201-210`, consumed at `src/sync/mod.rs:1702-1704`
-**Issue:** When the leader exits successfully but a descendant that left the process group still holds stdout or stderr, `run_bounded` returns `Err`. A successful `git push` then becomes `PushRemoteError::Failed` (exit 2), and the ancestors are not advanced. This self-heals: the next pull sees local equal to upstream and records it. But exit 2 tells an agent the publish failed when it did not. Confirmed by reading; not exercised.
-**Fix:** Return `Ok` with the leader's status and a truncated-output flag, and let callers decide. At minimum, mention in the error text that the leader's exit status was success.
+**File:** `src/sync/mod.rs:1250-1283`
+**Issue:** Gate 2 runs only for `LocallyModified`. A local deletion of `mise.toml` reaches line 1276 and queues deletion of `mise.toml.jinja`, which holds the node, rust and generic branches every project renders from. Status and init do warn ("push deletes the shared template"), and D-14 specifies delete-on-push. Still, the reasoning behind CR-02 (one project must not erase logic shared by every consumer) applies to deletion even more strongly.
+**Fix:** Decide explicitly. Either apply `template_has_logic` to `LocalDeleted` as well and skip with the CR-02 remedy, or record in D-14 that templated sources are intentionally deletable.
 
-### IN-02: Remote direct push exits 0 when the state save fails after publishing
+### IN-02: The managed-file list is still duplicated, and init's copy now drives keep, tracked and missing decisions
 
-**File:** `src/main.rs:856-863`
-**Issue:** If `save_to_dir` fails after a successful publish, main prints a warning and exits 0, or 1 only if files were skipped. Local mode returns `IoFailed` (exit 2) for the same failure (`sync/mod.rs:1389-1393`). This self-heals on the next pull through convergence or BothDeleted, but the exit-code contract (2 = hard failure) differs between modes. Confirmed by reading.
-**Fix:** `std::process::exit(EXIT_HARD_FAILURE)` after the message, stating that the upstream was published.
+**File:** `src/main.rs:186-198` versus `src/sync/mod.rs:188-200` (`MANAGED_FILES`)
+**Issue:** This is previous IN-05, still open. It now carries more weight: `managed_rels` decides `kept_committed`, the record carry-forward and `missing_tracked_files`. A path added only to `MANAGED_FILES` would be neither kept nor recorded by init.
+**Fix:** `let managed_rels: Vec<PathBuf> = sync::MANAGED_FILES.iter().map(PathBuf::from).collect();`
 
-### IN-03: A v1 hash-only record whose file was edited migrates into a false conflict for CRLF templates
+### IN-03: When init's scan fails, the missing-file warning falls back to the "push will delete" prediction
 
-**File:** `src/sync/state.rs:169-176`
-**Issue:** When the raw hash no longer matches the local file, the record keeps its raw-byte hash. For a CRLF upstream template, `fingerprint(upstream)` never equals that raw hash, so an unchanged upstream reads as modified. The file is then Conflicted (no ancestor text, so no merge) instead of LocallyModified, and push skips it. The impact is narrow, because hash-only v1 records were mostly binary files, where fingerprint equals raw hash. Confirmed by reading.
-**Fix:** In `scan_project`, when the ancestor is a legacy raw hash, also compare `compute_hash` of the raw upstream bytes, or mark migrated hash-only records and accept either hash for the upstream comparison.
+**File:** `src/main.rs:532-549`, `src/main.rs:1258-1262`; `missing_tracked_files` at `src/main.rs:1225-1233` uses `fs::metadata`, which follows links
+**Issue:** If `scan_project` errors, `status` is `None` and the consequence falls through to `PushBoundary::Publishable` => "a plain ude sync push will delete its shared template". Scan errors include the WR-01 symlink refusal and an unreadable template. In those same conditions push actually fails hard. A dangling managed-file symlink is reported as "missing" by `fs::metadata`, while scan refuses it.
+**Fix:** When `status` is `None`, print "push outcome unknown: <scan error>" instead of a prediction, and use `symlink_metadata` in `missing_tracked_files`.
 
-### IN-04: The status scan falls back to the raw template when rendering fails, while pull aborts entirely (pre-existing)
+### IN-04: Symlink refusal is not applied uniformly on read paths that feed decisions
 
-**File:** `src/sync/mod.rs:608-615` versus `src/sync/mod.rs:928-943`
-**Issue:** Any managed file containing `{{` is rendered, and an undefined variable renders as empty text (lenient minijinja). When a render fails, `scan_project` silently uses the raw text, but `pull_updates` returns `IoFailed` for the whole run. One un-renderable file therefore blocks every other upstream update, and status does not predict the failure. Confirmed by reading.
-**Fix:** Render only `.jinja` sources, use strict undefined behavior, and make scan report render errors instead of masking them.
+**File:** `src/sync/mod.rs:2122-2135` (`template_has_logic` uses a bare `fs::read`), `src/sync/mod.rs:2183-2192` (`check_for_override` uses `.exists()`), `src/template/mod.rs:108` (reads `.ude/state.json` through links for `project_type`)
+**Issue:** These reads follow links, while `ProjectState::load_from_dir` refuses the same `state.json` link. `detect_for_project` can therefore pick `project_type` from a linked or dangling state file that state loading rejects. The impact is limited to classification and hints, since the hard reads and writes are guarded.
+**Fix:** Route these through `refuse_symlink_under` (for `detect_for_project`, read via `ProjectState::load_from_dir`) so one policy decides.
 
-### IN-05: The managed-file list is duplicated in init
+### IN-05: Supply-chain tooling pins versions but not artifacts, and `install-hooks` silently shadows any global hooks path
 
-**File:** `src/main.rs:391-403` (duplicates `sync::MANAGED_FILES`, `src/sync/mod.rs:185-197`)
-**Issue:** If a path is added to one list but not the other, init never records an ancestor for it. The first scan then classifies it as no-ancestor (Conflicted or Merged), even though it is untouched.
-**Fix:** Iterate `sync::MANAGED_FILES.iter().map(PathBuf::from)`.
-
-### IN-06: `ude sync resolve ./.gitconfig` is refused as an "unsafe path"
-
-**File:** `src/sync/mod.rs:1987-1993`
-**Issue:** Shell completion and agents commonly produce `./`-prefixed paths. A `CurDir` component is rejected with a message that suggests an attack rather than a formatting issue.
-**Fix:** Strip leading `CurDir` components before the all-`Normal` check. Keep refusing `..`, `RootDir` and `Prefix`.
-
-### IN-07: Test hermeticity gaps (pre-existing pattern, now on new tests)
-
-**File:** `tests/e2e_lifecycle.rs:101-165`, `167-221`, `883-977`; `src/sync/mod.rs:1189-1190` with `src/template/mod.rs:60-95`
-**Issue:** Several e2e tests run `ude sync status` and `ude sync pull` in local-templates mode without a `templates/` directory in cwd and without isolating `HOME` or XDG. The binary then reads the developer's working-tree `templates/` through the compile-time `CARGO_MANIFEST_DIR` fallback (`main.rs:1002-1007`), so results depend on uncommitted template edits, and a future local-mode `push` test would write into the repository. Separately, `TemplateContext::detect_for_project` spawns `git config user.name/email` without the engine's `extra_env`, so unit tests that inject a fixture gitconfig still read the host identity.
-**Fix:** Give these tests a copied `templates/` in cwd plus fake `HOME`/`XDG_*` (as `sync_cli` already does). Thread the engine's extra env into the template context's git calls.
+**File:** `mise.toml:5-7`, `mise.toml:14-16`, `scripts/hooks/pre-commit`, `scripts/hooks/pre-push`
+**Issue:** (a) `gitleaks = "8.30.1"` and `cargo-deny = "0.20.2"` pin versions with no committed `mise.lock`, so checksums depend on mise backend defaults rather than a reviewed lockfile. (b) `git config --local core.hooksPath scripts/hooks` overrides a developer's global `core.hooksPath`, which may carry signing or commit-msg checks. This repository ships no `commit-msg` hook, so those checks stop running here with no message. The hook scripts themselves are sound: `set -euo pipefail`, a missing mise or a missing pinned tool fails, `$(mise which ..)` aborts under `set -e`, both are committed 100755, and the pinned cargo-deny run exited 0 ("bans ok, licenses ok, sources ok").
+**Fix:** Commit a `mise.lock` (`mise lock`), and have `install-hooks` warn when a global `core.hooksPath` is set, or chain to it.
 
 ---
 
-_Reviewed: 2026-10-19T17:51:28Z_
+_Reviewed: 2026-10-20T15:45:00Z_
 _Reviewer: Claude (gsd-code-reviewer)_
 _Depth: deep_
