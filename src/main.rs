@@ -524,12 +524,17 @@ fn main() {
                 // A kept file (a pre-existing .gitignore, or any file git tracks) records
                 // what init would have written from the template as its ancestor, so
                 // kept content reads as a local modification: pull then merges or
-                // conflicts instead of replacing it (CR-03). No readable template means
-                // no ancestor, never the kept bytes.
-                let kept = keep(&rel.to_string_lossy())
-                    || (kept_gitignore && rel.as_path() == Path::new(".gitignore"));
+                // conflicts instead of replacing it (CR-03). With no readable template, a
+                // committed file records its own bytes, as the machine that committed it
+                // would have: it reads as Deleted upstream, so push cannot resurrect the
+                // template. An uncommitted kept .gitignore records nothing, so pull never
+                // deletes it.
+                let committed_keep = keep(&rel.to_string_lossy());
+                let kept =
+                    committed_keep || (kept_gitignore && rel.as_path() == Path::new(".gitignore"));
                 let recorded = if kept {
                     match kept_ancestor(&renderer, root_template_dir.as_deref(), rel, &ctx) {
+                        Ok(None) if committed_keep => fs::read(project_path.join(rel)).ok(),
                         Ok(bytes) => bytes,
                         Err(e) => {
                             eprintln!("  {} Initialization failed: {e}", "✗".red());

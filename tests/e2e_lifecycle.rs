@@ -3156,6 +3156,67 @@ fn test_first_init_in_monorepo_subdir_keeps_committed_edits() {
 }
 
 #[test]
+fn test_fresh_clone_does_not_resurrect_template_deleted_upstream() {
+    let temp = tempdir().unwrap();
+    let git = GitFixture::new();
+    let ude = sync_cli(temp.path());
+    let machine_a = project_with_local_templates(temp.path(), "machine_a");
+    git.run(temp.path(), &["init", "-q", &machine_a.to_string_lossy()]);
+    reinit_rust(&ude, &machine_a);
+    git.run(&machine_a, &["add", "-A"]);
+    commit_without_project_hooks(&git, &machine_a, "chore: init");
+
+    // Machine B clones (no state.json); upstream has deleted the template since.
+    let machine_b = temp.path().join("machine_b");
+    git.run(
+        temp.path(),
+        &[
+            "clone",
+            "-q",
+            &machine_a.to_string_lossy(),
+            &machine_b.to_string_lossy(),
+        ],
+    );
+    let template = machine_b.join(GITCONFIG_TEMPLATE);
+    fs::remove_file(&template).unwrap();
+    init_output(&ude, &machine_b);
+
+    let status = outputs(&ude(&machine_b, &["sync", "status"]));
+    assert!(
+        line_with(&status, ".gitconfig:").contains("Deleted upstream"),
+        "{status}"
+    );
+    let push = ude(&machine_b, &["sync", "push"]);
+    assert_eq!(push.status.code(), Some(0), "{}", outputs(&push));
+    assert!(!template.exists(), "push resurrected the deleted template");
+    // Negative control: a committed file whose template still exists stays in sync.
+    assert!(
+        line_with(&status, "scripts/hooks/pre-push:").contains("In Sync"),
+        "{status}"
+    );
+}
+
+#[test]
+fn test_init_keeps_uncommitted_gitignore_when_template_is_absent() {
+    let temp = tempdir().unwrap();
+    let ude = sync_cli(temp.path());
+    let project = project_with_local_templates(temp.path(), "project");
+    fs::remove_file(project.join(GITIGNORE_TEMPLATE)).unwrap();
+    fs::write(project.join(".gitignore"), "secrets/\n").unwrap();
+
+    reinit_rust(&ude, &project);
+    let status = outputs(&ude(&project, &["sync", "status"]));
+    assert!(
+        !line_with(&status, ".gitignore:").contains("Deleted upstream"),
+        "{status}"
+    );
+    let pull = ude(&project, &["sync", "pull"]);
+    assert_eq!(pull.status.code(), Some(0), "{}", outputs(&pull));
+    let kept = fs::read_to_string(project.join(".gitignore")).unwrap();
+    assert!(kept.starts_with("secrets/\n"), "{kept}");
+}
+
+#[test]
 fn test_reinit_missing_file_warning_follows_upstream() {
     let temp = tempdir().unwrap();
     let ude = sync_cli(temp.path());
