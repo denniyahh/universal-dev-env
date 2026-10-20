@@ -597,7 +597,7 @@ impl SyncEngine {
             let local_path = local_root.join(&rel);
             let upstream_path = map_to_upstream(upstream_root, &rel);
 
-            let local_bytes = read_if_present(&local_path)?;
+            let local_bytes = read_if_present(local_root, &local_path)?;
             let local_content = local_bytes
                 .as_ref()
                 .and_then(|b| std::str::from_utf8(b).ok().map(|s| s.to_string()));
@@ -605,7 +605,7 @@ impl SyncEngine {
 
             let (upstream_bytes, upstream_content) = match upstream_path.as_ref() {
                 Some(p) => {
-                    if let Some(bytes) = read_if_present(p)? {
+                    if let Some(bytes) = read_if_present(upstream_root, p)? {
                         if let Ok(raw_str) = std::str::from_utf8(&bytes) {
                             let raw_string = raw_str.to_string();
                             let should_render = p.extension().and_then(|e| e.to_str())
@@ -913,7 +913,9 @@ impl SyncEngine {
                     }
                 };
 
-                let upstream_bytes = match fs::read(&upstream_path) {
+                let upstream_bytes = match refuse_symlink_under(upstream_root, &upstream_path)
+                    .and_then(|()| fs::read(&upstream_path).map_err(|e| e.to_string()))
+                {
                     Ok(b) => b,
                     Err(e) => {
                         return PullResult::IoFailed {
@@ -1283,7 +1285,9 @@ impl SyncEngine {
             if state.status == SyncStatus::LocallyModified {
                 let local_path = local_root.join(&state.relative_path);
 
-                let raw_bytes = match fs::read(&local_path) {
+                let raw_bytes = match refuse_symlink_under(local_root, &local_path)
+                    .and_then(|()| fs::read(&local_path).map_err(|e| e.to_string()))
+                {
                     Ok(b) => b,
                     Err(err) => {
                         return PushResult::IoFailed {
@@ -1952,12 +1956,34 @@ fn state_push_failure(reason: String) -> PushResult {
     }
 }
 
+/// Refuses a symlink at `path` or at any of its parents below `root` (`root` itself
+/// may be a link). Managed files and templates are synced by content: following a
+/// link would copy or publish whatever it points at, and a dangling link would read
+/// as a deletion.
+pub fn refuse_symlink_under(root: &Path, path: &Path) -> Result<(), String> {
+    let mut candidates: Vec<&Path> = vec![path];
+    if path.starts_with(root) {
+        candidates = path.ancestors().take_while(|p| *p != root).collect();
+    }
+    for candidate in candidates {
+        if fs::symlink_metadata(candidate).is_ok_and(|meta| meta.file_type().is_symlink()) {
+            return Err(format!(
+                "Refusing to follow symlink {}",
+                candidate.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Bytes of the file at `path`, `None` when nothing exists there (the path or one of
 /// its parents is missing, or a parent is a regular file). Any other read error
 /// (permissions, a directory at `path`) is an error: an unreadable file must never be
-/// classified as deleted, because deletions are propagated.
-fn read_if_present(path: &Path) -> Result<Option<Vec<u8>>, String> {
+/// classified as deleted, because deletions are propagated. A symlink at `path` or
+/// below `root` is an error too (see [`refuse_symlink_under`]).
+fn read_if_present(root: &Path, path: &Path) -> Result<Option<Vec<u8>>, String> {
     use std::io::ErrorKind;
+    refuse_symlink_under(root, path)?;
     match fs::read(path) {
         Ok(bytes) => Ok(Some(bytes)),
         Err(e) if matches!(e.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => Ok(None),
@@ -2171,6 +2197,37 @@ mod tests {
     use std::ffi::{OsStr, OsString};
     use std::process::{Output, Stdio};
     use tempfile::tempdir;
+
+    #[cfg(unix)]
+    #[test]
+    fn test_refuse_symlink_under_checks_parents_below_root_only() {
+        use std::os::unix::fs::symlink;
+        let temp = tempdir().unwrap();
+        let real = temp.path().join("real");
+        fs::create_dir_all(real.join("hooks")).unwrap();
+        fs::write(real.join("hooks/pre-push"), "hook").unwrap();
+
+        // Negative control: a regular path is accepted.
+        refuse_symlink_under(&real, &real.join("hooks/pre-push")).unwrap();
+        // The root itself may be a link (a symlinked templates checkout).
+        let linked_root = temp.path().join("linked_root");
+        symlink(&real, &linked_root).unwrap();
+        refuse_symlink_under(&linked_root, &linked_root.join("hooks/pre-push")).unwrap();
+
+        // A linked directory below the root is refused, naming the link.
+        let outside = temp.path().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("pre-push"), "host").unwrap();
+        fs::remove_dir_all(real.join("hooks")).unwrap();
+        symlink(&outside, real.join("hooks")).unwrap();
+        let err = refuse_symlink_under(&real, &real.join("hooks/pre-push")).unwrap_err();
+        assert!(
+            err.contains(&real.join("hooks").display().to_string()),
+            "{err}"
+        );
+        let err = read_if_present(&real, &real.join("hooks/pre-push")).unwrap_err();
+        assert!(err.contains("symlink"), "{err}");
+    }
 
     const FIXTURE_GITCONFIG: &str =
         "[user]\n\tname = UDE Tester\n\temail = tester@example.com\n[commit]\n\tgpgsign = false\n";

@@ -123,6 +123,8 @@ impl ProjectState {
     /// A version 1 file is migrated in memory; the next save persists the result.
     pub fn load_from_dir(project_dir: &Path) -> Result<Self, String> {
         let state_path = project_dir.join(STATE_FILE_REL);
+        // A dangling link must not read as a missing file (a fresh, empty state).
+        crate::sync::refuse_symlink_under(project_dir, &state_path)?;
         let content = match fs::read_to_string(&state_path) {
             Ok(content) => content,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
