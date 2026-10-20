@@ -922,7 +922,20 @@ fn main() {
                         let candidate_rules = local_project.join(".agents/AGENTS.md");
                         let upstream_rules =
                             root_template_dir.join("projects/agents/agents.md.jinja");
-                        if candidate_rules.exists()
+                        // Never send a symlink's target: push refuses the link below, but
+                        // only after this check would have transmitted it.
+                        let linked = sync::refuse_symlink_under(&local_project, &candidate_rules)
+                            .and_then(|()| {
+                                sync::refuse_symlink_under(&root_template_dir, &upstream_rules)
+                            });
+                        if let Err(e) = &linked {
+                            println!(
+                                "  {} TypeSafe semantic evaluation skipped: {e}",
+                                "!".yellow()
+                            );
+                        }
+                        if linked.is_ok()
+                            && candidate_rules.exists()
                             && upstream_rules.exists()
                             && let (Ok(local_txt), Ok(up_txt)) = (
                                 fs::read_to_string(&candidate_rules),
