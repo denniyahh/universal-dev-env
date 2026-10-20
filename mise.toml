@@ -1,0 +1,16 @@
+# Development tools for this repository. The scanner versions are pinned so an
+# upgrade cannot change scan results silently; bump them here on purpose.
+# First use on a machine: `mise trust && mise install && mise run install-hooks`.
+
+[tools]
+gitleaks = "8.30.1"
+cargo-deny = "0.20.2"
+
+[tasks.supply-chain]
+description = "Dependency policy: advisories, bans, licenses, sources (deny.toml)"
+# The pinned binary by path: a cargo-deny earlier on PATH would otherwise win.
+run = '"$(mise which cargo-deny)" check --hide-inclusion-graph'
+
+[tasks.install-hooks]
+description = "Use this repository's hooks: secret scan on commit, dependency policy on push"
+run = "git config --local core.hooksPath scripts/hooks"

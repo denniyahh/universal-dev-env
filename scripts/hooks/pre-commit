@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Secret scan of the staged changes with the gitleaks version pinned in mise.toml.
+# A missing scanner fails the commit; it is never skipped.
+set -euo pipefail
+
+# Hooks started from GUI clients may not inherit the login PATH.
+export PATH="$HOME/.local/bin:$PATH"
+
+if ! command -v mise >/dev/null 2>&1; then
+    echo "pre-commit: mise not found; it provides the pinned gitleaks (see mise.toml)" >&2
+    exit 1
+fi
+
+cd "$(git rev-parse --show-toplevel)"
+# `mise which` names the pinned install (or fails); `mise exec` would let an
+# unpinned gitleaks earlier on PATH win.
+gitleaks=$(mise which gitleaks)
+exec "$gitleaks" git --pre-commit --staged --redact
