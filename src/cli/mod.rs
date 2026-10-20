@@ -63,9 +63,10 @@ pub struct InitArgs {
     #[arg(long)]
     pub path: Option<PathBuf>,
 
-    /// Project ecosystem type (rust, node, polyglot)
-    #[arg(short = 't', long = "type", default_value = "rust")]
-    pub project_type: String,
+    /// Project ecosystem type (rust, node, polyglot). Default: the type recorded by an
+    /// earlier init, else rust
+    #[arg(short = 't', long = "type")]
+    pub project_type: Option<String>,
 
     /// Enable MemPalace memory stage
     #[arg(long, default_value_t = true)]
