@@ -32,3 +32,5 @@ graphify-out/*
 # UDE sync ancestor state is per machine; committing it makes init on another
 # machine treat every uncommitted managed file as deleted locally
 .ude/state.json
+# Temp files from staging state.json writes (tempfile prefix .tmp), left by a crash
+.ude/.tmp*

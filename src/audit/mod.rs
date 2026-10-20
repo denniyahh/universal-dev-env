@@ -336,7 +336,59 @@ impl Auditor {
             });
         }
 
+        // 4. Per-machine sync state must not be committed
+        reports.push(AuditReport {
+            category: "Repository Baseline".to_string(),
+            name: format!("Per-machine sync state ({SYNC_STATE_PATH})"),
+            status: sync_state_tracking_status(repo_path),
+        });
+
         reports
+    }
+}
+
+/// Project-relative path of UDE's per-machine sync ancestor state.
+const SYNC_STATE_PATH: &str = ".ude/state.json";
+
+/// Warns when [`SYNC_STATE_PATH`] is tracked by git although the project's ignore
+/// rules ignore it: the committed copy makes init on another machine treat every
+/// uncommitted managed file as deleted locally. The warning names the remedy.
+fn sync_state_tracking_status(repo_path: &Path) -> CheckStatus {
+    let tracked = git_exit_flag(
+        repo_path,
+        &["ls-files", "--error-unmatch", "--", SYNC_STATE_PATH],
+        "git ls-files --error-unmatch",
+    );
+    // `--no-index`: without it check-ignore reports every tracked path as not ignored.
+    let ignored = git_exit_flag(
+        repo_path,
+        &["check-ignore", "-q", "--no-index", "--", SYNC_STATE_PATH],
+        "git check-ignore",
+    );
+    match (tracked, ignored) {
+        (Ok(true), Ok(true)) => CheckStatus::Warning(format!(
+            "{SYNC_STATE_PATH} is tracked by git but is per-machine sync state that .gitignore ignores; another machine's init would treat uncommitted managed files as deleted (run 'git rm --cached {SYNC_STATE_PATH}', then commit)"
+        )),
+        (Err(e), _) | (_, Err(e)) => CheckStatus::Warning(format!(
+            "Could not check whether {SYNC_STATE_PATH} is tracked and ignored: {e}"
+        )),
+        _ => CheckStatus::Pass,
+    }
+}
+
+/// Runs `git <args>` in `repo_path` through the bounded runner and maps exit 0 to
+/// `true` and exit 1 to `false`. Any other outcome is an error naming `label`.
+fn git_exit_flag(repo_path: &Path, args: &[&str], label: &str) -> Result<bool, String> {
+    let mut cmd = std::process::Command::new("git");
+    cmd.current_dir(repo_path).args(args);
+    let out = crate::process::run_bounded(cmd, label, crate::process::LOCAL_TIMEOUT)?;
+    match out.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        code => Err(format!(
+            "{label} exited with {code:?}: {}",
+            crate::process::stderr_excerpt(&out)
+        )),
     }
 }
 
