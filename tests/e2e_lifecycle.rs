@@ -2513,3 +2513,49 @@ fn test_reinit_missing_file_warning_follows_push_boundary() {
     );
     assert!(!project.join(MISE_TEMPLATE).exists(), "{}", outputs(&push));
 }
+
+#[test]
+fn test_reinit_does_not_warn_of_deletion_for_open_conflict() {
+    let temp = tempdir().unwrap();
+    let ude = sync_cli(temp.path());
+    let project = project_with_local_templates(temp.path(), "project");
+    reinit_rust(&ude, &project);
+
+    // pre-push: deleted locally while upstream changed it, so pull records a conflict
+    // (D-15) and push skips it. commit-msg: deleted locally, upstream unchanged.
+    fs::remove_file(project.join("scripts/hooks/pre-push")).unwrap();
+    fs::remove_file(project.join("scripts/hooks/commit-msg")).unwrap();
+    let upstream = append_to(&project.join(PRE_PUSH_TEMPLATE), "# upstream change\n");
+    let pull = ude(&project, &["sync", "pull"]);
+    assert_eq!(pull.status.code(), Some(1), "{}", outputs(&pull));
+    let state = state_json(&project);
+    assert!(
+        state["conflicts"]["scripts/hooks/pre-push"].is_object(),
+        "{state}"
+    );
+
+    let init = init_output(&ude, &project);
+    assert!(
+        !init.contains("scripts/hooks/pre-push is tracked but missing"),
+        "push does not delete a conflicted file's template: {init}"
+    );
+    // Negative control: the unconflicted deletion in the same run is warned about.
+    assert!(
+        line_with(&init, "scripts/hooks/commit-msg is tracked but missing")
+            .contains("a plain ude sync push will delete its shared template"),
+        "{init}"
+    );
+
+    let push = ude(&project, &["sync", "push"]);
+    assert_eq!(
+        fs::read_to_string(project.join(PRE_PUSH_TEMPLATE)).unwrap(),
+        upstream,
+        "{}",
+        outputs(&push)
+    );
+    assert!(
+        !project.join(COMMIT_MSG_TEMPLATE).exists(),
+        "{}",
+        outputs(&push)
+    );
+}
