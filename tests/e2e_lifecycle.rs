@@ -2822,6 +2822,39 @@ fn test_init_refuses_symlinked_destination_dir() {
 }
 
 #[test]
+fn test_reinit_without_type_keeps_recorded_type() {
+    let temp = tempdir().unwrap();
+    let ude = sync_cli(temp.path());
+    let project = project_with_local_templates(temp.path(), "project");
+    let path = project.to_string_lossy().to_string();
+    let recorded_type = |project: &Path| -> String {
+        let state = fs::read_to_string(project.join(".ude/state.json")).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&state).unwrap();
+        json["project_type"].as_str().unwrap().to_string()
+    };
+
+    let init = ude(&project, &["init", "--path", &path, "--type", "node"]);
+    assert_eq!(init.status.code(), Some(0), "{}", outputs(&init));
+    let node_mise = fs::read_to_string(project.join("mise.toml")).unwrap();
+
+    let init = ude(&project, &["init", "--path", &path]);
+    assert_eq!(init.status.code(), Some(0), "{}", outputs(&init));
+    assert_eq!(recorded_type(&project), "node");
+    let status = outputs(&ude(&project, &["sync", "status"]));
+    assert!(status.contains("mise.toml: In Sync"), "{status}");
+    let pull = ude(&project, &["sync", "pull"]);
+    assert_eq!(pull.status.code(), Some(0), "{}", outputs(&pull));
+    assert_eq!(
+        fs::read_to_string(project.join("mise.toml")).unwrap(),
+        node_mise
+    );
+
+    // Negative control: an explicit --type still changes the recorded type.
+    reinit_rust(&ude, &project);
+    assert_eq!(recorded_type(&project), "rust");
+}
+
+#[test]
 fn test_init_keeps_non_utf8_gitignore_rules() {
     let temp = tempdir().unwrap();
     let ude = sync_cli(temp.path());

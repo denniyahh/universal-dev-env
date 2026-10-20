@@ -183,6 +183,13 @@ fn main() {
             // record, so it cannot discard a local edit, resurrect a deletion or drop
             // an open conflict. Pull brings it up to date.
             let tracked = |rel: &str| prior_state.has_record(Path::new(rel));
+            // A re-run without --type keeps the recorded type: the clap default would
+            // otherwise switch the project to rust and the next pull rewrite mise.toml.
+            let project_type = init_args
+                .project_type
+                .clone()
+                .or_else(|| prior_state.project_type.clone())
+                .unwrap_or_else(|| "rust".to_string());
             let managed_rels = [
                 std::path::PathBuf::from(".gitconfig"),
                 std::path::PathBuf::from(".gitignore"),
@@ -257,7 +264,7 @@ fn main() {
                 format!(
                     "==> Initializing portable project baseline at '{}' (type: {})...",
                     project_path.display(),
-                    init_args.project_type
+                    project_type
                 )
                 .bold()
             );
@@ -265,7 +272,7 @@ fn main() {
             let ctx = template::TemplateContext::detect_for_project(
                 &project_path,
                 &project_name,
-                &init_args.project_type,
+                &project_type,
             );
             let renderer = template::TemplateRenderer::new();
 
@@ -506,7 +513,7 @@ fn main() {
             // 4. Record baseline ancestor checksums in .ude/state.json. Every prior
             // record (files, tombstones, open conflicts) is carried forward unchanged.
             let mut project_state = prior_state.clone();
-            project_state.project_type = Some(init_args.project_type.clone());
+            project_state.project_type = Some(project_type);
             for rel in &managed_rels {
                 // A tracked file keeps its prior record: init did not write it, and a
                 // replacement ancestor (the current template or the local bytes) would
