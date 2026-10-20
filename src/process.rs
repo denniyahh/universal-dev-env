@@ -228,15 +228,19 @@ fn terminate(child: &mut dyn ChildWrapper, readers: Readers) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::collections::HashMap;
+    #[cfg(unix)]
     use std::ffi::OsStr;
 
     const LABEL: &str = "test command";
 
     /// Kills a recorded PID with the `kill` binary when dropped, so a failed
     /// assertion still cleans up the background process it was checking.
+    #[cfg(unix)]
     struct PidGuard(u32);
 
+    #[cfg(unix)]
     impl Drop for PidGuard {
         fn drop(&mut self) {
             let _ = Command::new("kill")

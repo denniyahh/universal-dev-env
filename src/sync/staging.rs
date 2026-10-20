@@ -25,6 +25,7 @@ const READ_BITS: u32 = 0o444;
 const READ_TO_EXEC_SHIFT: u32 = 2;
 
 /// Permission and special bits taken over from an existing target.
+#[cfg(unix)]
 const MODE_BITS: u32 = 0o7777;
 
 /// Whether `rel` is a hook or script path that must stay executable.

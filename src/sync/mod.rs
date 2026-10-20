@@ -4751,6 +4751,7 @@ mod tests {
         assert!(template.exists());
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_stage_delete_only_removes_regular_files_after_writes() {
         let root = tempdir().unwrap();
@@ -6846,6 +6847,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_pull_updates_refuses_to_write_through_symlink() {
         let engine = SyncEngine::new();
