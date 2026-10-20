@@ -183,6 +183,43 @@ fn main() {
             // record, so it cannot discard a local edit, resurrect a deletion or drop
             // an open conflict. Pull brings it up to date.
             let tracked = |rel: &str| prior_state.has_record(Path::new(rel));
+            let managed_rels = [
+                std::path::PathBuf::from(".gitconfig"),
+                std::path::PathBuf::from(".gitignore"),
+                std::path::PathBuf::from("scripts/hooks/commit-msg"),
+                std::path::PathBuf::from("scripts/hooks/pre-commit"),
+                std::path::PathBuf::from("scripts/hooks/pre-push"),
+                std::path::PathBuf::from("scripts/check-in-container.sh"),
+                std::path::PathBuf::from("scratch/check-publish-boundary.sh"),
+                std::path::PathBuf::from("scratch/new-worktree.sh"),
+                std::path::PathBuf::from("scratch/sync-personal-env.sh"),
+                std::path::PathBuf::from("mise.toml"),
+                std::path::PathBuf::from(".agents/AGENTS.md"),
+            ];
+            // A managed file with no record that git already tracks is kept as committed
+            // (a fresh clone has no state.json, which is per machine): its recorded
+            // ancestor is the template, so a committed edit reads as a local change
+            // instead of being overwritten.
+            let committed = match committed_paths(&project_path, &managed_rels) {
+                Ok(paths) => paths,
+                Err(e) => {
+                    eprintln!("  {} Initialization failed: {e}", "✗".red());
+                    std::process::exit(1);
+                }
+            };
+            let kept_committed: Vec<&PathBuf> = managed_rels
+                .iter()
+                .filter(|rel| {
+                    !prior_state.has_record(rel)
+                        && committed.contains(*rel)
+                        && fs::symlink_metadata(project_path.join(rel)).is_ok()
+                })
+                .collect();
+            let keep = |rel: &str| {
+                kept_committed
+                    .iter()
+                    .any(|kept| kept.as_path() == Path::new(rel))
+            };
 
             let project_name = project_path
                 .file_name()
@@ -231,13 +268,14 @@ fn main() {
                 std::process::exit(1);
             }
 
-            // Template of a managed file init kept instead of materializing; it becomes
-            // that file's recorded ancestor (CR-03).
-            let mut kept_gitignore_template: Option<PathBuf> = None;
+            // A pre-existing .gitignore init kept instead of materializing; its template
+            // becomes the recorded ancestor (CR-03).
+            let mut kept_gitignore = false;
 
             // 2. Materialize .gitconfig include & .gitignore
             if let Some(ref tdir) = root_template_dir {
                 if !tracked(".gitconfig")
+                    && !keep(".gitconfig")
                     && let Err(e) = copy_template_file(
                         tdir,
                         &tdir.join("projects/generic/gitconfig.repo"),
@@ -251,10 +289,11 @@ fn main() {
                 // Preserve existing customized .gitignore rules if already present
                 let target_gitignore = project_path.join(".gitignore");
                 let src_gitignore = tdir.join("projects/generic/gitignore.repo");
-                if tracked(".gitignore") {
-                    // Sync owns it; init's graphify append would read as a local edit.
+                if tracked(".gitignore") || keep(".gitignore") {
+                    // Sync owns it, or git does; init's graphify append would read as a
+                    // local edit.
                 } else if target_gitignore.exists() {
-                    kept_gitignore_template = Some(src_gitignore.clone());
+                    kept_gitignore = true;
                     let existing = fs::read_to_string(&target_gitignore).unwrap_or_default();
                     if !existing.contains("graphify-out/*") {
                         let append_block = "\n# Generated knowledge graphs / reports (allowlist pattern)\ngraphify-out/*\n!graphify-out/graph.json\n!graphify-out/manifest.json\n";
@@ -277,7 +316,8 @@ fn main() {
 
                 // Materialize hook suite
                 for hook in &["commit-msg", "pre-commit", "pre-push"] {
-                    if tracked(&format!("scripts/hooks/{hook}")) {
+                    let rel = format!("scripts/hooks/{hook}");
+                    if tracked(&rel) || keep(&rel) {
                         continue;
                     }
                     let src_hook = tdir.join(format!("projects/generic/hooks/{hook}"));
@@ -290,7 +330,9 @@ fn main() {
                 }
 
                 // Materialize container parity check
-                if !tracked("scripts/check-in-container.sh") {
+                if !tracked("scripts/check-in-container.sh")
+                    && !keep("scripts/check-in-container.sh")
+                {
                     let src_cont = tdir.join("projects/generic/container/check-in-container.sh");
                     let dst_cont = container_dir.join("check-in-container.sh");
                     if let Err(e) = copy_template_file(tdir, &src_cont, &dst_cont) {
@@ -306,7 +348,8 @@ fn main() {
                     "new-worktree.sh",
                     "sync-personal-env.sh",
                 ] {
-                    if tracked(&format!("scratch/{s}")) {
+                    let rel = format!("scratch/{s}");
+                    if tracked(&rel) || keep(&rel) {
                         continue;
                     }
                     let src_s = tdir.join(format!("projects/agents/scratch/{s}"));
@@ -320,6 +363,7 @@ fn main() {
 
                 // Materialize rendered templates (mise.toml, agents.md, mempalace)
                 if !tracked("mise.toml")
+                    && !keep("mise.toml")
                     && let Err(e) = render_and_write(
                         &renderer,
                         tdir,
@@ -333,6 +377,7 @@ fn main() {
                 }
 
                 if !tracked(".agents/AGENTS.md")
+                    && !keep(".agents/AGENTS.md")
                     && let Err(e) = render_and_write(
                         &renderer,
                         tdir,
@@ -427,19 +472,6 @@ fn main() {
             // record (files, tombstones, open conflicts) is carried forward unchanged.
             let mut project_state = prior_state.clone();
             project_state.project_type = Some(init_args.project_type.clone());
-            let managed_rels = [
-                std::path::PathBuf::from(".gitconfig"),
-                std::path::PathBuf::from(".gitignore"),
-                std::path::PathBuf::from("scripts/hooks/commit-msg"),
-                std::path::PathBuf::from("scripts/hooks/pre-commit"),
-                std::path::PathBuf::from("scripts/hooks/pre-push"),
-                std::path::PathBuf::from("scripts/check-in-container.sh"),
-                std::path::PathBuf::from("scratch/check-publish-boundary.sh"),
-                std::path::PathBuf::from("scratch/new-worktree.sh"),
-                std::path::PathBuf::from("scratch/sync-personal-env.sh"),
-                std::path::PathBuf::from("mise.toml"),
-                std::path::PathBuf::from(".agents/AGENTS.md"),
-            ];
             for rel in &managed_rels {
                 // A tracked file keeps its prior record: init did not write it, and a
                 // replacement ancestor (the current template or the local bytes) would
@@ -447,18 +479,25 @@ fn main() {
                 if prior_state.has_record(rel) {
                     continue;
                 }
-                let kept_template = kept_gitignore_template
-                    .as_ref()
-                    .filter(|_| rel.as_path() == Path::new(".gitignore"));
-                // A kept pre-existing .gitignore records the template as its ancestor,
-                // so the kept rules read as a local modification: pull then merges or
-                // conflicts instead of replacing them with the template (CR-03). No
-                // readable template means no ancestor, never the kept bytes.
-                let p = match kept_template {
-                    Some(template) => template.clone(),
-                    None => project_path.join(rel),
+                // A kept file (a pre-existing .gitignore, or any file git tracks) records
+                // what init would have written from the template as its ancestor, so
+                // kept content reads as a local modification: pull then merges or
+                // conflicts instead of replacing it (CR-03). No readable template means
+                // no ancestor, never the kept bytes.
+                let kept = keep(&rel.to_string_lossy())
+                    || (kept_gitignore && rel.as_path() == Path::new(".gitignore"));
+                let recorded = if kept {
+                    match kept_ancestor(&renderer, root_template_dir.as_deref(), rel, &ctx) {
+                        Ok(bytes) => bytes,
+                        Err(e) => {
+                            eprintln!("  {} Initialization failed: {e}", "✗".red());
+                            std::process::exit(1);
+                        }
+                    }
+                } else {
+                    fs::read(project_path.join(rel)).ok()
                 };
-                if let Ok(bytes) = fs::read(&p) {
+                if let Some(bytes) = recorded {
                     let hash = sync::SyncEngine::fingerprint(&bytes);
                     let content = String::from_utf8(bytes)
                         .ok()
@@ -475,6 +514,14 @@ fn main() {
                 println!(
                     "  {} Recorded baseline ancestor state in .ude/state.json",
                     "✓".green()
+                );
+            }
+
+            for rel in &kept_committed {
+                println!(
+                    "  {} Kept committed {} (not overwritten); sync status compares it with the template",
+                    "✓".green(),
+                    rel.display()
                 );
             }
 
@@ -1344,13 +1391,7 @@ fn render_and_write(
     dst: &Path,
     ctx: &template::TemplateContext,
 ) -> Result<(), String> {
-    sync::refuse_symlink_under(root, src)?;
-    if src.exists() {
-        let content = fs::read_to_string(src)
-            .map_err(|e| format!("Failed to read template {}: {e}", src.display()))?;
-        let rendered = renderer
-            .render_str(&content, ctx)
-            .map_err(|e| format!("Failed to render template {}: {e}", src.display()))?;
+    if let Some(rendered) = rendered_template(renderer, root, src, ctx)? {
         if let Some(parent) = dst.parent() {
             fs::create_dir_all(parent).map_err(|e| {
                 format!(
@@ -1362,6 +1403,79 @@ fn render_and_write(
         fs::write(dst, rendered).map_err(|e| format!("Failed to write {}: {e}", dst.display()))?;
     }
     Ok(())
+}
+
+/// The template `src` (below `root`) rendered with `ctx`, `None` when it does not exist.
+fn rendered_template(
+    renderer: &template::TemplateRenderer,
+    root: &Path,
+    src: &Path,
+    ctx: &template::TemplateContext,
+) -> Result<Option<String>, String> {
+    sync::refuse_symlink_under(root, src)?;
+    if !src.exists() {
+        return Ok(None);
+    }
+    let content = fs::read_to_string(src)
+        .map_err(|e| format!("Failed to read template {}: {e}", src.display()))?;
+    renderer
+        .render_str(&content, ctx)
+        .map(Some)
+        .map_err(|e| format!("Failed to render template {}: {e}", src.display()))
+}
+
+/// What init would have written for the managed file `rel` from its template under
+/// `template_root` (rendered for a `.jinja` template); `None` without a template.
+fn kept_ancestor(
+    renderer: &template::TemplateRenderer,
+    template_root: Option<&Path>,
+    rel: &Path,
+    ctx: &template::TemplateContext,
+) -> Result<Option<Vec<u8>>, String> {
+    let Some(root) = template_root else {
+        return Ok(None);
+    };
+    let Some(src) = sync::map_to_upstream(root, rel) else {
+        return Ok(None);
+    };
+    if src.extension().is_some_and(|ext| ext == "jinja") {
+        return Ok(rendered_template(renderer, root, &src, ctx)?.map(String::into_bytes));
+    }
+    sync::refuse_symlink_under(root, &src)?;
+    match fs::read(&src) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("Failed to read template {}: {e}", src.display())),
+    }
+}
+
+/// The paths in `rels` that git tracks in `project`'s index; empty when `project` has
+/// no `.git`. A git failure is an error: init must not overwrite files it could not
+/// check.
+fn committed_paths(
+    project: &Path,
+    rels: &[PathBuf],
+) -> Result<std::collections::HashSet<PathBuf>, String> {
+    if !project.join(".git").exists() {
+        return Ok(std::collections::HashSet::new());
+    }
+    let mut cmd = Command::new("git");
+    cmd.current_dir(project)
+        .args(["ls-files", "-z", "--"])
+        .args(rels);
+    let out = process::run_bounded(cmd, "git ls-files", process::LOCAL_TIMEOUT)?;
+    if !out.status.success() {
+        return Err(format!(
+            "git ls-files failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(out
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .map(|path| PathBuf::from(String::from_utf8_lossy(path).into_owned()))
+        .collect())
 }
 
 fn set_executable(path: &Path) {
