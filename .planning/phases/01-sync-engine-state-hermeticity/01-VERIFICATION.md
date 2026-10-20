@@ -1,10 +1,10 @@
 ---
 phase: 01-sync-engine-state-hermeticity
-verified: 2026-10-20T01:17:35Z
-status: human_needed
-score: 10/10 must-haves verified
+verified: 2026-10-20T19:44:58Z
+status: gaps_found
+score: 10/11 must-haves verified
 covered_files: [".config/nextest.toml", ".planning/phases/01-sync-engine-state-hermeticity/01-01-PLAN.md", ".planning/phases/01-sync-engine-state-hermeticity/01-01-SUMMARY.md", ".planning/phases/01-sync-engine-state-hermeticity/01-02-PLAN.md", ".planning/phases/01-sync-engine-state-hermeticity/01-02-SUMMARY.md", ".planning/phases/01-sync-engine-state-hermeticity/01-03-PLAN.md", ".planning/phases/01-sync-engine-state-hermeticity/01-03-SUMMARY.md", ".planning/phases/01-sync-engine-state-hermeticity/01-04-PLAN.md", ".planning/phases/01-sync-engine-state-hermeticity/01-04-SUMMARY.md", ".planning/phases/01-sync-engine-state-hermeticity/01-05-PLAN.md", ".planning/phases/01-sync-engine-state-hermeticity/01-05-SUMMARY.md", ".planning/phases/01-sync-engine-state-hermeticity/01-06-PLAN.md", ".planning/phases/01-sync-engine-state-hermeticity/01-06-SUMMARY.md", ".planning/phases/01-sync-engine-state-hermeticity/01-07-PLAN.md", ".planning/phases/01-sync-engine-state-hermeticity/01-07-SUMMARY.md", ".planning/phases/01-sync-engine-state-hermeticity/01-08-PLAN.md", ".planning/phases/01-sync-engine-state-hermeticity/01-08-SUMMARY.md", ".planning/phases/01-sync-engine-state-hermeticity/01-09-PLAN.md", ".planning/phases/01-sync-engine-state-hermeticity/01-09-SUMMARY.md", ".planning/phases/01-sync-engine-state-hermeticity/01-10-PLAN.md", ".planning/phases/01-sync-engine-state-hermeticity/01-10-SUMMARY.md", ".planning/phases/01-sync-engine-state-hermeticity/01-11-PLAN.md", ".planning/phases/01-sync-engine-state-hermeticity/01-11-SUMMARY.md", "Cargo.toml", "src/audit/mod.rs", "src/cli/mod.rs", "src/main.rs", "src/process.rs", "src/sanitizer/mod.rs", "src/semantic/mod.rs", "src/sync/merge.rs", "src/sync/mod.rs", "src/sync/staging.rs", "src/sync/state.rs", "src/template/mod.rs", "templates/projects/generic/gitignore.repo", "tests/e2e_lifecycle.rs"]
-covered_digest: "v3:sha256:b3f7467c638fe721a1e825d5bb4fda5a9dee0c6c7465e0cf1de7f06c82df5abe"
+covered_digest: "v3:sha256:2f49afd22f5f1e9f27ba5e21342d81b8e6f9c2784579a8a4112ad7ec9a4d166a"
 behavior_unverified: 0
 overrides_applied: 1
 overrides:
@@ -14,40 +14,45 @@ overrides:
     accepted_at: "2026-10-20T00:33:36Z"
 re_verification:
   previous_status: human_needed
-  previous_score: 9/9
-  previous_head: 956c5e7
-  gaps_closed:
-    - "01-REVIEW-REINIT WR-01 (decision finding): a second machine's init no longer leads to a silent template deletion; state.json is ignored by the project template, init warns per missing tracked file, status says push deletes the shared template, doctor flags a tracked-but-ignored state.json"
+  previous_score: 10/10
+  previous_head: cfa26b2
+  gaps_closed: []
   gaps_remaining: []
-  regressions: []
+  regressions:
+    - "SC1 (no resurrection on later pushes): the fresh-clone keep added in 42803ee lets a fresh clone's first init + plain push republish a template that was deleted upstream"
+gaps:
+  - truth: "SC1: Deletion of an upstream template propagates locally on `ude sync pull` via state tombstones without resurrecting on subsequent pushes"
+    status: partial
+    reason: "Holds on a machine that has a state.json. On a fresh clone (state.json is per machine and git-ignored since 1e6615c), init keeps a committed managed file whose template was deleted upstream, records no ancestor for it (kept_ancestor returns None when the template is absent), so sync status reports it 'Locally Modified (ready to push)' and a plain `ude sync push` re-creates the deleted template. Reproduced with the HEAD binary; the pre-42803ee binary (2023d5b) on the same scenario reports 'Deleted upstream' and publishes 0 files, so this is a regression introduced by the fresh-clone keep. The file does not need to be edited: an unedited committed copy of the old template is enough."
+    artifacts:
+      - path: "src/main.rs"
+        issue: "init: a kept_committed file with no template gets `recorded = None` (kept_ancestor -> Ok(None)), so no state record is written; the 'Kept committed ... sync status compares it with the template' line is printed even though no template exists"
+      - path: "tests/e2e_lifecycle.rs"
+        issue: "test_first_init_on_fresh_clone_keeps_committed_edits covers a present template only; no test covers a fresh clone whose committed managed file has no upstream template"
+    missing:
+      - "Decide what a fresh clone's kept file with no upstream template should become: e.g. record the kept bytes as ancestor (pre-42803ee behaviour, which classifies it Deleted upstream), or record it as a tombstone/unmanaged so push never republishes it"
+      - "e2e test, written first: machine A commits a project, the template is deleted upstream, machine B clones and runs init then a plain push; assert the template stays absent and push publishes 0 files. Negative control: the same clone with the template still present keeps the committed edit as Locally Modified"
 deferred:
-  - truth: "Push must not leak the pusher's home path when a {{ user.home }} / {{ user.xdg_config }} placeholder is followed by , ; . ) ] } or = (re-review W2; latent, no synced template uses these placeholders)"
+  - truth: "Windows runtime behaviour of the bounded runner (JobObject kill), the remote cache lock (release on process death) and staged state.json replace"
+    addressed_in: "Phase 999.1 (backlog)"
+    evidence: "Phase 999.1 goal: 'On a Windows host, run the three checks waived for phase 01 on 2026-10-20 (operator) ...'. 01-UAT.md tests 1-3: skipped, operator waiver 2026-10-20. Compile and clippy for x86_64-pc-windows-msvc re-checked at HEAD f33072b on Linux (exit 0; nothing linked or run)"
+  - truth: "Push must not leak the pusher's home path when a {{ user.home }} / {{ user.xdg_config }} placeholder is followed by , ; . ) ] } or = (re-review W2; latent)"
     addressed_in: "Phase 2"
-    evidence: "Phase 2 goal: 'Screen and redact all confidential tokens, raw credentials, and user-specific paths before any remote git staging or push.' Tracked in .planning/todos/pending/2026-10-19-home-path-placeholders-leak-the-pusher-s-home-path-into-shar.md"
-  - truth: "A custom .gitignore that ude init kept must not be publishable over the shared gitignore.repo by a plain push"
+    evidence: "Phase 2 goal: 'Screen and redact all confidential tokens, raw credentials, and user-specific paths before any remote git staging or push.' Pending todo 2026-10-19-home-path-placeholders-leak-..."
+  - truth: "A file that ude init kept (custom .gitignore, or a fresh clone's committed edit) must not be publishable over the shared template by a plain push"
     addressed_in: "Phase 4"
-    evidence: "Phase 4 goal: '... clean manifests with safe re-initialization protections.' Operator accepted for phase 01 on 2026-10-19 (deferred-items.md); tracked in .planning/todos/pending/2026-10-19-never-publish-files-that-init-kept-over-the-shared-template.md"
-  - truth: "Re-init side effects from 01-REVIEW-REINIT WR-02/WR-03/IN-01: a changed --type is not applied to mise.toml; git update-index stages an uncommitted edit of a tracked hook; a tracked hook's lost exec bit is not restored"
+    evidence: "Phase 4 goal: '... clean manifests with safe re-initialization protections.' Operator accepted for phase 01 on 2026-10-19; pending todo 2026-10-19-never-publish-files-that-init-kept-over-the-shared-template; deferred-items.md 'Fresh-clone keep (42803ee) uses the current template as the ancestor'. Covers publishing a kept EDIT over an existing template, not re-creating a template deleted upstream (that is the gap above)"
+  - truth: "Re-init side effects (01-REVIEW-REINIT WR-02, WR-03, IN-01): explicit --type change not applied to mise.toml; update-index stages an uncommitted hook edit; lost exec bit not restored"
     addressed_in: "Phase 4"
-    evidence: "Phase 4 goal: 'safe re-initialization protections'; SC2: 'Re-running `ude init` on an existing workspace detects modified files ...'. Recorded open in deferred-items.md ('candidate for Phase 4, safe re-initialization') by the operator"
-human_verification:
-  - test: "On a Windows host or CI runner: `cargo check --target x86_64-pc-windows-msvc`, then `ude sync status --remote <unreachable https URL>`"
-    expected: "Compiles; the command returns within about 60 s with the 'timed out after 60.0s and was terminated' message, and no git / git-remote-https process is left running (JobObject kill)"
-    why_human: "Only x86_64-unknown-linux-gnu is installed on this host; the #[cfg(windows)] JobObject branch of run_bounded has never been compiled or run (WINDOWS.md #1, T-01-04 / AR-01-01)"
-  - test: "On Windows: run the remote-lock tests' scenario (two `ude sync` commands on the same remote and branch; kill the first while it holds the lock)"
-    expected: "The second command waits on the cache lock, and proceeds once the holder is killed (std File::try_lock / LockFileEx released on process death)"
-    why_human: "RemoteLockGuard's std File::try_lock path was only compiled and tested on Linux; the lock tests are cfg(target_os = linux) (WINDOWS.md #2)"
-  - test: "On Windows: `ude sync pull` in an initialized project that already has .ude/state.json"
-    expected: "state.json is replaced (NamedTempFile persist over an existing file succeeds on Windows) and reloads as version 2"
-    why_human: "Staged state.json persist over an existing file was never compiled or run on Windows; test_state_save_mode and test_state_save_refuses_symlinked_ude_dir are Unix-only (WINDOWS.md #3)"
+    evidence: "deferred-items.md ('candidate for Phase 4, safe re-initialization'); Phase 4 SC2 covers re-init on an existing workspace"
 ---
 
 # Phase 1: Sync Engine & State Hermeticity Verification Report
 
 **Phase Goal:** Ensure bidirectional synchronization is hermetic, crash-resilient, and atomic without phantom drift or zombie file resurrections.
-**Verified:** 2026-10-20T01:17:35Z, at HEAD cfa26b2 (adds a4450d9, 1e6615c, fad8cdb, 1df10a3, 1ed695c, cfa26b2 over the previous report's 956c5e7)
-**Status:** human_needed (only the three Windows items; nothing on Linux is open)
-**Re-verification:** Yes. The previous report (956c5e7) had no gaps. This one is regenerated at the new HEAD. The changed code (init output, status hint, doctor check, project `.gitignore` template) got full checks with negative controls. Everything else got regression runs.
+**Verified:** 2026-10-20T19:44:58Z, at HEAD f33072b (24 commits over the previous report's cfa26b2; code changes in src/main.rs, src/sync/{mod,state,staging}.rs, src/process.rs, src/cli/mod.rs, tests/e2e_lifecycle.rs)
+**Status:** gaps_found
+**Re-verification:** Yes. The previous report (cfa26b2, human_needed, no gaps) is stale. Its Windows items are now operator-waived and backlogged (Phase 999.1). The new code (symlink refusal, fresh-clone keep, monorepo detection, recorded-type default, TypeSafe symlink skip, init destination checks) got full checks with negative controls; everything else got regression runs.
 
 ## Goal Achievement
 
@@ -55,97 +60,87 @@ human_verification:
 
 | # | Truth | Status | Evidence |
 |---|-------|--------|----------|
-| 1 | SC1: Upstream deletion propagates locally on `ude sync pull` via tombstones, without resurrecting on later pushes | ✓ VERIFIED | CLI probe at HEAD: status "Deleted upstream", pull "Removed .gitconfig", tombstone in state.json, recreated file "Unmanaged ... never republished", push published 0 files, template stayed absent. `src/sync/` unchanged since 956c5e7; unit tests pass in the full run |
-| 2 | SC2: Multi-file sync stages before updating, so disk/permission errors cause no partial writes | ✓ VERIFIED | `StagedTransaction` (src/sync/staging.rs) unchanged; `test_pull_staging_failure_no_partial_writes` passes. Per locked D-05 the temp files sit beside each target rather than in one shadow folder, and the rename phase is not atomic as a whole (D-01, AR-01-02) |
-| 3 | SC3: All git and gh calls have bounded timeouts (30 s local / 60 s network) and kill hung children | ✓ VERIFIED (Linux) | `process::run_bounded` unchanged. The only new spawns (doctor's `git ls-files` and `git check-ignore`) go through `run_bounded` with `LOCAL_TIMEOUT`. Decoy-`GIT_DIR` run of the new check: still reads the right repo (Warning, where a leak would give Pass). Every `.output()` / `.status()` / `.spawn()` left in non-test src (outside process.rs) is either past `#[cfg(test)]` at sync/mod.rs line 2168 or the `curl` call in src/semantic, which is not git or gh. Windows JobObject branch: Human Verification 1 |
-| 4 | SC4: Ancestor fingerprints normalize CRLF, no false drift | ✓ VERIFIED | CLI probe at HEAD: CRLF-only conversion of .gitconfig (28 CRs) is "In Sync"; a real edit in the CRLF file is "Locally Modified" (negative control) |
-| 5 | SC5: Divergent edits produce `.conflict` files with standard markers while preserving local changes | ✓ VERIFIED | CLI probe at HEAD: pull exit 1, local .gitignore byte-identical, sidecar has LOCAL / ANCESTOR / `=======` / UPSTREAM markers; push while open skipped it (exit 1, upstream untouched); `ude sync resolve` cleared it |
-| 6 | SC6: Outbound push verifies branch continuity and rejects divergent candidates safely | ✓ VERIFIED | `push_direct` / `check_continuity` / `rollback_commit` unchanged since a6cc3c3; continuity and upstream-moved tests pass in the full run |
-| 7 | 01-06 backstop: two `ude sync` commands on the same remote and branch serialize on the cache lock | ✓ VERIFIED | `src/sync/` unchanged since the lock probe passed at 956c5e7 (3.32 s waiting vs 0.10 s alone). Not re-run at this HEAD |
-| 8 | 01-01 backstop: deadline boundary inclusive, 10 ms poll | PASSED (override) | Orchestrator ruling, not the operator's: accepted on the implementation read plus passing timeout tests. An exact-millisecond boundary test would itself be flaky |
-| 9 | Goal ("no zombie resurrections"): re-running `ude init` keeps every prior record (ancestor, tombstone, open conflict) and writes no recorded file | ✓ VERIFIED | Re-init probe at HEAD, cases A–E: graphify block not re-appended, local hook edit kept, sidecar edits and conflict record kept with resolve exit 0, deleted `.gitconfig` not resurrected, tombstone `['.gitconfig']` kept in a v2 state.json. Controls: first init still appends the block and still creates `.gitconfig` |
-| 10 | 01-REVIEW-REINIT decision finding (WR-01) is closed: on a second machine, init followed by a plain push does not silently delete shared templates, and init warns about every tracked file that is missing | ✓ VERIFIED | Second-machine probe at HEAD, below. Machine A commits a project but leaves `.gitconfig` and `pre-push` uncommitted; machine B clones it. Default case: state.json is not committed, B's init recreates both files, push publishes 0 files, shared templates byte-identical. Control (legacy project that committed state.json): init prints one warning per file, status and doctor warn, and the push that follows does delete both templates. So the control trips, and the deletion is warned about, not silent. All 6 new e2e tests **fail on the pre-fix source** at their target assertion |
+| 1 | SC1: Upstream deletion propagates locally on `ude sync pull` via tombstones, without resurrecting on later pushes | ✗ FAILED (partial) | Single machine holds (CLI probe at HEAD: "Deleted upstream" → pull "Removed .gitconfig" → tombstone `['.gitconfig']` in v2 state.json → recreated file "Unmanaged ... never republished" → push 0 files, template stays absent). **Fresh clone resurrects it**: see the probe below. Regression from 42803ee, confirmed against the 2023d5b binary |
+| 2 | SC2: Multi-file sync stages before updating, so disk/permission errors cause no partial writes | ✓ VERIFIED | `test_pull_staging_failure_no_partial_writes`, `test_push_staging_failure_no_partial_writes` pass. staging.rs changed only by a `#[cfg(unix)]` on a constant. Per locked D-05 the temp files sit beside each target, and the rename phase is not atomic as a whole (D-01, AR-01-02) |
+| 3 | SC3: All git and gh calls have bounded timeouts (30 s local / 60 s network) and kill hung children | ✓ VERIFIED (Linux) | Every `Command::new` in non-test src (audit, main incl. new `committed_paths`, template, sync's runner) feeds `process::run_bounded`; the only other spawn is `curl` in src/semantic. `test_timeout_kills_group`, `test_push_timeout_hanging_hook` pass. run_bounded scrubs `GIT_DIR` etc. (process.rs line 92). Windows runtime: deferred to 999.1 |
+| 4 | SC4: Ancestor fingerprints normalize CRLF, no false drift | ✓ VERIFIED | CLI probe at HEAD: CRLF-only conversion of .gitconfig (28 CRs) is "In Sync"; control: a real edit in the CRLF file is "Locally Modified" |
+| 5 | SC5: Divergent edits produce `.conflict` files with standard markers while preserving local changes | ✓ VERIFIED | CLI probe at HEAD: pull exit 1, local .gitignore byte-identical, sidecar has 4 marker lines (LOCAL / ANCESTOR / `=======` / UPSTREAM); push while open exit 1 with upstream byte-identical; `ude sync resolve .gitignore` exit 0, sidecar gone |
+| 6 | SC6: Outbound push verifies branch continuity and rejects divergent candidates safely | ✓ VERIFIED | Push path changed only by a symlink refusal on the local read. `test_push_continuity_violation_is_hard_failure`, `test_direct_push_aborts_when_upstream_moved`, `test_force_does_not_bypass_upstream_moved` pass |
+| 7 | 01-06 backstop: two `ude sync` commands on the same remote and branch serialize on the cache lock | ✓ VERIFIED (Linux) | `test_remote_lock_concurrency_serialization_and_timeout`, `test_remote_lock_released_when_holder_killed`, `test_remote_lock_not_inherited_by_children` pass |
+| 8 | 01-01 backstop: deadline boundary inclusive, 10 ms poll | PASSED (override) | Carried forward; process.rs runner unchanged since (only test-only cfg gates added) |
+| 9 | Goal ("no zombie resurrections"): re-running `ude init` keeps every prior record and writes no recorded file | ✓ VERIFIED | `test_tombstones_survive_reinit`, `test_open_conflict_survives_reinit`, `test_reinit_keeps_local_edit_of_file_it_would_rewrite`, `test_reinit_keeps_record_of_file_whose_template_is_missing` pass. (This truth is about re-init with a state.json; the first-init-of-a-clone case is truth 1's gap) |
+| 10 | 01-REVIEW-REINIT WR-01 closed: per-machine state.json ignored, init warns per missing tracked file | ✓ VERIFIED | `test_project_gitignore_ignores_per_machine_state`, `test_project_gitignore_ignores_state_staging_temp_files`, `test_doctor_reports_tracked_per_machine_state_with_remedy`, `test_reinit_warns_that_push_deletes_template_of_missing_tracked_file`, `test_reinit_missing_file_warning_follows_upstream` pass |
+| 11 | 01-REVIEW fixes hold: init refuses symlinked destinations (CR-01); unreadable / non-UTF-8 `.gitignore` is kept or stops init (CR-02); monorepo subdirectory detected (WR-02); re-init without `--type` keeps the recorded type (WR-03); TypeSafe check skips a symlinked AGENTS.md (WR-04) | ✓ VERIFIED | The 7 tests added in bc0cce5 / 6d6b652 / 8e7c6dd / 374a208 pass at HEAD, and **all 7 fail** (assertion panics, e.g. "init overwrote a committed edit: exit Some(0)") when only the src parts of those 4 commits are reverse-applied on HEAD in a scratch worktree. The WR-04 test uses a `curl` stub and asserts the private marker never reaches it, with a regular-file control that does |
 
-**Score:** 10/10 truths verified (1 by override; 0 present-but-behavior-unverified). Truth 10 is new in this report.
+**Score:** 10/11 truths verified (1 by override; 0 present-but-behavior-unverified)
 
-#### Second-machine probe at HEAD (truth 10)
+#### Fresh-clone resurrection probe (truth 1)
 
-Upstream templates are one shared directory both clones see. Machine A runs `ude init`, then `git add -A`, then un-stages `.gitconfig` and `scripts/hooks/pre-push`, then commits. Machine B runs `git clone`, `ude init`, `ude doctor`, `ude sync status`, and a plain `ude sync push`.
+Shared template dir both clones link to as `templates/`; fake HOME/XDG, no inherited git vars.
 
-| Case | state.json in B's clone | B init | doctor state check | push | Shared templates |
-|------|------------------------|--------|-------------------|------|------------------|
-| 1. Default (template ignores state.json) | absent | recreates both files, "initialization complete", no warning | Pass | 0 files | byte-identical |
-| 2. Control: legacy commit of state.json (`add -f`) | present | `! .gitconfig is tracked but missing; ... a plain ude sync push will delete its shared template` (and the same for `pre-push`), with a restore line each; "complete; 2 tracked file(s) missing" | Warning, with `git rm --cached .ude/state.json` | deletes `gitconfig.repo` and `hooks/pre-push`, exit 0 | changed (expected; warned in advance) |
-| 3. Project with its own `.gitignore` before the first init | present (`add -A` commits it, because the kept `.gitignore` has no state.json rule) | warns for `.gitconfig` | **Pass** (the file is tracked but not ignored, which this check does not cover) | (not run) | - |
+1. Machine A: `ude init`, `git init`, `git add -A`, commit. state.json is not committed (ignored).
+2. Upstream deletes `projects/generic/gitconfig.repo`. A pulls: "Removed .gitconfig". A restores its committed copy: status "Unmanaged (deleted upstream; kept locally, never republished)"; A's push leaves the template absent.
+3. Machine B: `git clone` A, `ude init`, `ude sync status`, `ude sync push`.
 
-Doctor exits 2 in every case. The cause is the host signing checks failing under the fake HOME (allowed_signers, gpg.format, commit.gpgsign), not the new check.
+| Binary | B init | B status for .gitconfig | B push | Template afterwards |
+|--------|--------|-------------------------|--------|---------------------|
+| HEAD f33072b | "Kept committed .gitconfig (not overwritten); sync status compares it with the template" | Locally Modified (ready to push) | "synchronized 1 file(s)", exit 0 | **re-created** |
+| 2023d5b (just before 42803ee) | no keep line | Deleted upstream (pull to remove) | "synchronized 0 file(s)", exit 0 | absent |
 
-#### Negative controls for the new tests
-
-| Run | Result |
-|-----|--------|
-| HEAD's `tests/e2e_lifecycle.rs` on 956c5e7 source, the 6 new tests | 6 failed, all assertion panics |
-| The same on fad8cdb source, which already ignores state.json but has no doctor check and no `.tmp*` rule | `test_doctor_reports_tracked_per_machine_state_with_remedy` fails at its own assertion (no "Per-machine sync state" check); `test_project_gitignore_ignores_state_staging_temp_files` fails at `check_ignored(.ude/.tmpQ1w2E3)`; `test_project_gitignore_ignores_per_machine_state` passes (its fix is in 1e6615c) |
+The same applies without step 2's pull on A: any clone made after the upstream deletion. The committed file was the unedited old template; no edit is needed to trigger it.
 
 ### Deferred Items
 
 | # | Item | Addressed In | Evidence |
 |---|------|-------------|----------|
-| 1 | Home-path placeholder followed by `, ; . ) ] } =` is not round-tripped, so push can publish the pusher's home path (W2, latent) | Phase 2 | Phase 2 goal covers redacting user-specific paths before push; pending todo exists |
-| 2 | A custom `.gitignore` kept by init can be pushed over the shared template (operator-accepted 2026-10-19) | Phase 4 | Phase 4 goal covers safe re-initialization; pending todo exists |
-| 3 | Three re-init side effects (REINIT WR-02, WR-03, IN-01): a changed `--type` is not applied to `mise.toml`; `update-index` stages an uncommitted hook edit; a lost exec bit is not restored | Phase 4 | deferred-items.md (operator-recorded, "candidate for Phase 4"); Phase 4 SC2 covers re-init on an existing workspace |
+| 1 | Windows runtime: JobObject kill, cache-lock release, state.json replace | Phase 999.1 (backlog) | Operator waiver 2026-10-20 in 01-UAT.md; compile + clippy for the Windows target pass at HEAD (cross-checked on Linux only) |
+| 2 | Home-path placeholder followed by `, ; . ) ] } =` not round-tripped (W2, latent) | Phase 2 | Phase 2 goal; pending todo |
+| 3 | A kept file (custom `.gitignore`, fresh clone's committed edit) is publishable over an existing template | Phase 4 | Operator-accepted 2026-10-19; pending todo. Does not cover re-creating a deleted template |
+| 4 | Re-init side effects (REINIT WR-02, WR-03, IN-01) | Phase 4 | deferred-items.md |
 
 ### Required Artifacts
 
 | Artifact | Expected | Status | Details |
 |----------|----------|--------|---------|
-| `src/process.rs` | Bounded runner, env scrub, redaction | ✓ VERIFIED | unchanged since a6cc3c3 |
-| `src/sync/staging.rs` | Stage-validate-commit transaction | ✓ VERIFIED | unchanged |
-| `src/sync/state.rs` | v2 schema, loud failure, forward guard, migration, staged save, `has_record` | ✓ VERIFIED | unchanged since 956c5e7 |
+| `src/process.rs` | Bounded runner, env scrub, redaction | ✓ VERIFIED | only `#[cfg(unix)]` gates on test items since cfa26b2 |
+| `src/sync/staging.rs` | Stage-validate-commit transaction | ✓ VERIFIED | one cfg gate added |
+| `src/sync/state.rs` | v2 schema, loud failure, staged save | ✓ VERIFIED | load refuses a symlinked state path (`test_dangling_state_symlink_fails_loudly` passes) |
 | `src/sync/merge.rs` | diffy diff3 merge and sidecar renderer | ✓ VERIFIED | unchanged |
-| `src/sync/mod.rs` | Deletion states, conflicts, resolve, push skips, continuity | ✓ VERIFIED | unchanged since 956c5e7 |
-| `src/main.rs` | init carries prior state; per-file missing-tracked warning; step lines; status hint | ✓ VERIFIED | `missing_tracked_files` + `print_missing_tracked_warning` wired after the state save; all 11 managed paths are covered by one of the three step lines |
-| `src/audit/mod.rs` | doctor's per-machine state check | ✓ VERIFIED | `sync_state_tracking_status` pushed into the repo reports; bounded git calls |
-| `templates/projects/generic/gitignore.repo` | `*.conflict`, `.ude/state.json`, `.ude/.tmp*` | ✓ VERIFIED | all three rules present |
-| `tests/e2e_lifecycle.rs` | Hermetic e2e coverage | ✓ VERIFIED | 36 e2e tests pass (30 before, plus 6 new) |
+| `src/sync/mod.rs` | Deletion states, conflicts, resolve, push skips, continuity | ✓ VERIFIED | adds `refuse_symlink_under` (unit test with regular-path control) wired into scan, pull and push reads |
+| `src/main.rs` | init carries prior state; destination symlink checks; fresh-clone keep; missing-file warning | ⚠️ PARTIAL | wired and tested, but the fresh-clone keep writes no record when the template is absent (gap above) |
+| `templates/projects/generic/gitignore.repo` | `*.conflict`, `.ude/state.json`, `.ude/.tmp*` | ✓ VERIFIED | unchanged |
+| `tests/e2e_lifecycle.rs` | Hermetic e2e coverage | ✓ VERIFIED | 50 e2e tests pass; no `std::env::set_var` / `remove_var` anywhere in src or tests |
 
-`verify.artifacts`: 32/32 pass across the 11 plans.
+`verify.artifacts`: 32/32 pass across the 11 plans (existence/pattern level only).
 
 ### Key Link Verification
 
-`verify.key-links` reports 6/26 verified. All 20 unverified rows fail with "Source file not found", which means the verb could not parse the link, not that the link is missing. The plans put symbol names in `from:` (for example `src/sync/mod.rs SyncEngine`), and the verb accepts only a file path there. I checked them by grep at HEAD:
-- `run_local`/`run_network`: 23 uses in sync/mod.rs
-- `StagedTransaction` and `stage_delete`: 8 each
-- `merge_texts`, `render_conflict_sidecar` and `fn resolve_conflict`: present
-- `check_continuity` and `rollback_commit`: present
-- `diff-tree` and `--name-status`: present
-- main.rs: `resolve_conflict`, `EXIT_DRIFT` and `EXIT_HARD_FAILURE` dispatch present
-
-The behavioural tests cover the same links. Links added by the new commits:
-
 | From | To | Status | Details |
 |------|----|--------|---------|
-| init (main.rs) | `missing_tracked_files` → `print_missing_tracked_warning` | WIRED | called after `save_to_dir`, with the prior state and `managed_rels`. Excludes open conflicts and tombstones (`test_reinit_does_not_warn_of_deletion_for_open_conflict` has a negative control) |
-| warning text | `push_boundary` | WIRED | Publishable / ForceOnly / Never each give their own wording (`test_reinit_missing_file_warning_follows_push_boundary`) |
-| `Auditor` repo reports | `sync_state_tracking_status` → `run_bounded` | WIRED | probe cases 1–2 plus the decoy-`GIT_DIR` run |
+| init `committed_paths` | `process::run_bounded` (`git ls-files -z`) | WIRED | LOCAL_TIMEOUT; ancestor `.git` search makes the monorepo case work (WR-02 test) |
+| init write targets | `sync::refuse_symlink_under` | WIRED | checked before anything is written; exits EXIT_HARD_FAILURE (CR-01 tests) |
+| `copy_template_file` / `rendered_template` / `kept_ancestor` | `refuse_symlink_under(template root)` | WIRED | `test_init_refuses_symlinked_template` |
+| push TypeSafe check | `refuse_symlink_under` on both AGENTS.md paths | WIRED | runs before any read; WR-04 test with curl stub |
+| scan / pull / push reads | `read_if_present(root, path)` → `refuse_symlink_under` | WIRED | `test_pull_refuses_symlinked_template`, `test_push_refuses_symlinked_local_file`, `test_push_does_not_treat_dangling_symlink_as_deletion` |
+| init kept file (no template) | state record | NOT_WIRED | `recorded = None` → no record → push treats it as a publishable local file (gap) |
+
+Earlier links (run_local/run_network, StagedTransaction, merge_texts, check_continuity, rollback_commit, resolve) are covered by the passing unit and e2e tests above; the source around them did not change.
 
 ### Data-Flow Trace (Level 4)
 
-Not applicable. There is no rendered UI. The data the CLI prints comes from state.json and the filesystem, and the probes above exercise it.
+Not applicable: no rendered UI. CLI output comes from state.json and the filesystem, exercised by the probes.
 
 ### Behavioral Spot-Checks
 
 | Behavior | Command | Result | Status |
 |----------|---------|--------|--------|
-| Full suite (one run) | `env -u TYPESAFE_API_KEY cargo test` | 135 unit + 36 e2e passed, exit 0 | ✓ PASS |
+| Full suite (one run) | `env -u TYPESAFE_API_KEY cargo test --workspace` | 136 unit + 50 e2e passed, exit 0 | ✓ PASS |
 | Lint / format | `cargo clippy --workspace --all-targets -- -D warnings`; `cargo fmt --check` | both exit 0 | ✓ PASS |
-| New tests fail without the fix | HEAD tests on 956c5e7 and on fad8cdb source, scratch worktree | as in the table above | ✓ PASS (negative control) |
-| Second-machine scenario through the binary | scratch clones, shared templates, fake HOME/XDG | as in the probe table above | ✓ PASS |
+| Windows target compile | `cargo clippy --target x86_64-pc-windows-msvc --workspace --all-targets -- -D warnings` | exit 0 (check only, nothing linked or run) | ✓ PASS |
+| Review-fix tests bite | 7 named tests on HEAD with the 4 fix commits' src reverse-applied | 7/7 FAILED with assertion panics | ✓ PASS (negative control) |
 | SC1/SC4/SC5 through the binary | scratch project, fake HOME/XDG | as in the truths table | ✓ PASS |
-| Re-init cases A–E | scratch project, fake HOME/XDG | as in truth 9 | ✓ PASS |
-| Doctor check ignores an inherited `GIT_DIR` | decoy pointing at a repo where state.json is untracked | Warning both with and without the decoy | ✓ PASS |
-| Cache-lock serialization | not re-run; `src/sync/` unchanged since it passed at 956c5e7 | - | carried forward |
-| Windows JobObject / lock / state save | n/a | no Windows target on host | ? SKIP → human |
+| Fresh-clone resurrection | two clones, shared templates, HEAD vs 2023d5b binary | HEAD re-creates the deleted template; 2023d5b does not | ✗ FAIL |
+| Debt markers in added lines (cfa26b2..HEAD) | rg `TBD\|FIXME\|XXX\|TODO\|HACK\|todo!(\|unimplemented!(` | none (control line matched) | ✓ PASS |
 
 ### Probe Execution
 
@@ -155,51 +150,50 @@ No `scripts/*/tests/probe-*.sh` exist and no plan declares one. Step 7c: not app
 
 | Requirement | Source Plan | Description | Status | Evidence |
 |-------------|-------------|-------------|--------|----------|
-| SYNC-01 | 01-07 | Tombstones; upstream deletions propagate without resurrection | ✓ SATISFIED | Truths 1, 9, 10 |
-| SYNC-02 | 01-04, 01-06 | Two-phase staging before updating the working tree | ✓ SATISFIED | Truth 2 (per-target temp files under D-05, not a single staging directory); stray `.ude/.tmp*` files are now ignored by git |
-| SYNC-03 | 01-01, 01-02, 01-03 | Bounded git/gh timeouts with cancellation | ✓ SATISFIED (Linux) | Truths 3 and 8; Windows routed to human |
+| SYNC-01 | 01-07 | Tombstones; upstream deletions propagate without resurrection | ✗ BLOCKED (partial) | Truth 1: holds per machine, fails on a fresh clone's first init + push |
+| SYNC-02 | 01-04, 01-06 | Two-phase staging before updating the working tree | ✓ SATISFIED | Truth 2 (per-target temp files under D-05) |
+| SYNC-03 | 01-01, 01-02, 01-03 | Bounded git/gh timeouts with cancellation | ✓ SATISFIED (Linux) | Truths 3, 8; Windows runtime deferred to 999.1 |
 | SYNC-04 | 01-05 | CRLF-normalized SHA-256 fingerprints | ✓ SATISFIED | Truth 4 |
-| SYNC-05 | 01-08, 01-09, 01-10 | `.conflict` files with standard markers, local edits preserved | ✓ SATISFIED | Truths 5 and 9 |
+| SYNC-05 | 01-08, 01-09, 01-10 | `.conflict` files with standard markers, local edits preserved | ✓ SATISFIED | Truth 5 |
 | SYNC-06 | 01-10, 01-11 | Safe push candidates and branch-head continuity | ✓ SATISFIED | Truth 6 |
 
-All six IDs are claimed by at least one plan's `requirements:`. REQUIREMENTS.md maps no other ID to Phase 1, so no requirement is orphaned.
+All six IDs are claimed by plan `requirements:` fields; REQUIREMENTS.md maps no other ID to Phase 1, so nothing is orphaned. REQUIREMENTS.md marks SYNC-01 `[x] Complete`; per this report that is premature.
 
 ### Anti-Patterns Found
 
 | File | Line | Pattern | Severity | Impact |
 |------|------|---------|----------|--------|
-| added lines in src/main.rs, src/audit/mod.rs, gitignore.repo, tests/e2e_lifecycle.rs (956c5e7..HEAD) | - | TBD / FIXME / XXX / TODO / HACK / todo!() / unimplemented!() / placeholder | none found | - |
-| src/audit/mod.rs | `sync_state_tracking_status` | The check covers only "tracked **and** ignored". A tracked state.json in a project whose `.gitignore` lacks the rule reports Pass (probe case 3) | ⚠️ Warning | Init's per-file warning still fires in that case, so the template deletion is still not silent. But the root-cause fix (the ignore rule) and the doctor check both miss projects whose `.gitignore` init kept |
-| src/main.rs | status arm | After the sidecar is hand-deleted, status still says "see .gitignore.conflict" | ℹ️ Info | Wording only; the conflict correctly stays open |
+| src/main.rs | fresh-clone keep / `kept_ancestor` | Kept file with absent template gets no record, and init still prints "sync status compares it with the template" | 🛑 Blocker | Zombie resurrection on push (gap) |
+| src/sync/mod.rs | `read_if_present` via `scan_project` `?` | One symlinked managed file fails status/pull/push for all files (01-REVIEW WR-01) | ⚠️ Warning | Fail-closed, not unsafe; operator deferred it to a todo (5b2841e), no phase owns it |
+| src/main.rs | `committed_paths` | Any ancestor `.git` triggers `git ls-files`; a failure stops init (exit 1) | ℹ️ Info | Deliberate fail-closed; e.g. an unrelated/broken ancestor `.git` blocks init |
+| 01-REVIEW-DISPOSITION.md | IN-01..IN-07 | 7 info findings still `open` (untriaged), incl. IN-01: a local deletion of a templated file deletes the shared `.jinja` template | ℹ️ Info | Not decided either way |
 
 ### Human Verification Required
 
-1. **Windows timeout kill (JobObject).** On Windows, run `cargo check --target x86_64-pc-windows-msvc`, then `ude sync status --remote <unreachable https URL>`. Expected: it returns within about 60 s with the timeout message, and no git processes are left behind. Why human: this host has no Windows target.
-2. **Windows cache lock.** Run two sync commands on the same remote and branch on Windows, then kill the first. Expected: the second waits, then proceeds. Why human: the lock tests are Linux-only.
-3. **Windows state.json replace.** Run `ude sync pull` over an existing state.json on Windows. Expected: the file is replaced and reloads as version 2. Why human: this path has never been compiled or run on Windows.
-
-These three items stay human verification by instruction (WINDOWS.md); none is waived. The 01-01 deadline-boundary sign-off is not here: an orchestrator ruling resolved it (truth 8).
+None. The three Windows checks are operator-waived and backlogged (Phase 999.1), so they are listed as deferred, not as open human checks.
 
 ### Gaps Summary
 
-No gaps block the phase goal. All six roadmap criteria hold at HEAD cfa26b2 on Linux. The 01-REVIEW-REINIT decision finding is closed by its options (a) and (c): init warns per missing tracked file, and the project template ignores state.json. On top of that, status wording changed and doctor gained a check. Option (b), a restore path in init, was not implemented, and none was required.
+One gap, a regression introduced after the previous verification. The fresh-clone keep (42803ee, added so a clone's first init does not overwrite committed files) records no ancestor when the managed file's template no longer exists. That file then reads as a publishable local change, and a plain push re-creates a template that was deleted upstream. This is the phase goal's "zombie file resurrection" and SC1's "without resurrecting on subsequent pushes", reached through the cross-machine path that the per-machine, git-ignored state.json makes normal. The binary just before 42803ee handles the same scenario correctly.
 
-What this does not establish:
-- **Windows:** nothing here covers Windows. The three WINDOWS.md entries are still open.
-- **Crash resilience:** this covers failures and process death before the rename phase. It does not cover a crash or power loss during the rename phase (no fsync and no journal; D-01, accepted as AR-01-02).
-- **Option (c) reaches only template-generated `.gitignore` files:**
-  - A project that had its own `.gitignore` before its first init never gets the state.json rule. Init keeps that file. Pull's three-way merge sees no upstream change against the template ancestor, so it keeps the local file.
-  - In such a project, a plain `git add -A` commits state.json, and doctor reports Pass (probe case 3).
-  - Projects initialized before 1e6615c receive the rule only through a pull of an unmodified `.gitignore`.
-  - In all of these cases the per-file init warning and the status hint are the only protection. After a warning, a plain push still deletes the templates.
-- **`--remote` not probed:** the second-machine probe used a shared local template directory, not a git-backed `--remote` upstream. For a git-backed upstream, the warning's "copy templates/..." path refers to the local template root.
-- **No code review of the new diff:** 01-REVIEW-REINIT.md reviewed up to 956c5e7. Commits 1e6615c and cfa26b2 have not been reviewed. My probes and negative controls cover the behaviour they claim; they are not a diff review.
-- **Untriaged first-review findings:** IN-01..IN-07 are still `open` in 01-REVIEW-DISPOSITION.md. Two of them affect exit codes:
-  - IN-01: a successful push is reported as exit 2 when an escaped descendant holds the pipes.
-  - IN-02: a remote direct push exits 0 when saving state fails after publishing.
-- **Template-logic push guard (re-review W3):** the guard still checks only `.jinja` files. This is latent: no synced, non-`.jinja` template contains `{{`. It is tracked as a pending todo, and no later phase clearly owns it.
+It is close to, but not the same as, the operator-accepted Phase 4 item (a kept edit can be published over an existing template). The todo's proposed fix (kept files become project-only overrides that push skips) would likely cover this case too. If the operator prefers to fold it into that item, it can be accepted with an override like:
+
+```yaml
+overrides:
+  - must_have: "SC1: Deletion of an upstream template propagates locally on `ude sync pull` via state tombstones without resurrecting on subsequent pushes"
+    reason: "Fresh-clone resurrection folded into the Phase 4 'never publish files init kept' todo"
+    accepted_by: "{operator}"
+    accepted_at: "{ISO timestamp}"
+```
+
+What this report does not establish:
+- **Windows:** nothing ran on Windows. Only compile/clippy for the msvc target was cross-checked on Linux.
+- **Crash resilience in the rename phase:** not covered (no fsync, no journal; D-01, accepted as AR-01-02).
+- **`--remote` git-backed upstream:** the fresh-clone probe used a shared local template directory, not a git remote. The code path that decides the record (init) does not depend on the remote type, but this was not run.
+- **Combined reversal:** the review-fix negative control reverted all four fixes at once, so each test is shown to bite on its own target behaviour (assertion text matches), not proven independent of the other three reverts.
+- **Untriaged findings:** IN-01..IN-07 remain `open`.
 
 ---
 
-_Verified: 2026-10-20T01:17:35Z_
+_Verified: 2026-10-20T19:44:58Z_
 _Verifier: Claude (gsd-verifier)_
