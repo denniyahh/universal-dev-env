@@ -2688,3 +2688,266 @@ fn test_project_gitignore_ignores_state_staging_temp_files() {
         "{untracked}"
     );
 }
+
+/// A file outside every project and template tree holding `HOST_SECRET`, standing in
+/// for a host file a planted symlink points at.
+const HOST_SECRET: &str = "HOST_ONLY_SECRET_CONTENT\n";
+
+#[cfg(unix)]
+fn host_secret_file(root: &Path) -> PathBuf {
+    let path = root.join("host_secret");
+    fs::write(&path, HOST_SECRET).unwrap();
+    path
+}
+
+#[cfg(unix)]
+#[test]
+fn test_pull_refuses_symlinked_template() {
+    use std::os::unix::fs::symlink;
+    let temp = tempdir().unwrap();
+    let ude = sync_cli(temp.path());
+    let project = project_with_local_templates(temp.path(), "project");
+    reinit_rust(&ude, &project);
+    let template = project.join(GITCONFIG_TEMPLATE);
+
+    // Negative control: a regular upstream change is pulled.
+    let upstream = append_to(&template, "# upstream change\n");
+    let pull = ude(&project, &["sync", "pull"]);
+    assert_eq!(pull.status.code(), Some(0), "{}", outputs(&pull));
+    assert_eq!(
+        fs::read_to_string(project.join(".gitconfig")).unwrap(),
+        upstream
+    );
+
+    // The template becomes a symlink to a host file.
+    fs::remove_file(&template).unwrap();
+    symlink(host_secret_file(temp.path()), &template).unwrap();
+    let pull = ude(&project, &["sync", "pull"]);
+    let text = outputs(&pull);
+    assert_eq!(pull.status.code(), Some(2), "{text}");
+    assert!(text.contains("symlink"), "{text}");
+    assert_eq!(
+        fs::read_to_string(project.join(".gitconfig")).unwrap(),
+        upstream,
+        "pull copied the symlink target into the project"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_init_refuses_symlinked_template() {
+    use std::os::unix::fs::symlink;
+    let temp = tempdir().unwrap();
+    let ude = sync_cli(temp.path());
+    let project = project_with_local_templates(temp.path(), "project");
+    let template = project.join(GITCONFIG_TEMPLATE);
+    fs::remove_file(&template).unwrap();
+    symlink(host_secret_file(temp.path()), &template).unwrap();
+
+    let path = project.to_string_lossy().to_string();
+    let init = ude(&project, &["init", "--path", &path, "--type", "rust"]);
+    let text = outputs(&init);
+    assert_ne!(init.status.code(), Some(0), "{text}");
+    assert!(text.contains("symlink"), "{text}");
+    let written = fs::read_to_string(project.join(".gitconfig")).unwrap_or_default();
+    assert!(!written.contains("HOST_ONLY_SECRET"), "{written}");
+}
+
+#[cfg(unix)]
+#[test]
+fn test_push_refuses_symlinked_local_file() {
+    use std::os::unix::fs::symlink;
+    let temp = tempdir().unwrap();
+    let ude = sync_cli(temp.path());
+    let project = project_with_local_templates(temp.path(), "project");
+    reinit_rust(&ude, &project);
+    let template = project.join(GITCONFIG_TEMPLATE);
+    let before = fs::read_to_string(&template).unwrap();
+
+    let local = project.join(".gitconfig");
+    fs::remove_file(&local).unwrap();
+    symlink(host_secret_file(temp.path()), &local).unwrap();
+    let push = ude(&project, &["sync", "push"]);
+    let text = outputs(&push);
+    assert_eq!(push.status.code(), Some(2), "{text}");
+    assert!(text.contains("symlink"), "{text}");
+    assert_eq!(
+        fs::read_to_string(&template).unwrap(),
+        before,
+        "push published the symlink target"
+    );
+
+    // Negative control: the same edit as a regular file is published.
+    fs::remove_file(&local).unwrap();
+    let edited = format!("{before}# local edit\n");
+    fs::write(&local, &edited).unwrap();
+    let push = ude(&project, &["sync", "push"]);
+    assert_eq!(push.status.code(), Some(0), "{}", outputs(&push));
+    assert_eq!(fs::read_to_string(&template).unwrap(), edited);
+}
+
+#[cfg(unix)]
+#[test]
+fn test_push_does_not_treat_dangling_symlink_as_deletion() {
+    use std::os::unix::fs::symlink;
+    let temp = tempdir().unwrap();
+    let ude = sync_cli(temp.path());
+    let project = project_with_local_templates(temp.path(), "project");
+    reinit_rust(&ude, &project);
+
+    let hook = project.join("scripts/hooks/pre-push");
+    fs::remove_file(&hook).unwrap();
+    symlink(temp.path().join("does-not-exist"), &hook).unwrap();
+    let push = ude(&project, &["sync", "push"]);
+    let text = outputs(&push);
+    assert_eq!(push.status.code(), Some(2), "{text}");
+    assert!(text.contains("symlink"), "{text}");
+    assert!(
+        project.join(PRE_PUSH_TEMPLATE).exists(),
+        "a dangling symlink was propagated as a deletion: {text}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_dangling_state_symlink_fails_loudly() {
+    use std::os::unix::fs::symlink;
+    let temp = tempdir().unwrap();
+    let ude = sync_cli(temp.path());
+    let project = project_with_local_templates(temp.path(), "project");
+    reinit_rust(&ude, &project);
+
+    let state = project.join(".ude/state.json");
+    fs::remove_file(&state).unwrap();
+    // Negative control: no state file at all is a fresh project, not an error.
+    let status = ude(&project, &["sync", "status"]);
+    assert_eq!(status.status.code(), Some(0), "{}", outputs(&status));
+
+    symlink(temp.path().join("does-not-exist"), &state).unwrap();
+    let status = ude(&project, &["sync", "status"]);
+    let text = outputs(&status);
+    assert_eq!(status.status.code(), Some(2), "{text}");
+    assert!(text.contains("symlink"), "{text}");
+}
+
+#[test]
+fn test_first_init_on_fresh_clone_keeps_committed_edits() {
+    let temp = tempdir().unwrap();
+    let git = GitFixture::new();
+    let ude = sync_cli(temp.path());
+    let machine_a = project_with_local_templates(temp.path(), "machine_a");
+    git.run(temp.path(), &["init", "-q", &machine_a.to_string_lossy()]);
+    reinit_rust(&ude, &machine_a);
+    git.run(&machine_a, &["add", "-A"]);
+    commit_without_project_hooks(&git, &machine_a, "chore: init");
+
+    // Committed edits on machine A: a copied file and a rendered one.
+    let gitconfig = append_to(&machine_a.join(".gitconfig"), "[alias]\n\tco = checkout\n");
+    let mise = append_to(&machine_a.join("mise.toml"), "# team task\n");
+    git.run(&machine_a, &["add", "-A"]);
+    commit_without_project_hooks(&git, &machine_a, "chore: team edits");
+    let status_a = outputs(&ude(&machine_a, &["sync", "status"]));
+    assert!(
+        line_with(&status_a, ".gitconfig:").contains("Locally Modified"),
+        "{status_a}"
+    );
+
+    // Machine B clones; state.json is per machine, so B has no records.
+    let machine_b = temp.path().join("machine_b");
+    git.run(
+        temp.path(),
+        &[
+            "clone",
+            "-q",
+            &machine_a.to_string_lossy(),
+            &machine_b.to_string_lossy(),
+        ],
+    );
+    assert!(!machine_b.join(".ude/state.json").exists());
+    let init = init_output(&ude, &machine_b);
+
+    assert_eq!(
+        fs::read_to_string(machine_b.join(".gitconfig")).unwrap(),
+        gitconfig,
+        "init overwrote a committed edit: {init}"
+    );
+    assert_eq!(
+        fs::read_to_string(machine_b.join("mise.toml")).unwrap(),
+        mise,
+        "init overwrote a committed edit: {init}"
+    );
+    assert!(init.contains("Kept committed .gitconfig"), "{init}");
+    let diff = git.output(&machine_b, &["diff", "--name-only"]);
+    assert!(diff.is_empty(), "init changed committed files: {diff}");
+
+    // B sees what A sees: the edits as local modifications, the rest in sync.
+    let status_b = outputs(&ude(&machine_b, &["sync", "status"]));
+    assert!(
+        line_with(&status_b, ".gitconfig:").contains("Locally Modified"),
+        "{status_b}"
+    );
+    assert!(
+        line_with(&status_b, "mise.toml:").contains("Locally Modified"),
+        "{status_b}"
+    );
+    // Negative control: unedited committed files (copied and rendered) stay in sync.
+    assert!(
+        line_with(&status_b, "scripts/hooks/pre-push:").contains("In Sync"),
+        "{status_b}"
+    );
+    assert!(
+        line_with(&status_b, ".agents/AGENTS.md:").contains("In Sync"),
+        "{status_b}"
+    );
+}
+
+#[test]
+fn test_reinit_missing_file_warning_follows_upstream() {
+    let temp = tempdir().unwrap();
+    let ude = sync_cli(temp.path());
+    let project = project_with_local_templates(temp.path(), "project");
+    reinit_rust(&ude, &project);
+
+    // pre-push: deleted locally, changed upstream. commit-msg: deleted on both sides.
+    // pre-commit: deleted locally only.
+    for hook in ["pre-push", "commit-msg", "pre-commit"] {
+        fs::remove_file(project.join("scripts/hooks").join(hook)).unwrap();
+    }
+    let upstream = append_to(&project.join(PRE_PUSH_TEMPLATE), "# upstream change\n");
+    fs::remove_file(project.join(COMMIT_MSG_TEMPLATE)).unwrap();
+
+    let init = init_output(&ude, &project);
+    let conflicted = line_with(&init, "scripts/hooks/pre-push is tracked but missing");
+    assert!(
+        conflicted.contains("skips it as a conflict") && !conflicted.contains("will delete"),
+        "{init}"
+    );
+    let both = line_with(&init, "scripts/hooks/commit-msg is tracked but missing");
+    assert!(
+        both.contains("deletes nothing") && !both.contains("will delete"),
+        "{init}"
+    );
+    assert!(
+        !init.contains("projects/generic/hooks/commit-msg"),
+        "the remedy names a template that no longer exists: {init}"
+    );
+    // Negative control: a plain local deletion still warns that push deletes.
+    assert!(
+        line_with(&init, "scripts/hooks/pre-commit is tracked but missing")
+            .contains("a plain ude sync push will delete its shared template"),
+        "{init}"
+    );
+
+    let push = ude(&project, &["sync", "push"]);
+    assert_eq!(
+        fs::read_to_string(project.join(PRE_PUSH_TEMPLATE)).unwrap(),
+        upstream,
+        "{}",
+        outputs(&push)
+    );
+    assert!(
+        !project.join(PRE_COMMIT_TEMPLATE).exists(),
+        "{}",
+        outputs(&push)
+    );
+}
