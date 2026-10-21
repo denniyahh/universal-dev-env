@@ -21,7 +21,7 @@ findings:
     title: "`--type generic` (or `\"\"`) records a type that sync renders differently; mise.toml reads \"Upstream Updated\" right after init"
   - id: WR-02
     severity: warning
-    disposition: open
+    disposition: fixed
     title: "pre-push now blocks every push when the advisory database cannot be fetched"
   - id: WR-03
     severity: warning
@@ -59,9 +59,9 @@ findings:
     severity: warning
     disposition: fixed
     title: "The TypeSafe drift check reads `.agents/AGENTS.md` through symlinks and sends it to the external API before push's symlink refusal runs"
-open: 1
+open: 0
 total: 14
-recorded: 2026-10-21T18:06:23.443Z
+recorded: 2026-10-21T19:57:44.693Z
 ---
 
 # Phase 01: Code Review Disposition
@@ -72,7 +72,7 @@ recorded: 2026-10-21T18:06:23.443Z
 | CR-02 | critical | fixed | 464bfc4: a templates dir counts only with projects/generic; sync without a remote exits 2 when none is found; e2e test_sync_ignores_a_project_templates_dir_that_is_not_ude |
 | CR-03 | critical | fixed | 3249d70: a parent repo git recognises but cannot read stops init; e2e test_init_fails_when_parent_repo_index_is_unreadable (control: empty parent .git still ignored); dubious ownership untested (needs a second uid) |
 | WR-01 | warning | fixed | db2e1a8: init records the rendered type; e2e test_init_records_the_detected_type_for_generic |
-| WR-02 | warning | open | - |
+| WR-02 | warning | fixed | b18ffc9 (operator chose cache fallback 2026-10-21): advisories re-run with --offline when only the fetch fails, with a stale-cache warning; verified online 0, offline+cache 0, offline+no cache 1 |
 | WR-03 | warning | fixed | 6b0a2d3: a failed state save exits 2; e2e test_init_fails_when_state_cannot_be_saved |
 | IN-01 | info | fixed | 7e44cf1: every init failure exits 2 |
 | IN-02 | info | fixed | 8b41fcb: --type validated (rust, node, polyglot, generic); the rust fallback for a fresh clone is the documented default and is unchanged |
