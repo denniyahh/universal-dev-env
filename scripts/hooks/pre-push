@@ -2,6 +2,8 @@
 # Dependency policy (deny.toml) with the cargo-deny version pinned in mise.toml.
 # Every check blocks the push, advisories included; an advisory that cannot be
 # fixed yet must be listed under [advisories] ignore in deny.toml with a reason.
+# It checks the working tree's Cargo.lock, not the commits being pushed, so an
+# uncommitted lockfile edit (or pushing another ref) is judged on the wrong graph.
 set -euo pipefail
 
 # Hooks started from GUI clients may not inherit the login PATH.
