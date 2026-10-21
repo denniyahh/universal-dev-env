@@ -1821,6 +1821,10 @@ fn test_edited_file_with_template_the_remote_never_had_is_missing_upstream() {
 
     let status = outputs(&ude(&project, &["sync", "status", "--remote", &remote_url]));
     assert!(status.contains(".gitconfig: Missing upstream"), "{status}");
+    assert!(
+        line_with(&status, ".gitconfig: Missing upstream").contains("push never publishes it"),
+        "{status}"
+    );
     let pull = ude(&project, &["sync", "pull", "--remote", &remote_url]);
     assert_eq!(pull.status.code(), Some(0), "{}", outputs(&pull));
     assert!(
@@ -1838,9 +1842,38 @@ fn test_edited_file_with_template_the_remote_never_had_is_missing_upstream() {
     let push_text = outputs(&push);
     assert_eq!(push.status.code(), Some(0), "{push_text}");
     assert!(!push_text.contains("unresolved conflict"), "{push_text}");
+    assert!(
+        line_with(&push_text, ".gitconfig:").contains("push never publishes it"),
+        "{push_text}"
+    );
     assert_eq!(
         git.output(&remote, &["rev-parse", "refs/heads/main"]),
         head_before
+    );
+}
+
+#[test]
+fn test_push_names_the_shared_template_in_remote_mode() {
+    let temp = tempdir().unwrap();
+    let bin = env!("CARGO_BIN_EXE_ude");
+    let git = GitFixture::new();
+    let ude = sync_cli(temp.path());
+    let project = temp.path().join("project");
+    init_rust_project(bin, &project);
+    // The real template tree, so mise.toml's template has logic.
+    let remote = seed_full_template_remote(&git, temp.path(), "remote");
+    let remote_url = remote.to_string_lossy().to_string();
+    fs::remove_file(project.join("mise.toml")).unwrap();
+
+    let push = ude(&project, &["sync", "push", "--remote", &remote_url]);
+    let text = outputs(&push);
+    assert_eq!(push.status.code(), Some(1), "{text}");
+    // Not the cache checkout's copy, which lives under the test's temp dir.
+    let skip = line_with(&text, "mise.toml: upstream template");
+    assert!(skip.contains("projects/agents/mise.toml.jinja"), "{text}");
+    assert!(
+        !skip.contains(&temp.path().to_string_lossy().to_string()),
+        "{text}"
     );
 }
 
@@ -3347,7 +3380,7 @@ fn test_scan_failure_is_not_reported_as_a_state_file_error() {
     fs::remove_file(project.join(".gitconfig")).unwrap();
     std::os::unix::fs::symlink(&outside, project.join(".gitconfig")).unwrap();
 
-    for action in ["status", "pull"] {
+    for action in ["status", "pull", "push"] {
         let out = ude(&project, &["sync", action]);
         let text = outputs(&out);
         assert_eq!(out.status.code(), Some(2), "{action}: {text}");

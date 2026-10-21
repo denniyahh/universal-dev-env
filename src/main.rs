@@ -865,7 +865,7 @@ fn main() {
                             }
                             sync::SyncStatus::MissingUpstream => {
                                 println!(
-                                    "  {} {}: Missing upstream (this remote never had its template; pull keeps it)",
+                                    "  {} {}: Missing upstream (this remote never had its template; pull keeps it, push never publishes it)",
                                     "ℹ".blue(),
                                     s.relative_path.display()
                                 );
@@ -1153,6 +1153,7 @@ fn main() {
                             skipped_merged,
                             skipped_boundary,
                             skipped_templates,
+                            skipped_missing_upstream,
                         } => {
                             println!(
                                 "  {} Sanitization gate passed: clean of secrets & parameters applied.",
@@ -1202,6 +1203,13 @@ fn main() {
                                     ),
                                 };
                                 eprintln!("  {} {}: {change}, {reason}", "✗".red(), file.display());
+                            }
+                            for file in &skipped_missing_upstream {
+                                println!(
+                                    "  {} {}: its template is missing from this remote, so push never publishes it",
+                                    "ℹ".blue(),
+                                    file.display()
+                                );
                             }
                             for file in &skipped_templates {
                                 let template = sync::map_to_upstream(&root_template_dir, file)
@@ -1316,6 +1324,13 @@ fn main() {
                                 reason
                             );
                             std::process::exit(1);
+                        }
+                        sync::PushResult::ScanFailed { reason } => {
+                            eprintln!(
+                                "  {} Push failed: could not compare the project with upstream: {reason}",
+                                "✗".red()
+                            );
+                            std::process::exit(EXIT_HARD_FAILURE);
                         }
                         sync::PushResult::IoFailed { path, reason } => {
                             eprintln!(
