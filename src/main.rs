@@ -595,7 +595,7 @@ fn main() {
             for rel in &kept_committed {
                 if unmanaged_kept.contains(rel) {
                     println!(
-                        "  {} Kept committed {} (not overwritten); no shared template, so sync leaves it unmanaged",
+                        "  {} Kept committed {} (not overwritten); no shared template, so sync leaves it unmanaged until one is published",
                         "✓".green(),
                         rel.display()
                     );
@@ -609,7 +609,7 @@ fn main() {
             }
             for rel in &unmanaged_local {
                 println!(
-                    "  {} Kept existing {} (not overwritten); no shared template, so sync leaves it unmanaged",
+                    "  {} Kept existing {} (not overwritten); no shared template, so sync leaves it unmanaged until one is published",
                     "✓".green(),
                     rel.display()
                 );
@@ -840,7 +840,7 @@ fn main() {
                             }
                             sync::SyncStatus::Unmanaged => {
                                 println!(
-                                    "  {} {}: Unmanaged (deleted upstream; kept locally, never republished)",
+                                    "  {} {}: Unmanaged (no shared template; kept locally, never published)",
                                     "ℹ".blue(),
                                     s.relative_path.display()
                                 );

@@ -3286,10 +3286,11 @@ fn test_init_leaves_uncommitted_file_without_template_unmanaged() {
 
     reinit_rust(&ude, &project);
     let status = outputs(&ude(&project, &["sync", "status"]));
-    assert!(
-        line_with(&status, "check-in-container.sh:").contains("Unmanaged"),
-        "{status}"
-    );
+    let line = line_with(&status, "check-in-container.sh:");
+    assert!(line.contains("Unmanaged"), "{status}");
+    // The template never existed, so status must not claim it was deleted upstream.
+    assert!(line.contains("no shared template"), "{status}");
+    assert!(!line.contains("deleted upstream"), "{status}");
     let pull = ude(&project, &["sync", "pull"]);
     assert_eq!(pull.status.code(), Some(0), "{}", outputs(&pull));
     assert_eq!(
