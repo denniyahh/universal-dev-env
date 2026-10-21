@@ -779,7 +779,10 @@ fn main() {
                     ) {
                         Ok(states) => states,
                         Err(e) => {
-                            eprintln!("  {} Failed to read sync state: {e}", "✗".red());
+                            eprintln!(
+                                "  {} Status failed: could not compare the project with upstream: {e}",
+                                "✗".red()
+                            );
                             std::process::exit(EXIT_HARD_FAILURE);
                         }
                     };
@@ -1004,6 +1007,13 @@ fn main() {
                             if !report.conflicts.is_empty() {
                                 std::process::exit(EXIT_DRIFT);
                             }
+                        }
+                        sync::PullResult::ScanFailed { reason } => {
+                            eprintln!(
+                                "  {} Pull failed: could not compare the project with upstream: {reason}",
+                                "✗".red()
+                            );
+                            std::process::exit(EXIT_HARD_FAILURE);
                         }
                         sync::PullResult::IoFailed { path, reason } => {
                             eprintln!(

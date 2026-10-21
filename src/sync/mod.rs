@@ -162,7 +162,15 @@ pub struct PullReport {
 #[derive(Debug, PartialEq, Eq)]
 pub enum PullResult {
     Success(PullReport),
-    IoFailed { path: PathBuf, reason: String },
+    IoFailed {
+        path: PathBuf,
+        reason: String,
+    },
+    /// The project could not be compared with upstream (state, a refused path, or the
+    /// remote's history); nothing was changed.
+    ScanFailed {
+        reason: String,
+    },
 }
 
 /// Permission bits a conflict sidecar may take from its local file: execute bits are
@@ -984,7 +992,7 @@ impl SyncEngine {
     ) -> PullResult {
         let states = match self.scan_project(local_root, upstream_root, Some(ctx)) {
             Ok(states) => states,
-            Err(reason) => return state_pull_failure(reason),
+            Err(reason) => return PullResult::ScanFailed { reason },
         };
         let renderer = crate::template::TemplateRenderer::new();
 
@@ -4958,7 +4966,7 @@ mod tests {
 
         let result = engine.pull_updates(local.path(), upstream.path(), &ctx);
         assert!(
-            matches!(&result, PullResult::IoFailed { reason, .. } if reason.contains("gitconfig.repo")),
+            matches!(&result, PullResult::ScanFailed { reason } if reason.contains("gitconfig.repo")),
             "{result:?}"
         );
         assert_eq!(
@@ -7047,7 +7055,7 @@ mod tests {
         #[cfg(unix)]
         {
             assert!(
-                matches!(res, PullResult::IoFailed { ref reason, .. } if reason.contains("symlink")),
+                matches!(res, PullResult::ScanFailed { ref reason } if reason.contains("symlink")),
                 "pull_updates must fail when target is a symlink: {:?}",
                 res
             );

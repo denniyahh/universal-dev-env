@@ -3321,6 +3321,38 @@ fn test_typesafe_key_is_not_passed_on_the_curl_command_line() {
 
 #[cfg(unix)]
 #[test]
+fn test_scan_failure_is_not_reported_as_a_state_file_error() {
+    let temp = tempdir().unwrap();
+    let ude = sync_cli(temp.path());
+    let project = project_with_local_templates(temp.path(), "project");
+    reinit_rust(&ude, &project);
+    let outside = temp.path().join("outside");
+    fs::write(&outside, "[core]\n").unwrap();
+    fs::remove_file(project.join(".gitconfig")).unwrap();
+    std::os::unix::fs::symlink(&outside, project.join(".gitconfig")).unwrap();
+
+    for action in ["status", "pull"] {
+        let out = ude(&project, &["sync", action]);
+        let text = outputs(&out);
+        assert_eq!(out.status.code(), Some(2), "{action}: {text}");
+        assert!(
+            text.contains("could not compare the project with upstream"),
+            "{action}: {text}"
+        );
+        assert!(text.contains("symlink"), "{action}: {text}");
+        assert!(
+            !text.contains("I/O error on .ude/state.json"),
+            "{action}: {text}"
+        );
+        assert!(
+            !text.contains("Failed to read sync state"),
+            "{action}: {text}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
 fn test_push_does_not_treat_dangling_symlink_as_deletion() {
     use std::os::unix::fs::symlink;
     let temp = tempdir().unwrap();
