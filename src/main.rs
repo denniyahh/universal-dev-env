@@ -823,15 +823,21 @@ fn main() {
                                 );
                             }
                             sync::SyncStatus::LocalDeleted => {
-                                let hint = match push_boundary(&s.relative_path) {
-                                    PushBoundary::Publishable => {
-                                        "push to propagate; push deletes the shared template, restore the file to keep it"
+                                let logic_template =
+                                    logic_template(&root_template_dir, &s.relative_path);
+                                let hint = match (push_boundary(&s.relative_path), logic_template) {
+                                    (PushBoundary::Never, _) => {
+                                        "local-only path, push never publishes it; restore it to clear".to_string()
                                     }
-                                    PushBoundary::ForceOnly => {
-                                        "push with --force to propagate; that deletes the shared template, restore the file to keep it"
+                                    (_, Some(template)) => format!(
+                                        "push skips it: its template has logic; {}",
+                                        deletion_logic_remedy(&template)
+                                    ),
+                                    (PushBoundary::Publishable, None) => {
+                                        "push to propagate; push deletes the shared template, restore the file to keep it".to_string()
                                     }
-                                    PushBoundary::Never => {
-                                        "local-only path, push never publishes it; restore it to clear"
+                                    (PushBoundary::ForceOnly, None) => {
+                                        "push with --force to propagate; that deletes the shared template, restore the file to keep it".to_string()
                                     }
                                 };
                                 println!(
@@ -1143,6 +1149,16 @@ fn main() {
                             for file in &skipped_templates {
                                 let template = sync::map_to_upstream(&root_template_dir, file)
                                     .unwrap_or_else(|| file.clone());
+                                if fs::symlink_metadata(local_project.join(file)).is_err() {
+                                    eprintln!(
+                                        "  {} {}: upstream template {} contains template logic; deleting it would remove it for every project; skipped ({})",
+                                        "✗".red(),
+                                        file.display(),
+                                        template.display(),
+                                        deletion_logic_remedy(&template)
+                                    );
+                                    continue;
+                                }
                                 eprintln!(
                                     "  {} {}: upstream template {} contains template logic that a push of the rendered file would erase; skipped ({})",
                                     "✗".red(),
@@ -1312,6 +1328,20 @@ fn locally_modified_hint(template_root: &Path, file: &Path) -> String {
 
 /// Where a local edit of `file` can go when push skips it because its upstream
 /// `template` has template logic.
+/// The upstream template of `file` when it has template logic, which push never deletes.
+fn logic_template(template_root: &Path, file: &Path) -> Option<PathBuf> {
+    sync::map_to_upstream(template_root, file)
+        .filter(|template| sync::template_has_logic(template).unwrap_or(false))
+}
+
+/// What to do about a local deletion that push skips because the template has logic.
+fn deletion_logic_remedy(template: &Path) -> String {
+    format!(
+        "restore the file to keep it; to remove it for every project, delete {} upstream",
+        template.display()
+    )
+}
+
 fn template_logic_remedy(file: &Path, template: &Path) -> String {
     let local = sync::local_override_path(file);
     let project_only = if file == Path::new("mise.toml") {
@@ -1374,9 +1404,15 @@ fn print_missing_tracked_warning(
         );
         return;
     }
+    let has_logic = template_root
+        .and_then(|root| logic_template(root, rel))
+        .is_some();
     let consequence = match push_boundary(rel) {
         _ if status == Some(&sync::SyncStatus::Conflicted) => {
             "its shared template changed since it was recorded, so ude sync push skips it as a conflict and ude sync pull records the conflict"
+        }
+        PushBoundary::Publishable | PushBoundary::ForceOnly if has_logic => {
+            "ude sync push skips the deletion because its shared template has logic"
         }
         PushBoundary::Publishable => "a plain ude sync push will delete its shared template",
         PushBoundary::ForceOnly => {

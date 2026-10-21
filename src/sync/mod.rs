@@ -1258,8 +1258,12 @@ impl SyncEngine {
 
             let upstream_target = map_to_upstream(upstream_root, &state.relative_path);
 
-            // Gate 2: never replace template logic with rendered text (CR-02).
-            if state.status == SyncStatus::LocallyModified {
+            // Gate 2: never replace template logic with rendered text (CR-02), and never
+            // delete it: one project's deletion would remove it for every project.
+            if matches!(
+                state.status,
+                SyncStatus::LocallyModified | SyncStatus::LocalDeleted
+            ) {
                 match upstream_target.as_deref().map(template_has_logic) {
                     Some(Ok(true)) => {
                         skipped_templates.push(state.relative_path.clone());

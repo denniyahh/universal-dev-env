@@ -2020,6 +2020,51 @@ fn line_with<'a>(text: &'a str, needle: &str) -> &'a str {
 }
 
 #[test]
+fn test_push_never_deletes_a_template_with_logic() {
+    let temp = tempdir().unwrap();
+    let ude = sync_cli(temp.path());
+    let project = project_with_local_templates(temp.path(), "project");
+    reinit_rust(&ude, &project);
+    fs::remove_file(project.join("mise.toml")).unwrap();
+    // Negative control: a template without logic is still deleted by push (D-14).
+    fs::remove_file(project.join(".gitconfig")).unwrap();
+
+    let path = project.to_string_lossy().to_string();
+    let init = outputs(&ude(&project, &["init", "--path", &path, "--type", "rust"]));
+    let init_line = line_with(&init, "mise.toml is tracked but missing");
+    assert!(init_line.contains("push skips the deletion"), "{init}");
+    assert!(
+        line_with(&init, ".gitconfig is tracked but missing").contains("will delete"),
+        "{init}"
+    );
+    let status = outputs(&ude(&project, &["sync", "status"]));
+    let mise_line = line_with(&status, "mise.toml: Deleted locally");
+    assert!(
+        mise_line.contains("push skips it: its template has logic"),
+        "{status}"
+    );
+    assert!(
+        line_with(&status, ".gitconfig: Deleted locally")
+            .contains("push deletes the shared template"),
+        "{status}"
+    );
+
+    let push = ude(&project, &["sync", "push"]);
+    let text = outputs(&push);
+    assert_eq!(push.status.code(), Some(1), "{text}");
+    assert!(
+        line_with(&text, "mise.toml: upstream template")
+            .contains("deleting it would remove it for every project"),
+        "{text}"
+    );
+    assert!(
+        project.join(MISE_TEMPLATE).exists(),
+        "push deleted a template with logic"
+    );
+    assert!(!project.join(GITCONFIG_TEMPLATE).exists(), "{text}");
+}
+
+#[test]
 fn test_status_and_push_agree_on_edit_under_template_logic() {
     let bin = env!("CARGO_BIN_EXE_ude");
     let temp = tempdir().unwrap();
@@ -2570,9 +2615,11 @@ fn test_reinit_missing_file_warning_follows_push_boundary() {
         scratch.contains("never publishes") && !scratch.contains("will delete"),
         "{init}"
     );
+    // mise.toml's template has logic, which push never deletes (a plain-delete
+    // template is covered by test_push_never_deletes_a_template_with_logic).
     let mise = line_with(&init, "mise.toml is tracked but missing");
     assert!(
-        mise.contains("a plain ude sync push will delete its shared template"),
+        mise.contains("push skips the deletion") && !mise.contains("will delete"),
         "{init}"
     );
     for rel in [".agents/AGENTS.md", "scratch/new-worktree.sh", "mise.toml"] {
@@ -2595,7 +2642,7 @@ fn test_reinit_missing_file_warning_follows_push_boundary() {
         "{}",
         outputs(&push)
     );
-    assert!(!project.join(MISE_TEMPLATE).exists(), "{}", outputs(&push));
+    assert!(project.join(MISE_TEMPLATE).exists(), "{}", outputs(&push));
 }
 
 #[test]
