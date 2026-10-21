@@ -1123,13 +1123,15 @@ fn test_sync_pull_conflict_exits_1_and_writes_sidecar() {
         format!("{stdout}{stderr}").contains("ude sync resolve mise.toml"),
         "pull output must point at the resolve command. Out: {stdout}\nErr: {stderr}"
     );
-    // D-12 through the CLI: .gitconfig is unchanged locally and absent from the remote.
+    // .gitconfig is unchanged locally and absent from a remote that never had it, so
+    // pull keeps it (deletion needs the remote's history to show it; see
+    // test_pull_deletes_only_templates_the_remote_history_deleted for D-12).
     assert!(
-        !project.join(".gitconfig").exists(),
-        ".gitconfig must be removed. Out: {stdout}"
+        project.join(".gitconfig").exists(),
+        ".gitconfig must be kept. Out: {stdout}"
     );
     assert!(
-        stdout.contains("Removed .gitconfig (deleted upstream)"),
+        stdout.contains("Kept .gitconfig: its template is missing from this remote"),
         "Out: {stdout}"
     );
     // Negative control for that part: the conflicted file is not removed.
@@ -1679,6 +1681,87 @@ fn test_sync_refuses_a_remote_that_is_not_a_template_repo() {
             git.output(&bare, &["rev-parse", "refs/heads/main"]),
             head_before,
             "{name}"
+        );
+    }
+}
+
+#[test]
+fn test_pull_deletes_only_templates_the_remote_history_deleted() {
+    let temp = tempdir().unwrap();
+    let bin = env!("CARGO_BIN_EXE_ude");
+    let git = GitFixture::new();
+    let ude = sync_cli(temp.path());
+
+    // A full template remote whose history deletes the .gitconfig template.
+    let full = seed_full_template_remote(&git, temp.path(), "full");
+    let full_url = full.to_string_lossy().to_string();
+    let seed = temp.path().join("full-seed");
+    git.run(&seed, &["rm", "-q", GITCONFIG_TEMPLATE]);
+    git.run(&seed, &["commit", "-q", "-m", "delete gitconfig template"]);
+    // A later commit puts the deletion beyond the cache's depth-1 clone, so confirming
+    // it needs the full history.
+    fs::write(seed.join("README.md"), "later change\n").unwrap();
+    git.run(&seed, &["add", "README.md"]);
+    git.run(&seed, &["commit", "-q", "-m", "later change"]);
+    git.run(&seed, &["push", "-q", &full_url, "main"]);
+    let deleted = temp.path().join("deleted");
+    init_rust_project(bin, &deleted);
+    // file:// makes the cache clone really shallow (git ignores --depth for a plain path).
+    let full_sync_url = format!("file://{}", full.display());
+    let status = outputs(&ude(
+        &deleted,
+        &["sync", "status", "--remote", &full_sync_url],
+    ));
+    assert!(status.contains(".gitconfig: Deleted upstream"), "{status}");
+    let pull = ude(&deleted, &["sync", "pull", "--remote", &full_sync_url]);
+    assert_eq!(pull.status.code(), Some(0), "{}", outputs(&pull));
+    assert!(!deleted.join(".gitconfig").exists(), "{}", outputs(&pull));
+
+    // A remote that holds one template and never had the others.
+    let thin = temp.path().join("thin.git");
+    let thin_url = thin.to_string_lossy().to_string();
+    git.run(
+        temp.path(),
+        &["init", "--bare", "-q", "-b", "main", &thin_url],
+    );
+    let thin_seed = temp.path().join("thin-seed");
+    git.run(
+        temp.path(),
+        &["init", "-q", "-b", "main", &thin_seed.to_string_lossy()],
+    );
+    copy_repo_templates(&temp.path().join("all-templates"));
+    let hook = thin_seed.join(PRE_COMMIT_TEMPLATE);
+    fs::create_dir_all(hook.parent().unwrap()).unwrap();
+    fs::copy(
+        temp.path()
+            .join("all-templates/projects/generic/hooks/pre-commit"),
+        &hook,
+    )
+    .unwrap();
+    git.run(&thin_seed, &["add", "-A"]);
+    git.run(&thin_seed, &["commit", "-q", "-m", "seed"]);
+    git.run(&thin_seed, &["push", "-q", &thin_url, "main"]);
+    let kept = temp.path().join("kept");
+    init_rust_project(bin, &kept);
+    let status = outputs(&ude(&kept, &["sync", "status", "--remote", &thin_url]));
+    assert!(!status.contains("Deleted upstream"), "{status}");
+    assert!(status.contains(".gitconfig: Missing upstream"), "{status}");
+    assert!(
+        status.contains("scripts/hooks/pre-commit: In Sync"),
+        "{status}"
+    );
+    let pull = ude(&kept, &["sync", "pull", "--remote", &thin_url]);
+    assert_eq!(pull.status.code(), Some(0), "{}", outputs(&pull));
+    for rel in [
+        ".gitconfig",
+        "mise.toml",
+        ".agents/AGENTS.md",
+        "scripts/hooks/pre-push",
+    ] {
+        assert!(
+            kept.join(rel).exists(),
+            "pull deleted {rel}: {}",
+            outputs(&pull)
         );
     }
 }
