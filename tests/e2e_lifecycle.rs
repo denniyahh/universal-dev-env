@@ -3398,6 +3398,22 @@ fn test_init_fails_when_state_cannot_be_saved() {
 }
 
 #[test]
+fn test_init_records_the_detected_type_for_generic() {
+    let temp = tempdir().unwrap();
+    let ude = sync_cli(temp.path());
+    let project = project_with_local_templates(temp.path(), "project");
+    fs::write(project.join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
+
+    let path = project.to_string_lossy().to_string();
+    let init = ude(&project, &["init", "--path", &path, "--type", "generic"]);
+    assert_eq!(init.status.code(), Some(0), "{}", outputs(&init));
+    let status = outputs(&ude(&project, &["sync", "status"]));
+    assert!(status.contains("mise.toml: In Sync"), "{status}");
+    let state = fs::read_to_string(project.join(".ude/state.json")).unwrap();
+    assert!(state.contains("\"project_type\": \"rust\""), "{state}");
+}
+
+#[test]
 fn test_init_fails_on_unusable_git_dir_in_project() {
     // Negative control for the case above: the project's own .git must work.
     let temp = tempdir().unwrap();
