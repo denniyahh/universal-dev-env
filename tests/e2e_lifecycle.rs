@@ -1636,39 +1636,51 @@ fn test_sync_refuses_a_remote_that_is_not_a_template_repo() {
     let project = temp.path().join("project");
     init_rust_project(bin, &project);
     let gitconfig = fs::read(project.join(".gitconfig")).unwrap();
-    // A repository that is not a ude template tree: no projects/ at its root or under
-    // templates/.
-    let bare = temp.path().join("other.git");
-    let bare_url = bare.to_string_lossy().to_string();
-    git.run(
-        temp.path(),
-        &["init", "--bare", "-q", "-b", "main", &bare_url],
-    );
-    let seed = temp.path().join("other-seed");
-    git.run(
-        temp.path(),
-        &["init", "-q", "-b", "main", &seed.to_string_lossy()],
-    );
-    fs::write(seed.join("README.md"), "not templates\n").unwrap();
-    git.run(&seed, &["add", "-A"]);
-    git.run(&seed, &["commit", "-q", "-m", "seed"]);
-    git.run(&seed, &["push", "-q", &bare_url, "main"]);
-    let head_before = git.output(&bare, &["rev-parse", "refs/heads/main"]);
+    // Repositories that are not ude template trees: one with only a README, and one with
+    // its own projects/ directory that holds no ude template.
+    for (name, file) in [
+        ("readme", "README.md"),
+        ("own-projects", "projects/website/index.html"),
+    ] {
+        let bare = temp.path().join(format!("{name}.git"));
+        let bare_url = bare.to_string_lossy().to_string();
+        git.run(
+            temp.path(),
+            &["init", "--bare", "-q", "-b", "main", &bare_url],
+        );
+        let seed = temp.path().join(format!("{name}-seed"));
+        git.run(
+            temp.path(),
+            &["init", "-q", "-b", "main", &seed.to_string_lossy()],
+        );
+        let path = seed.join(file);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "not templates\n").unwrap();
+        git.run(&seed, &["add", "-A"]);
+        git.run(&seed, &["commit", "-q", "-m", "seed"]);
+        git.run(&seed, &["push", "-q", &bare_url, "main"]);
+        let head_before = git.output(&bare, &["rev-parse", "refs/heads/main"]);
 
-    for action in ["status", "pull", "push"] {
-        let out = ude(&project, &["sync", action, "--remote", &bare_url]);
-        let text = outputs(&out);
-        assert_eq!(out.status.code(), Some(2), "{action}: {text}");
-        assert!(
-            text.contains("not a ude template repository"),
-            "{action}: {text}"
+        for action in ["status", "pull", "push"] {
+            let out = ude(&project, &["sync", action, "--remote", &bare_url]);
+            let text = outputs(&out);
+            assert_eq!(out.status.code(), Some(2), "{name} {action}: {text}");
+            assert!(
+                text.contains("not a ude template repository"),
+                "{name} {action}: {text}"
+            );
+        }
+        assert_eq!(
+            fs::read(project.join(".gitconfig")).unwrap(),
+            gitconfig,
+            "{name}"
+        );
+        assert_eq!(
+            git.output(&bare, &["rev-parse", "refs/heads/main"]),
+            head_before,
+            "{name}"
         );
     }
-    assert_eq!(fs::read(project.join(".gitconfig")).unwrap(), gitconfig);
-    assert_eq!(
-        git.output(&bare, &["rev-parse", "refs/heads/main"]),
-        head_before
-    );
 }
 
 /// A bare remote at `<root>/<name>.git` whose main holds a copy of this repository's

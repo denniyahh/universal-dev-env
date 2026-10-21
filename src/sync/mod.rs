@@ -823,10 +823,14 @@ impl SyncEngine {
         } else {
             target_checkout.clone()
         };
-        // Any other repository would make every managed file read as deleted upstream.
-        if !templates_dir.join("projects").is_dir() {
+        // Any other repository would make every managed file read as deleted upstream, so
+        // the remote must hold at least one template for a managed file.
+        let has_template = MANAGED_FILES.iter().any(|rel| {
+            map_to_upstream(&templates_dir, Path::new(rel)).is_some_and(|src| src.is_file())
+        });
+        if !has_template {
             return Err(format!(
-                "{} is not a ude template repository (no projects/ at its root or under templates/)",
+                "{} is not a ude template repository (no template for any managed file)",
                 process::redact_userinfo(remote_url)
             ));
         }
