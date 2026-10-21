@@ -27,7 +27,7 @@ pub enum SyncStatus {
     /// Tracked, deleted upstream, local copy unchanged: pull deletes it (D-12).
     UpstreamDeleted,
     /// Tracked, template missing from a remote whose history never deleted it (the
-    /// remote never had it): pull keeps the file and its record.
+    /// remote never had it): pull keeps the file, edited or not, and its record.
     MissingUpstream,
     /// Tracked, deleted on both sides: pull drops the record (D-16).
     BothDeleted,
@@ -688,9 +688,15 @@ impl SyncEngine {
         }
 
         if let Some((checkout, branch)) = &self.deletion_history {
+            // Upstream deletions, and deletion conflicts (edited locally, template gone).
             let deleted: Vec<PathBuf> = states
                 .iter()
-                .filter(|s| s.status == SyncStatus::UpstreamDeleted)
+                .filter(|s| {
+                    s.status == SyncStatus::UpstreamDeleted
+                        || (s.status == SyncStatus::Conflicted
+                            && s.upstream_hash.is_none()
+                            && s.local_hash.is_some())
+                })
                 .map(|s| s.relative_path.clone())
                 .collect();
             let never_deleted =
@@ -746,12 +752,15 @@ impl SyncEngine {
                 continue;
             };
             let mut log = self.git(Some(checkout));
+            // first-parent diffs for merges, so a deletion made while resolving a merge
+            // conflict counts too.
             log.args([
                 "log",
                 "-1",
                 "--format=%H",
                 "--diff-filter=D",
                 "--no-renames",
+                "--diff-merges=first-parent",
                 "HEAD",
                 "--",
             ])
