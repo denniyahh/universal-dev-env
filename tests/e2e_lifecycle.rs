@@ -3272,6 +3272,92 @@ fn test_init_keeps_uncommitted_gitignore_when_template_is_absent() {
     assert!(kept.starts_with("secrets/\n"), "{kept}");
 }
 
+const CONTAINER_TEMPLATE: &str = "templates/projects/generic/container/check-in-container.sh";
+
+#[test]
+fn test_init_leaves_uncommitted_file_without_template_unmanaged() {
+    let temp = tempdir().unwrap();
+    let ude = sync_cli(temp.path());
+    let project = project_with_local_templates(temp.path(), "project");
+    fs::remove_file(project.join(CONTAINER_TEMPLATE)).unwrap();
+    let script = project.join("scripts/check-in-container.sh");
+    fs::create_dir_all(script.parent().unwrap()).unwrap();
+    fs::write(&script, "#!/bin/sh\necho mine\n").unwrap();
+
+    reinit_rust(&ude, &project);
+    let status = outputs(&ude(&project, &["sync", "status"]));
+    assert!(
+        line_with(&status, "check-in-container.sh:").contains("Unmanaged"),
+        "{status}"
+    );
+    let pull = ude(&project, &["sync", "pull"]);
+    assert_eq!(pull.status.code(), Some(0), "{}", outputs(&pull));
+    assert_eq!(
+        fs::read_to_string(&script).unwrap(),
+        "#!/bin/sh\necho mine\n",
+        "pull deleted or replaced a file the user created"
+    );
+    let push = ude(&project, &["sync", "push"]);
+    assert_eq!(push.status.code(), Some(0), "{}", outputs(&push));
+    assert!(
+        !project.join(CONTAINER_TEMPLATE).exists(),
+        "push published a template that never existed"
+    );
+}
+
+#[test]
+fn test_init_writes_template_over_uncommitted_file_when_template_exists() {
+    // Negative control for the unmanaged case above: with a template, init writes it.
+    let temp = tempdir().unwrap();
+    let ude = sync_cli(temp.path());
+    let project = project_with_local_templates(temp.path(), "project");
+    let script = project.join("scripts/check-in-container.sh");
+    fs::create_dir_all(script.parent().unwrap()).unwrap();
+    fs::write(&script, "#!/bin/sh\necho mine\n").unwrap();
+
+    reinit_rust(&ude, &project);
+    assert_eq!(
+        fs::read(&script).unwrap(),
+        fs::read(project.join(CONTAINER_TEMPLATE)).unwrap()
+    );
+    let status = outputs(&ude(&project, &["sync", "status"]));
+    assert!(
+        line_with(&status, "check-in-container.sh:").contains("In Sync"),
+        "{status}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_init_refuses_unreadable_committed_file_without_template() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempdir().unwrap();
+    let git = GitFixture::new();
+    let ude = sync_cli(temp.path());
+    let project = project_with_local_templates(temp.path(), "project");
+    git.run(temp.path(), &["init", "-q", &project.to_string_lossy()]);
+    fs::remove_file(project.join(GITCONFIG_TEMPLATE)).unwrap();
+    let gitconfig = project.join(".gitconfig");
+    fs::write(&gitconfig, "[alias]\n\tco = checkout\n").unwrap();
+    git.run(&project, &["add", ".gitconfig"]);
+    commit_without_project_hooks(&git, &project, "chore: own gitconfig");
+    fs::set_permissions(&gitconfig, fs::Permissions::from_mode(0o200)).unwrap();
+    // Negative control: the fixture really is unreadable (not the case as root).
+    let readable = fs::read(&gitconfig).is_ok();
+
+    let path = project.to_string_lossy().to_string();
+    let init = ude(&project, &["init", "--path", &path, "--type", "rust"]);
+    fs::set_permissions(&gitconfig, fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(!readable, "fixture .gitconfig is readable; run as non-root");
+    let text = outputs(&init);
+    assert_eq!(init.status.code(), Some(2), "{text}");
+    assert!(text.contains("Cannot read committed .gitconfig"), "{text}");
+    assert!(
+        !project.join(".ude/state.json").exists(),
+        "init recorded state without the file's unmanaged marker"
+    );
+}
+
 #[test]
 fn test_init_ignores_unusable_git_dir_above_project() {
     let temp = tempdir().unwrap();
