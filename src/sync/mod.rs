@@ -26,6 +26,9 @@ pub enum SyncStatus {
     LocalDeleted,
     /// Tracked, deleted upstream, local copy unchanged: pull deletes it (D-12).
     UpstreamDeleted,
+    /// Tracked, template missing from a remote whose history never deleted it (the
+    /// remote never had it): pull keeps the file and its record.
+    MissingUpstream,
     /// Tracked, deleted on both sides: pull drops the record (D-16).
     BothDeleted,
     /// Untracked, tombstoned, present locally only: never republished (SYNC-01).
@@ -152,6 +155,8 @@ pub struct PullReport {
     pub conflicts: Vec<PathBuf>,
     /// Open conflicts cleared because local and upstream converged (D-09 amendment).
     pub converged: Vec<PathBuf>,
+    /// Files kept because their template is missing from a remote that never deleted it.
+    pub missing_upstream: Vec<PathBuf>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -372,6 +377,9 @@ pub struct SyncEngine {
     /// scrub of repo-local git variables (tests inject a fixture gitconfig here).
     extra_env: Vec<(OsString, OsString)>,
     limits: ProcessLimits,
+    /// Remote checkout and branch whose history must show a template's deletion before
+    /// a scan reports it as deleted upstream (set for remote status and pull).
+    deletion_history: Option<(PathBuf, String)>,
 }
 
 impl SyncEngine {
@@ -380,7 +388,16 @@ impl SyncEngine {
             sanitizer: Sanitizer::new(),
             extra_env: Vec::new(),
             limits: ProcessLimits::default(),
+            deletion_history: None,
         }
+    }
+
+    /// Confirms each upstream deletion against the history of `checkout` (a remote
+    /// cache checkout of `branch`): a template the remote never deleted is reported as
+    /// [`SyncStatus::MissingUpstream`] and pull keeps the file.
+    pub fn with_deletion_history(mut self, checkout: PathBuf, branch: &str) -> Self {
+        self.deletion_history = Some((checkout, branch.to_string()));
+        self
     }
 
     /// Adds environment variables to every git/gh command the engine spawns. The
@@ -670,7 +687,87 @@ impl SyncEngine {
             });
         }
 
+        if let Some((checkout, branch)) = &self.deletion_history {
+            let deleted: Vec<PathBuf> = states
+                .iter()
+                .filter(|s| s.status == SyncStatus::UpstreamDeleted)
+                .map(|s| s.relative_path.clone())
+                .collect();
+            let never_deleted =
+                self.never_deleted_upstream(checkout, branch, upstream_root, &deleted)?;
+            for state in &mut states {
+                if never_deleted.contains(&state.relative_path) {
+                    state.status = SyncStatus::MissingUpstream;
+                }
+            }
+        }
+
         Ok(states)
+    }
+
+    /// Paths in `deleted` whose template no commit in `checkout`'s history deletes. A
+    /// shallow checkout is deepened first, so the answer comes from the full history.
+    fn never_deleted_upstream(
+        &self,
+        checkout: &Path,
+        branch: &str,
+        upstream_root: &Path,
+        deleted: &[PathBuf],
+    ) -> Result<HashSet<PathBuf>, String> {
+        let mut never_deleted = HashSet::new();
+        if deleted.is_empty() {
+            return Ok(never_deleted);
+        }
+        let mut probe = self.git(Some(checkout));
+        probe.args(["rev-parse", "--is-shallow-repository"]);
+        let out = self.run_local(probe, "git rev-parse --is-shallow-repository")?;
+        if !out.status.success() {
+            return Err(with_excerpt(
+                "git rev-parse failed in the remote cache".to_string(),
+                &out,
+            ));
+        }
+        if String::from_utf8_lossy(&out.stdout).trim() == "true" {
+            let mut unshallow = self.git(Some(checkout));
+            unshallow.args(["fetch", "--unshallow", "origin", branch]);
+            let out = self.run_network(unshallow, "git fetch --unshallow")?;
+            if !out.status.success() {
+                return Err(with_excerpt(
+                    "git fetch --unshallow failed; cannot confirm upstream deletions".to_string(),
+                    &out,
+                ));
+            }
+        }
+        for rel in deleted {
+            let in_repo = map_to_upstream(upstream_root, rel)
+                .and_then(|template| template.strip_prefix(checkout).ok().map(Path::to_path_buf));
+            let Some(in_repo) = in_repo else {
+                never_deleted.insert(rel.clone());
+                continue;
+            };
+            let mut log = self.git(Some(checkout));
+            log.args([
+                "log",
+                "-1",
+                "--format=%H",
+                "--diff-filter=D",
+                "--no-renames",
+                "HEAD",
+                "--",
+            ])
+            .arg(&in_repo);
+            let out = self.run_local(log, "git log --diff-filter=D")?;
+            if !out.status.success() {
+                return Err(with_excerpt(
+                    "git log failed in the remote cache".to_string(),
+                    &out,
+                ));
+            }
+            if out.stdout.iter().all(u8::is_ascii_whitespace) {
+                never_deleted.insert(rel.clone());
+            }
+        }
+        Ok(never_deleted)
     }
 
     /// Marks the open conflict on `rel` as resolved with the file's current local state
@@ -1058,6 +1155,9 @@ impl SyncEngine {
                 }
                 (SyncStatus::LocalDeleted, _) => {
                     report.locally_deleted_pending.push(s.relative_path.clone());
+                }
+                (SyncStatus::MissingUpstream, _) => {
+                    report.missing_upstream.push(s.relative_path.clone());
                 }
                 _ => {}
             }

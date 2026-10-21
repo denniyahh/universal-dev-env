@@ -749,8 +749,15 @@ fn main() {
                     run_sync_resolve(&engine, &local_project, &file);
                 }
                 cli::SyncAction::Status => {
-                    let (root_template_dir, _remote_checkout_root, _remote_cache) =
+                    let (root_template_dir, _remote_checkout_root, remote_cache) =
                         open_sync_templates(&engine, remote_url.as_deref(), &branch, &cache_dir);
+                    // A remote's history must show a template's deletion before pull acts.
+                    let engine = match &remote_cache {
+                        Some(cache) => {
+                            engine.with_deletion_history(cache.checkout_dir.clone(), &branch)
+                        }
+                        None => engine,
+                    };
                     println!("{}", "==> Checking UDE environment sync status...".bold());
                     if let Some(ref r_url) = remote_url {
                         println!(
@@ -853,6 +860,13 @@ fn main() {
                                     s.relative_path.display()
                                 );
                             }
+                            sync::SyncStatus::MissingUpstream => {
+                                println!(
+                                    "  {} {}: Missing upstream (this remote never had its template; pull keeps it)",
+                                    "ℹ".blue(),
+                                    s.relative_path.display()
+                                );
+                            }
                             sync::SyncStatus::BothDeleted => {
                                 println!(
                                     "  {} {}: Deleted on both sides (pull to drop tracking)",
@@ -887,8 +901,15 @@ fn main() {
                     }
                 }
                 cli::SyncAction::Pull => {
-                    let (root_template_dir, _remote_checkout_root, _remote_cache) =
+                    let (root_template_dir, _remote_checkout_root, remote_cache) =
                         open_sync_templates(&engine, remote_url.as_deref(), &branch, &cache_dir);
+                    // A remote's history must show a template's deletion before pull acts.
+                    let engine = match &remote_cache {
+                        Some(cache) => {
+                            engine.with_deletion_history(cache.checkout_dir.clone(), &branch)
+                        }
+                        None => engine,
+                    };
                     println!(
                         "{}",
                         "==> Pulling updates from central configuration store...".bold()
@@ -925,6 +946,13 @@ fn main() {
                                 println!(
                                     "  {} Removed {} (deleted upstream)",
                                     "✓".green(),
+                                    file.display()
+                                );
+                            }
+                            for file in &report.missing_upstream {
+                                println!(
+                                    "  {} Kept {}: its template is missing from this remote, whose history never deleted it",
+                                    "ℹ".blue(),
                                     file.display()
                                 );
                             }
