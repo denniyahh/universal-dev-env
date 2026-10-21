@@ -838,7 +838,7 @@ fn main() {
                                     }
                                     (_, Some(template)) => format!(
                                         "push skips it: its template has logic; {}",
-                                        deletion_logic_remedy(&template)
+                                        deletion_logic_remedy(&root_template_dir, &template)
                                     ),
                                     (PushBoundary::Publishable, None) => {
                                         "push to propagate; push deletes the shared template, restore the file to keep it".to_string()
@@ -957,7 +957,19 @@ fn main() {
                                 );
                             }
                             for file in &report.locally_deleted_pending {
+                                let logic = logic_template(&root_template_dir, file);
                                 let advice = match push_boundary(file) {
+                                    PushBoundary::Publishable | PushBoundary::ForceOnly
+                                        if logic.is_some() =>
+                                    {
+                                        format!(
+                                            "push skips it: its template has logic; {}",
+                                            deletion_logic_remedy(
+                                                &root_template_dir,
+                                                logic.as_deref().unwrap_or(file)
+                                            )
+                                        )
+                                    }
                                     PushBoundary::Publishable => "push to propagate".to_string(),
                                     PushBoundary::ForceOnly => {
                                         "push with --force to propagate".to_string()
@@ -1183,7 +1195,7 @@ fn main() {
                                         "✗".red(),
                                         file.display(),
                                         template.display(),
-                                        deletion_logic_remedy(&template)
+                                        deletion_logic_remedy(&root_template_dir, &template)
                                     );
                                     continue;
                                 }
@@ -1192,7 +1204,7 @@ fn main() {
                                     "✗".red(),
                                     file.display(),
                                     template.display(),
-                                    template_logic_remedy(file, &template)
+                                    template_logic_remedy(file, &root_template_dir, &template)
                                 );
                             }
 
@@ -1341,7 +1353,7 @@ fn locally_modified_hint(template_root: &Path, file: &Path) -> String {
             Ok(true) => {
                 return format!(
                     "push skips it: its template has logic; {}",
-                    template_logic_remedy(file, &template)
+                    template_logic_remedy(file, template_root, &template)
                 );
             }
             Err(reason) => return format!("push cannot check its template: {reason}"),
@@ -1363,14 +1375,20 @@ fn logic_template(template_root: &Path, file: &Path) -> Option<PathBuf> {
 }
 
 /// What to do about a local deletion that push skips because the template has logic.
-fn deletion_logic_remedy(template: &Path) -> String {
+fn deletion_logic_remedy(template_root: &Path, template: &Path) -> String {
     format!(
-        "restore the file to keep it; to remove it for every project, delete {} upstream",
-        template.display()
+        "restore the file to keep it; to remove it for every project, delete {} from the shared templates",
+        shared_template_path(template_root, template).display()
     )
 }
 
-fn template_logic_remedy(file: &Path, template: &Path) -> String {
+/// `template` as a path in the shared templates (`projects/...`), not the local or cache
+/// copy the engine reads it from.
+fn shared_template_path<'a>(template_root: &Path, template: &'a Path) -> &'a Path {
+    template.strip_prefix(template_root).unwrap_or(template)
+}
+
+fn template_logic_remedy(file: &Path, template_root: &Path, template: &Path) -> String {
     let local = sync::local_override_path(file);
     let project_only = if file == Path::new("mise.toml") {
         format!(
@@ -1384,8 +1402,8 @@ fn template_logic_remedy(file: &Path, template: &Path) -> String {
         )
     };
     format!(
-        "for this project only, {project_only}; for every project, edit {} upstream",
-        template.display()
+        "for this project only, {project_only}; for every project, edit {} in the shared templates",
+        shared_template_path(template_root, template).display()
     )
 }
 
