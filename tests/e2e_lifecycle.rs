@@ -3480,6 +3480,63 @@ fn test_sync_ignores_a_project_templates_dir_that_is_not_ude() {
 }
 
 #[test]
+fn test_init_rejects_an_unknown_type() {
+    let temp = tempdir().unwrap();
+    let ude = sync_cli(temp.path());
+    let project = project_with_local_templates(temp.path(), "project");
+    let path = project.to_string_lossy().to_string();
+
+    let typo = ude(&project, &["init", "--path", &path, "--type", "rsut"]);
+    let text = outputs(&typo);
+    assert_eq!(typo.status.code(), Some(2), "{text}");
+    assert!(text.contains("invalid value"), "{text}");
+    assert!(!project.join(".ude/state.json").exists(), "{text}");
+    // Negative control: a supported type is accepted.
+    let node = ude(&project, &["init", "--path", &path, "--type", "node"]);
+    assert_eq!(node.status.code(), Some(0), "{}", outputs(&node));
+}
+
+#[test]
+fn test_init_can_skip_mempalace_and_graphify() {
+    let temp = tempdir().unwrap();
+    let ude = sync_cli(temp.path());
+    for (flags, created) in [
+        (vec!["--mempalace=false", "--graphify=false"], false),
+        (vec![], true),
+    ] {
+        let project = project_with_local_templates(temp.path(), &format!("p{created}"));
+        let path = project.to_string_lossy().to_string();
+        let mut args = vec!["init", "--path", &path, "--type", "rust"];
+        args.extend(flags.iter().copied());
+        let init = ude(&project, &args);
+        assert_eq!(init.status.code(), Some(0), "{args:?}: {}", outputs(&init));
+        assert_eq!(
+            project.join(".planning/.mempalace-stage").exists(),
+            created,
+            "{args:?}"
+        );
+        assert_eq!(project.join("graphify-out").exists(), created, "{args:?}");
+    }
+    // A bare flag still means true.
+    let project = project_with_local_templates(temp.path(), "bare");
+    let path = project.to_string_lossy().to_string();
+    let init = ude(
+        &project,
+        &[
+            "init",
+            "--path",
+            &path,
+            "--type",
+            "rust",
+            "--mempalace",
+            "--graphify",
+        ],
+    );
+    assert_eq!(init.status.code(), Some(0), "{}", outputs(&init));
+    assert!(project.join(".planning/.mempalace-stage").exists());
+}
+
+#[test]
 fn test_init_fails_on_unusable_git_dir_in_project() {
     // Negative control for the case above: the project's own .git must work.
     let temp = tempdir().unwrap();
