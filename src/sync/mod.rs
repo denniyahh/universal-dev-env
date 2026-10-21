@@ -128,6 +128,12 @@ pub enum PushResult {
         /// Locally edited files whose upstream `.jinja` template has logic a rendered
         /// push would erase; the template must be edited upstream (CR-02).
         skipped_templates: Vec<PathBuf>,
+        /// Locally edited files whose template the remote never had: never published.
+        skipped_missing_upstream: Vec<PathBuf>,
+    },
+    /// The project could not be compared with upstream; nothing was changed.
+    ScanFailed {
+        reason: String,
     },
     SecretBlocked {
         path: PathBuf,
@@ -1325,7 +1331,7 @@ impl SyncEngine {
             crate::template::TemplateContext::detect_for_project(local_root, "project", "generic");
         let states = match self.scan_project(local_root, upstream_root, Some(&dummy_ctx)) {
             Ok(states) => states,
-            Err(reason) => return state_push_failure(reason),
+            Err(reason) => return PushResult::ScanFailed { reason },
         };
         let mut candidates_to_write = Vec::new();
         let mut deletions = Vec::new();
@@ -1333,6 +1339,7 @@ impl SyncEngine {
         let mut skipped_merged = Vec::new();
         let mut skipped_boundary = Vec::new();
         let mut skipped_templates = Vec::new();
+        let mut skipped_missing_upstream = Vec::new();
 
         // Pass 1: Strict atomic pre-validation across ALL modified candidates
         for state in &states {
@@ -1346,6 +1353,12 @@ impl SyncEngine {
                 }
                 SyncStatus::Merged => {
                     skipped_merged.push(state.relative_path.clone());
+                    continue;
+                }
+                SyncStatus::MissingUpstream => {
+                    if state.local_hash != state.ancestor_hash {
+                        skipped_missing_upstream.push(state.relative_path.clone());
+                    }
                     continue;
                 }
                 _ => {}
@@ -1573,6 +1586,7 @@ impl SyncEngine {
             skipped_merged,
             skipped_boundary,
             skipped_templates,
+            skipped_missing_upstream,
         }
     }
 
