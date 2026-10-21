@@ -823,6 +823,13 @@ impl SyncEngine {
         } else {
             target_checkout.clone()
         };
+        // Any other repository would make every managed file read as deleted upstream.
+        if !templates_dir.join("projects").is_dir() {
+            return Err(format!(
+                "{} is not a ude template repository (no projects/ at its root or under templates/)",
+                process::redact_userinfo(remote_url)
+            ));
+        }
         Ok(RemoteCache {
             templates_dir,
             checkout_dir: target_checkout,
@@ -5569,6 +5576,13 @@ mod tests {
         let fake_templates = fake_remote.path().join("templates");
         fs::create_dir_all(&fake_templates).unwrap();
         fs::write(fake_templates.join("test.txt"), "remote template content").unwrap();
+        // A ude template tree has projects/; ensure_remote_repo refuses any other repo.
+        fs::create_dir_all(fake_templates.join("projects/generic")).unwrap();
+        fs::write(
+            fake_templates.join("projects/generic/gitconfig.repo"),
+            "[core]\n",
+        )
+        .unwrap();
 
         git.run(fake_remote.path(), &["add", "-A"]);
         git.run(fake_remote.path(), &["commit", "-m", "init fake remote"]);
@@ -6233,6 +6247,12 @@ mod tests {
         let tmpl_file = remote_dir.path().join("templates/test.txt");
         fs::create_dir_all(tmpl_file.parent().unwrap()).unwrap();
         fs::write(&tmpl_file, "branch content\n").unwrap();
+        // A ude template tree has projects/; ensure_remote_repo refuses any other repo.
+        let marker = remote_dir
+            .path()
+            .join("templates/projects/generic/gitconfig.repo");
+        fs::create_dir_all(marker.parent().unwrap()).unwrap();
+        fs::write(&marker, "[core]\n").unwrap();
 
         git.run(remote_dir.path(), &["add", "-A"]);
         git.run(remote_dir.path(), &["commit", "-m", "init slash branch"]);
