@@ -3452,6 +3452,30 @@ fn test_init_fails_when_parent_repo_index_is_unreadable() {
 }
 
 #[test]
+fn test_sync_ignores_a_project_templates_dir_that_is_not_ude() {
+    let temp = tempdir().unwrap();
+    let ude = sync_cli(temp.path());
+    let project = temp.path().join("web");
+    fs::create_dir_all(&project).unwrap();
+    let path = project.to_string_lossy().to_string();
+    let init = ude(temp.path(), &["init", "--path", &path, "--type", "rust"]);
+    assert_eq!(init.status.code(), Some(0), "{}", outputs(&init));
+    // A web project's own templates/ (Django, Flask, Helm) is not a ude template tree.
+    fs::create_dir_all(project.join("templates")).unwrap();
+    fs::write(project.join("templates/index.html"), "<html></html>\n").unwrap();
+
+    let status = outputs(&ude(&project, &["sync", "status"]));
+    assert!(!status.contains("Deleted upstream"), "{status}");
+    assert!(status.contains(".gitconfig: In Sync"), "{status}");
+    let pull = ude(&project, &["sync", "pull"]);
+    assert_eq!(pull.status.code(), Some(0), "{}", outputs(&pull));
+    assert!(
+        project.join(".gitconfig").exists(),
+        "pull deleted managed files"
+    );
+}
+
+#[test]
 fn test_init_fails_on_unusable_git_dir_in_project() {
     // Negative control for the case above: the project's own .git must work.
     let temp = tempdir().unwrap();
