@@ -1875,6 +1875,20 @@ fn test_push_names_the_shared_template_in_remote_mode() {
         !skip.contains(&temp.path().to_string_lossy().to_string()),
         "{text}"
     );
+
+    // The edit message too: an edited mise.toml under a template with logic.
+    let edited = temp.path().join("edited");
+    init_rust_project(bin, &edited);
+    append_to(&edited.join("mise.toml"), "# local edit\n");
+    let push = ude(&edited, &["sync", "push", "--remote", &remote_url]);
+    let text = outputs(&push);
+    assert_eq!(push.status.code(), Some(1), "{text}");
+    let skip = line_with(&text, "mise.toml: upstream template");
+    assert!(skip.contains("projects/agents/mise.toml.jinja"), "{text}");
+    assert!(
+        !skip.contains(&temp.path().to_string_lossy().to_string()),
+        "{text}"
+    );
 }
 
 /// A bare remote at `<root>/<name>.git` whose main holds a copy of this repository's
