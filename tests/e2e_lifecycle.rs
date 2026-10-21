@@ -3446,7 +3446,7 @@ fn test_init_fails_when_parent_repo_index_is_unreadable() {
     let path = svc_b.to_string_lossy().to_string();
     let init = ude(&svc_b, &["init", "--path", &path, "--type", "rust"]);
     let text = outputs(&init);
-    assert_eq!(init.status.code(), Some(1), "{text}");
+    assert_eq!(init.status.code(), Some(2), "{text}");
     assert!(text.contains("git ls-files failed"), "{text}");
     assert_eq!(
         fs::read_to_string(svc_b.join(".gitconfig")).unwrap(),
@@ -3490,7 +3490,7 @@ fn test_init_fails_on_unusable_git_dir_in_project() {
     let path = project.to_string_lossy().to_string();
     let init = ude(&project, &["init", "--path", &path, "--type", "rust"]);
     let text = outputs(&init);
-    assert_eq!(init.status.code(), Some(1), "{text}");
+    assert_eq!(init.status.code(), Some(2), "{text}");
     assert!(text.contains("git ls-files failed"), "{text}");
 }
 
