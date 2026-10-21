@@ -64,6 +64,10 @@ Seeded at requirement level from RESEARCH.md; task IDs bound from the planner's 
 | 01-10-T3 | 10 | 9 | SYNC-05 | — | `resolve` clears conflict. NC: hand-deleted sidecar → push still skips | unit | `cargo test --bin ude sync::tests::test_resolve` | ✅ | ✅ green |
 | 01-11-T1 | 11 | 10 | SYNC-06 | — | Upstream moved → UpstreamMoved, remote unchanged. NC: no race → success | unit | `cargo test --bin ude sync::tests::test_direct_push_aborts_when_upstream_moved` | ✅ | ✅ green |
 | 01-11-T3 | 11 | 10 | SYNC-06 | — | `--force` does not bypass upstream-moved abort. NC: no race → succeeds | e2e | `cargo test --test e2e_lifecycle test_force_does_not_bypass_upstream_moved` | ✅ | ✅ green |
+| post-verify 539a3d7 | — | — | SYNC-01 | — | Fresh clone does not resurrect a template deleted upstream (kept file Unmanaged, never republished). NC: pre-commit hook with a template stays In Sync | e2e | `cargo test --test e2e_lifecycle test_fresh_clone_does_not_resurrect_template_deleted_upstream` | ✅ | ✅ green |
+| post-verify 539a3d7 | — | — | SYNC-01 | — | Committed file with no template: pull keeps it, push publishes nothing. NC: uncommitted .gitignore records nothing (`test_init_keeps_uncommitted_gitignore_when_template_is_absent`) | e2e | `cargo test --test e2e_lifecycle test_init_keeps_committed_gitignore_when_template_is_absent` | ✅ | ✅ green |
+| post-review b5c11a3 | — | — | SYNC-01 | — | User's own file with no template left Unmanaged, not deleted by pull. NC: template present → init writes it, In Sync | e2e | `cargo test --test e2e_lifecycle test_init_leaves_uncommitted_file_without_template_unmanaged` | ✅ | ✅ green |
+| post-review b5c11a3 | — | — | SYNC-01 | — | Unreadable committed file with no template stops init (exit 2), no state recorded. NC: readable file → Unmanaged | e2e (unix) | `cargo test --test e2e_lifecycle test_init_refuses_unreadable_committed_file_without_template` | ✅ | ✅ green |
 
 *Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
 
@@ -83,7 +87,7 @@ Seeded at requirement level from RESEARCH.md; task IDs bound from the planner's 
 
 | Behavior | Requirement | Why Manual | Test Instructions |
 |----------|-------------|------------|-------------------|
-| Windows `JobObject` kill branch (01-01-T2) | SYNC-03 | Windows target not installed on this host; branch cannot be compiled here | Cross-compile/check on a Windows target or CI runner |
+| Windows `JobObject` kill branch (01-01-T2) | SYNC-03 | Compiles and passes clippy for x86_64-pc-windows-msvc on this host (check only); the kill/cleanup behavior needs a Windows host to run | Run WINDOWS.md checks on a Windows host (backlog Phase 999.1) |
 
 ---
 
@@ -96,7 +100,7 @@ Seeded at requirement level from RESEARCH.md; task IDs bound from the planner's 
 - [x] Feedback latency < 30s
 - [x] `nyquist_compliant: true` set in frontmatter
 
-**Approval:** validated 2026-10-19 (validate-phase audit: 20/20 rows matched to passing tests; hermeticity gate 104/104 with decoy GIT_DIR, decoy untouched; Windows JobObject branch remains manual-only)
+**Approval:** re-validated 2026-10-21 at c868d1b+ (20/20 original rows green, 4 post-verify/post-review rows added and green; hermeticity gate 109/109 with decoy GIT_DIR, decoy untouched, control: plain git resolves the decoy). Previously validated 2026-10-19 (validate-phase audit: 20/20 rows matched to passing tests; hermeticity gate 104/104 with decoy GIT_DIR, decoy untouched; Windows JobObject branch remains manual-only)
 
 ## Validation Audit 2026-10-19
 
