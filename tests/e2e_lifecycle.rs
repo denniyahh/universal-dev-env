@@ -1206,6 +1206,9 @@ fn sync_cli_with_env(
     fs::write(&gitconfig, FIXTURE_GITCONFIG).unwrap();
     let cache_dir = root.join("cache");
     fs::create_dir_all(&cache_dir).unwrap();
+    // Git discovery must stop at the tempdir: a TMPDIR inside a checkout would otherwise
+    // put every "no git" test inside that repository.
+    let ceiling = root.parent().unwrap_or(root).to_path_buf();
     move |project: &Path, args: &[&str]| {
         let mut cmd = ude_command(bin);
         cmd.current_dir(project).args(args);
@@ -1217,6 +1220,7 @@ fn sync_cli_with_env(
             .env("GIT_CONFIG_GLOBAL", &gitconfig)
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("XDG_CACHE_HOME", &cache_dir)
+            .env("GIT_CEILING_DIRECTORIES", &ceiling)
             .envs(extra.iter().map(|(name, value)| (name, value)))
             .stdin(Stdio::null())
             .output()
