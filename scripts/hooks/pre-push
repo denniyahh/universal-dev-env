@@ -18,4 +18,17 @@ cd "$(git rev-parse --show-toplevel)"
 # `mise which` names the pinned install (or fails); `mise exec` would let an
 # unpinned cargo-deny earlier on PATH win.
 cargo_deny=$(mise which cargo-deny)
-exec "$cargo_deny" check --hide-inclusion-graph
+"$cargo_deny" check --hide-inclusion-graph bans licenses sources
+
+# Advisories fetch the RustSec database first. When only that fetch fails
+# (offline, filtered network, GitHub outage), check against the cached copy and
+# say it may be stale: a known advisory still blocks, and no cache still fails.
+if ! output=$("$cargo_deny" check --hide-inclusion-graph advisories 2>&1); then
+    if printf '%s\n' "$output" | grep -q "failed to fetch advisory database"; then
+        echo "pre-push: could not fetch the advisory database; checking the cached copy, which may be stale" >&2
+        exec "$cargo_deny" --offline check --hide-inclusion-graph advisories
+    fi
+    printf '%s\n' "$output" >&2
+    exit 1
+fi
+printf '%s\n' "$output" >&2
