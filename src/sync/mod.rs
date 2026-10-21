@@ -769,6 +769,7 @@ impl SyncEngine {
                 "--diff-filter=D",
                 "--no-renames",
                 "--diff-merges=first-parent",
+                "--no-patch",
                 "HEAD",
                 "--",
             ])

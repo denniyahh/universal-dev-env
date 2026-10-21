@@ -1832,6 +1832,16 @@ fn test_edited_file_with_template_the_remote_never_had_is_missing_upstream() {
         fs::read_to_string(project.join(".gitconfig")).unwrap(),
         edited
     );
+    // Push agrees with status: no conflict to skip, and nothing is published.
+    let head_before = git.output(&remote, &["rev-parse", "refs/heads/main"]);
+    let push = ude(&project, &["sync", "push", "--remote", &remote_url]);
+    let push_text = outputs(&push);
+    assert_eq!(push.status.code(), Some(0), "{push_text}");
+    assert!(!push_text.contains("unresolved conflict"), "{push_text}");
+    assert_eq!(
+        git.output(&remote, &["rev-parse", "refs/heads/main"]),
+        head_before
+    );
 }
 
 /// A bare remote at `<root>/<name>.git` whose main holds a copy of this repository's

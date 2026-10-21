@@ -1029,6 +1029,13 @@ fn main() {
                 cli::SyncAction::Push { force, pr } => {
                     let (root_template_dir, remote_checkout_root, remote_cache) =
                         open_sync_templates(&engine, remote_url.as_deref(), &branch, &cache_dir);
+                    // The same deletion check as status and pull, so push agrees with them.
+                    let engine = match &remote_cache {
+                        Some(cache) => {
+                            engine.with_deletion_history(cache.checkout_dir.clone(), &branch)
+                        }
+                        None => engine,
+                    };
                     println!("{}", "==> Running Sanitization Gate & Sync Push...".bold());
 
                     // If TypeSafe AI API is configured, evaluate semantic drift on agent rules
@@ -1204,7 +1211,8 @@ fn main() {
                                         "  {} {}: upstream template {} contains template logic; deleting it would remove it for every project; skipped ({})",
                                         "✗".red(),
                                         file.display(),
-                                        template.display(),
+                                        shared_template_path(&root_template_dir, &template)
+                                            .display(),
                                         deletion_logic_remedy(&root_template_dir, &template)
                                     );
                                     continue;
@@ -1213,7 +1221,7 @@ fn main() {
                                     "  {} {}: upstream template {} contains template logic that a push of the rendered file would erase; skipped ({})",
                                     "✗".red(),
                                     file.display(),
-                                    template.display(),
+                                    shared_template_path(&root_template_dir, &template).display(),
                                     template_logic_remedy(file, &root_template_dir, &template)
                                 );
                             }
