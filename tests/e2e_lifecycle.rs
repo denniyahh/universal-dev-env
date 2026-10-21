@@ -3375,6 +3375,28 @@ fn test_init_ignores_unusable_git_dir_above_project() {
     assert!(project.join(".ude/state.json").exists(), "{init}");
 }
 
+#[cfg(unix)]
+#[test]
+fn test_init_fails_when_state_cannot_be_saved() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempdir().unwrap();
+    let ude = sync_cli(temp.path());
+    let project = project_with_local_templates(temp.path(), "project");
+    let ude_dir = project.join(".ude");
+    fs::create_dir_all(&ude_dir).unwrap();
+    fs::set_permissions(&ude_dir, fs::Permissions::from_mode(0o500)).unwrap();
+    // Negative control: the fixture really is unwritable (not the case as root).
+    let writable = fs::write(ude_dir.join("probe"), "").is_ok();
+
+    let path = project.to_string_lossy().to_string();
+    let init = ude(&project, &["init", "--path", &path, "--type", "rust"]);
+    fs::set_permissions(&ude_dir, fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(!writable, "fixture .ude is writable; run as non-root");
+    let text = outputs(&init);
+    assert_eq!(init.status.code(), Some(2), "{text}");
+    assert!(text.contains("cannot persist .ude/state.json"), "{text}");
+}
+
 #[test]
 fn test_init_fails_on_unusable_git_dir_in_project() {
     // Negative control for the case above: the project's own .git must work.
