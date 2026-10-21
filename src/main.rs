@@ -1534,37 +1534,29 @@ fn is_ude_templates(dir: &Path) -> bool {
 }
 
 fn find_templates_dir() -> Option<PathBuf> {
-    let cwd_templates = Path::new("templates");
-    if is_ude_templates(cwd_templates) {
-        return Some(cwd_templates.to_path_buf());
-    }
-
+    let mut candidates = vec![PathBuf::from("templates")];
     if let Some(manifest_dir) = option_env!("CARGO_MANIFEST_DIR") {
-        let manifest_templates = Path::new(manifest_dir).join("templates");
-        if is_ude_templates(&manifest_templates) {
-            return Some(manifest_templates);
-        }
+        candidates.push(Path::new(manifest_dir).join("templates"));
     }
-
     if let Ok(exe_path) = std::env::current_exe()
         && let Some(parent) = exe_path.parent()
     {
         for rel in &["../../templates", "../templates", "../share/ude/templates"] {
-            let candidate = parent.join(rel);
-            if is_ude_templates(&candidate) {
-                return Some(candidate);
-            }
+            candidates.push(parent.join(rel));
         }
     }
-
     if let Some(base_dirs) = directories::BaseDirs::new() {
-        let user_templates = base_dirs.data_dir().join("ude/templates");
-        if is_ude_templates(&user_templates) {
-            return Some(user_templates);
-        }
+        candidates.push(base_dirs.data_dir().join("ude/templates"));
     }
+    first_ude_templates(candidates)
+}
 
-    None
+/// The first candidate that is a ude template tree. `None` when there is none, which
+/// init and sync refuse rather than read every managed file as deleted upstream.
+fn first_ude_templates(candidates: impl IntoIterator<Item = PathBuf>) -> Option<PathBuf> {
+    candidates
+        .into_iter()
+        .find(|candidate| is_ude_templates(candidate))
 }
 
 fn copy_template_file(root: &Path, src: &Path, dst: &Path) -> Result<(), String> {
@@ -1716,5 +1708,46 @@ fn set_executable(path: &Path) {
     #[cfg(not(unix))]
     {
         let _ = path;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ude_tree(root: &Path) -> PathBuf {
+        let tree = root.join("ude");
+        fs::create_dir_all(tree.join("projects/generic")).unwrap();
+        tree
+    }
+
+    fn foreign_tree(root: &Path) -> PathBuf {
+        let tree = root.join("web/templates");
+        fs::create_dir_all(&tree).unwrap();
+        fs::write(tree.join("index.html"), "<html></html>\n").unwrap();
+        tree
+    }
+
+    #[test]
+    fn test_first_ude_templates_none_without_a_ude_tree() {
+        let temp = tempfile::tempdir().unwrap();
+        let candidates = [foreign_tree(temp.path()), temp.path().join("missing")];
+        assert_eq!(first_ude_templates(candidates), None);
+    }
+
+    #[test]
+    fn test_first_ude_templates_skips_a_foreign_templates_dir() {
+        let temp = tempfile::tempdir().unwrap();
+        let ude = ude_tree(temp.path());
+        let candidates = [foreign_tree(temp.path()), ude.clone()];
+        assert_eq!(first_ude_templates(candidates), Some(ude));
+    }
+
+    #[test]
+    fn test_first_ude_templates_keeps_search_order() {
+        let temp = tempfile::tempdir().unwrap();
+        let first = ude_tree(&temp.path().join("a"));
+        let second = ude_tree(&temp.path().join("b"));
+        assert_eq!(first_ude_templates([first.clone(), second]), Some(first));
     }
 }
