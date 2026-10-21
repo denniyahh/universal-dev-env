@@ -1598,9 +1598,10 @@ fn kept_ancestor(
 /// The paths in `rels` that git tracks in `project`'s index; empty when neither
 /// `project` nor any parent has a `.git` (a project in a monorepo subdirectory has none
 /// of its own). A git failure is an error when the project has its own `.git`: init
-/// must not overwrite files it could not check. A `.git` only in a parent that git
-/// cannot use (an empty leftover directory, a copied worktree) is warned about and
-/// ignored, as if there were none.
+/// must not overwrite files it could not check. A `.git` only in a parent that git does
+/// not recognise as a repository (an empty leftover directory, a copied worktree) is
+/// warned about and ignored, as if there were none; a repository git recognises but
+/// cannot read (a corrupt index, dubious ownership) is an error.
 fn committed_paths(
     project: &Path,
     rels: &[PathBuf],
@@ -1620,7 +1621,7 @@ fn committed_paths(
             "git ls-files failed: {}",
             String::from_utf8_lossy(&out.stderr).trim()
         );
-        if project.join(".git").exists() {
+        if project.join(".git").exists() || recognised_repository(project)? {
             return Err(reason);
         }
         eprintln!(
@@ -1635,6 +1636,17 @@ fn committed_paths(
         .filter(|path| !path.is_empty())
         .map(|path| PathBuf::from(String::from_utf8_lossy(path).into_owned()))
         .collect())
+}
+
+/// Whether git recognises `project` as inside a repository it should be able to read.
+/// "Dubious ownership" counts: git found the repository and refuses it, which the user
+/// must resolve.
+fn recognised_repository(project: &Path) -> Result<bool, String> {
+    let mut cmd = Command::new("git");
+    cmd.current_dir(project)
+        .args(["rev-parse", "--is-inside-work-tree"]);
+    let out = process::run_bounded(cmd, "git rev-parse", process::LOCAL_TIMEOUT)?;
+    Ok(out.status.success() || String::from_utf8_lossy(&out.stderr).contains("dubious ownership"))
 }
 
 fn set_executable(path: &Path) {

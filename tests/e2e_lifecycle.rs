@@ -3414,6 +3414,44 @@ fn test_init_records_the_detected_type_for_generic() {
 }
 
 #[test]
+fn test_init_fails_when_parent_repo_index_is_unreadable() {
+    let temp = tempdir().unwrap();
+    let git = GitFixture::new();
+    let ude = sync_cli(temp.path());
+    let mono_a = temp.path().join("mono_a");
+    git.run(temp.path(), &["init", "-q", &mono_a.to_string_lossy()]);
+    let svc_a = project_with_local_templates(&mono_a, "svc");
+    reinit_rust(&ude, &svc_a);
+    let gitconfig = append_to(&svc_a.join(".gitconfig"), "[alias]\n\tco = checkout\n");
+    git.run(&mono_a, &["add", "-A"]);
+    commit_without_project_hooks(&git, &mono_a, "chore: add svc");
+    let mono_b = temp.path().join("mono_b");
+    git.run(
+        temp.path(),
+        &[
+            "clone",
+            "-q",
+            &mono_a.to_string_lossy(),
+            &mono_b.to_string_lossy(),
+        ],
+    );
+    // git still recognises the repository, but cannot read its index.
+    fs::write(mono_b.join(".git/index"), "garbage").unwrap();
+    let svc_b = mono_b.join("svc");
+
+    let path = svc_b.to_string_lossy().to_string();
+    let init = ude(&svc_b, &["init", "--path", &path, "--type", "rust"]);
+    let text = outputs(&init);
+    assert_eq!(init.status.code(), Some(1), "{text}");
+    assert!(text.contains("git ls-files failed"), "{text}");
+    assert_eq!(
+        fs::read_to_string(svc_b.join(".gitconfig")).unwrap(),
+        gitconfig,
+        "init overwrote a committed edit: {text}"
+    );
+}
+
+#[test]
 fn test_init_fails_on_unusable_git_dir_in_project() {
     // Negative control for the case above: the project's own .git must work.
     let temp = tempdir().unwrap();
