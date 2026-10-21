@@ -10,8 +10,8 @@ overrides_applied: 1
 overrides:
   - must_have: "01-01 backstop: deadline boundary is inclusive (elapsed >= timeout kills the group; a child that exits before the poll observes the deadline returns its real status; POLL_INTERVAL = 10 ms)"
     reason: "Accepted on the evidence: run_bounded checks child.try_wait() before the `Instant::now() >= deadline` kill and returns the real status on Ok(Some), POLL_INTERVAL is Duration::from_millis(10), and the timeout tests pass. A test pinned to the exact millisecond boundary would itself be flaky."
-    accepted_by: "orchestrator ruling (not the operator), on the implementation read plus passing timeout tests"
-    accepted_at: "2026-10-20T00:33:36Z"
+    accepted_by: "operator (2026-10-21), after being told the exact boundary is untested and the worst case is one 10 ms poll later; first ruled by the orchestrator on 2026-10-20"
+    accepted_at: "2026-10-21T22:00:00Z"
 re_verification:
   previous_status: passed
   previous_score: 15/15

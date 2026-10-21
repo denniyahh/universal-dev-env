@@ -70,6 +70,8 @@ Seeded at requirement level from RESEARCH.md; task IDs bound from the planner's 
 | post-review b5c11a3 | — | — | SYNC-01 | — | Unreadable committed file with no template stops init (exit 2), no state recorded. NC: readable file → Unmanaged | e2e (unix) | `cargo test --test e2e_lifecycle test_init_refuses_unreadable_committed_file_without_template` | ✅ | ✅ green |
 | post-review 464bfc4 | — | — | SYNC-01 | — | A project's own templates/ is not taken as upstream; pull deletes nothing. NC: no templates/ → 11 In Sync | e2e | `cargo test --test e2e_lifecycle test_sync_ignores_a_project_templates_dir_that_is_not_ude` | ✅ | ✅ green |
 | post-verify 8349e70, 577c520 | — | — | SYNC-01 | — | A remote with no template for any managed file (README-only, or its own projects/) is refused (status/pull/push exit 2), files and remote unchanged. NC: template remotes in the root-layout test still publish | e2e | `cargo test --test e2e_lifecycle test_sync_refuses_a_remote_that_is_not_a_template_repo` | ✅ | ✅ green |
+| post-verify 20cf077 | — | — | SYNC-01 | — | Pull deletes only templates the remote's history deleted; a template the remote never had reads Missing upstream and is kept. NC: a deletion commit behind a later commit (shallow file:// clone) is applied | e2e | `cargo test --test e2e_lifecycle test_pull_deletes_only_templates_the_remote_history_deleted` | ✅ | ✅ green |
+| post-review 65b9931 | — | — | SYNC-01 | — | Push never deletes a template that has logic (mise.toml); status and init agree. NC: .gitconfig's template is still deleted | e2e | `cargo test --test e2e_lifecycle test_push_never_deletes_a_template_with_logic` | ✅ | ✅ green |
 
 *Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
 
@@ -102,7 +104,7 @@ Seeded at requirement level from RESEARCH.md; task IDs bound from the planner's 
 - [x] Feedback latency < 30s
 - [x] `nyquist_compliant: true` set in frontmatter
 
-**Approval:** re-validated 2026-10-21 at c868d1b+ (20/20 original rows green, 6 post-verify/post-review rows added and green; hermeticity gate 109/109 with decoy GIT_DIR, decoy untouched, control: plain git resolves the decoy). Previously validated 2026-10-19 (validate-phase audit: 20/20 rows matched to passing tests; hermeticity gate 104/104 with decoy GIT_DIR, decoy untouched; Windows JobObject branch remains manual-only)
+**Approval:** re-validated 2026-10-21 at c868d1b+ (20/20 original rows green, 8 post-verify/post-review rows added and green; hermeticity gate 109/109 with decoy GIT_DIR, decoy untouched, control: plain git resolves the decoy). Previously validated 2026-10-19 (validate-phase audit: 20/20 rows matched to passing tests; hermeticity gate 104/104 with decoy GIT_DIR, decoy untouched; Windows JobObject branch remains manual-only)
 
 ## Validation Audit 2026-10-19
 

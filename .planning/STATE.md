@@ -107,6 +107,8 @@ Recent decisions affecting current work:
 - [Phase 01 verify]: re-init without --type keeps the recorded project type; committed-file detection looks for .git in parents (monorepo subdirectories)
 - [Phase 01 verify]: a committed managed file with no template is left Unmanaged at init (kept tombstone): never deleted by pull, never published by push
 - [Phase 01 verify]: push skips the TypeSafe drift check for a symlinked AGENTS.md
+- [Phase 01 re-verify, operator]: push never deletes a template with logic (D-14 amended); with a remote, pull deletes only what the remote's history shows was deleted (D-12 amended); pre-push falls back to the cached advisory db when the fetch fails
+- [Phase 01 re-verify, operator]: the 10 ms timeout-boundary override is operator-accepted; CI stays unverified until the branch is pushed (operator: not yet)
 
 ### Pending Todos
 
@@ -126,7 +128,7 @@ Recent decisions affecting current work:
 - ⚠️ [Phase 01] Windows runtime behavior (bounded-runner kill, lock release, state.json replace) is unverified: compile-checked only, deferred to Phase 999.1
 - ⚠️ [Phase 01] One symlinked managed file stops status/pull/push for all files (review WR-01): todo logged, no phase owns it
 - ⚠️ [Phase 01] Post-close adversarial review (2026-10-21, .planning/reviews/phase-01-fixes-adversarial-2026-10-21/): 3 defects fixed (bd08717, b5c11a3); 4 pre-existing logged as todos; init symlink-preflight race host-reproduced and deferred to Phase 2 (todo); status wording fixed (c868d1b)
-- ⚠️ [Phase 01] Five info findings from the first code review (97fe52a) are untriaged and tracked in a todo; IN-01 (a local deletion of a templated file deletes the shared .jinja template) needs an operator decision
+- ⚠️ [Phase 01] Four info findings from the first code review (97fe52a, IN-02..IN-05) are tracked in a todo; IN-01 was decided and fixed (65b9931)
 - ⚠️ [Phase 01] Second code review (2026-10-21): 3 critical, 3 warnings, 7 info — 12 fixed, 2 deferred (remote-vs-local template root to Phase 4; CI needs a push); re-verification found and fixed a foreign-remote deletion and the TypeSafe key in curl argv
 
 ## Deferred Items

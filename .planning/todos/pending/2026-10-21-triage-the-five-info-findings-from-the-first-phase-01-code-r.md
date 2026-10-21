@@ -31,3 +31,8 @@ disposition ledger no longer has rows for these; this todo keeps them tracked.
 
 Get the IN-01 decision first. Then fix IN-02..IN-05 test-first (each finding's "Fix" line in the
 97fe52a report is a starting point); IN-05 (a) is `mise lock` plus a commit.
+
+## Update 2026-10-21
+
+IN-01 is done: the operator chose to block it, and 65b9931 makes push skip deleting a template
+that has logic (D-14 amended). IN-02..IN-05 remain.
