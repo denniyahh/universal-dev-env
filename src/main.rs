@@ -231,6 +231,8 @@ fn main() {
             // Init writes only inside the project: a symlinked destination, or a
             // symlinked directory on the way to one, would be written through. Every
             // path init may create or write is checked before anything is touched.
+            // This is a one-time check, not race-safe: a symlink created while init
+            // runs is still followed (a Phase 2 todo).
             let mut write_targets: Vec<PathBuf> = ["scripts/hooks", "scratch", ".agents"]
                 .iter()
                 .map(PathBuf::from)
