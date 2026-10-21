@@ -26,3 +26,9 @@ everywhere, or refuse a symlinked root with exit 2 before writing. Separately, a
 state.json save should not exit 0 (it also drops the unmanaged markers init just
 decided). Test-first: init through a symlinked root asserts the chosen outcome and that
 state.json exists or nothing was written; negative control: a plain directory.
+
+## Update 2026-10-21
+
+The "exits 0 after a failed state.json save" half is fixed: 6b0a2d3 makes a failed save exit 2
+(e2e `test_init_fails_when_state_cannot_be_saved`). Init still writes into the symlink target
+before that failure; the root canonicalize-or-refuse decision remains.

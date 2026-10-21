@@ -119,13 +119,15 @@ Recent decisions affecting current work:
 - [2026-10-21] [general] Make init refusals happen before any file is written — [todo file](.planning/todos/pending/2026-10-21-make-init-refusals-happen-before-any-file-is-written.md)
 - [2026-10-21] [general] Refuse or resolve a symlinked project root in init — [todo file](.planning/todos/pending/2026-10-21-refuse-or-resolve-a-symlinked-project-root-in-init.md)
 - [2026-10-21] [general] Register hooks and gitconfig when init runs in a monorepo subdirectory — [todo file](.planning/todos/pending/2026-10-21-register-hooks-and-gitconfig-when-init-runs-in-a-monorepo-su.md)
+- [2026-10-21] [general] Triage the five info findings from the first phase 01 code review — [todo file](.planning/todos/pending/2026-10-21-triage-the-five-info-findings-from-the-first-phase-01-code-r.md)
 
 ### Blockers/Concerns
 
 - ⚠️ [Phase 01] Windows runtime behavior (bounded-runner kill, lock release, state.json replace) is unverified: compile-checked only, deferred to Phase 999.1
 - ⚠️ [Phase 01] One symlinked managed file stops status/pull/push for all files (review WR-01): todo logged, no phase owns it
 - ⚠️ [Phase 01] Post-close adversarial review (2026-10-21, .planning/reviews/phase-01-fixes-adversarial-2026-10-21/): 3 defects fixed (bd08717, b5c11a3); 4 pre-existing logged as todos; init symlink-preflight race host-reproduced and deferred to Phase 2 (todo); status wording fixed (c868d1b)
-- ⚠️ [Phase 01] Seven info-level review findings (IN-01..IN-07) are untriaged; IN-01: a local deletion of a templated file deletes the shared .jinja template
+- ⚠️ [Phase 01] Five info findings from the first code review (97fe52a) are untriaged and tracked in a todo; IN-01 (a local deletion of a templated file deletes the shared .jinja template) needs an operator decision
+- ⚠️ [Phase 01] Second code review (2026-10-21): 3 critical, 3 warnings, 7 info — 12 fixed, 2 deferred (remote-vs-local template root to Phase 4; CI needs a push); re-verification found and fixed a foreign-remote deletion and the TypeSafe key in curl argv
 
 ## Deferred Items
 

@@ -26,3 +26,9 @@ pre-flight, so any refusal leaves the project untouched; then settle one exit co
 init refusals. Test-first: extend test_init_refuses_unreadable_gitignore and
 test_init_refuses_unreadable_committed_file_without_template to assert no managed file
 was written, mirroring the symlink refusal tests.
+
+## Update 2026-10-21
+
+The exit-code half is fixed: 7e44cf1 makes every init failure exit 2. The ordering half (reads
+init depends on happen after writes) remains; the no-templates refusal (464bfc4) already runs
+before any write.
