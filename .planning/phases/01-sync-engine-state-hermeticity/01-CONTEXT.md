@@ -50,7 +50,7 @@ Scale context: 18 template files, single user, on-demand CLI (no daemon).
 ### Deletion behavior
 - **D-12:** Deleted upstream, local copy unchanged → pull deletes the local file, drops it from state, and reports it as deleted.
 - **D-13:** Deleted upstream, local copy edited → conflict. The local file is left untouched and reported as conflicted. `ude sync resolve` lets the user choose to keep it as an unmanaged file or delete it. This is the remediation plan's negative control.
-- **D-14:** Deleted locally → push deletes the upstream template automatically and reports it. Undo is `git revert` in the upstream repo. Other machines then delete their copy on their next pull (D-12).
+- **D-14:** Deleted locally → push deletes the upstream template automatically and reports it. Undo is `git revert` in the upstream repo. Other machines then delete their copy on their next pull (D-12). *Amended 2026-10-21 (operator):* push never deletes a `.jinja` template that has template logic; it skips the deletion and says to restore the file or delete the template upstream directly.
 - **D-15:** Deleted locally but not yet pushed → pull keeps it deleted (no resurrection) and reports "deleted locally — push to propagate". If upstream changed the file in the meantime, that is a conflict.
 - **D-16:** Deleted on both sides → clean removal from state, never an empty 0-byte file (remediation plan 1.1 item 5: distinguish absent from empty).
 
