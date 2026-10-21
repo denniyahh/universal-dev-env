@@ -278,8 +278,17 @@ fn main() {
             );
             let renderer = template::TemplateRenderer::new();
 
-            // Locate canonical templates directory
+            // Locate canonical templates directory. Without one init would write
+            // nothing yet record the user's files as managed, and the next pull would
+            // delete them.
             let root_template_dir = find_templates_dir();
+            if root_template_dir.is_none() {
+                eprintln!(
+                    "  {} Initialization failed: no ude templates directory found",
+                    "✗".red()
+                );
+                std::process::exit(EXIT_HARD_FAILURE);
+            }
 
             // 1. Create target project folders
             let hooks_dir = project_path.join("scripts/hooks");
@@ -567,7 +576,7 @@ fn main() {
                     }
                 } else {
                     match fs::read(project_path.join(rel)) {
-                        Ok(bytes) if root_template_dir.is_some() && template().is_none() => {
+                        Ok(bytes) if template().is_none() => {
                             let hash = sync::SyncEngine::fingerprint(&bytes);
                             project_state.record_tombstone(rel, hash, true);
                             unmanaged_local.push(rel);
@@ -1429,11 +1438,15 @@ fn open_sync_templates(
     cache_dir: &Path,
 ) -> (PathBuf, Option<PathBuf>, Option<sync::RemoteCache>) {
     let Some(r_url) = remote_url else {
-        return (
-            find_templates_dir().unwrap_or_else(|| PathBuf::from("templates")),
-            None,
-            None,
-        );
+        // Without templates every managed file would read as deleted upstream.
+        let Some(templates) = find_templates_dir() else {
+            eprintln!(
+                "  {} No ude templates directory found; pass --remote or set central_repo",
+                "✗".red()
+            );
+            std::process::exit(EXIT_HARD_FAILURE);
+        };
+        return (templates, None, None);
     };
     match engine.ensure_remote_repo(r_url, branch, cache_dir) {
         Ok(cache) => {
@@ -1479,15 +1492,20 @@ fn run_sync_resolve(engine: &sync::SyncEngine, local_project: &Path, file: &Path
     }
 }
 
+/// A ude template tree, as opposed to a project's own `templates/` (Django, Flask, Helm).
+fn is_ude_templates(dir: &Path) -> bool {
+    dir.join("projects/generic").is_dir()
+}
+
 fn find_templates_dir() -> Option<PathBuf> {
     let cwd_templates = Path::new("templates");
-    if cwd_templates.exists() {
+    if is_ude_templates(cwd_templates) {
         return Some(cwd_templates.to_path_buf());
     }
 
     if let Some(manifest_dir) = option_env!("CARGO_MANIFEST_DIR") {
         let manifest_templates = Path::new(manifest_dir).join("templates");
-        if manifest_templates.exists() {
+        if is_ude_templates(&manifest_templates) {
             return Some(manifest_templates);
         }
     }
@@ -1497,7 +1515,7 @@ fn find_templates_dir() -> Option<PathBuf> {
     {
         for rel in &["../../templates", "../templates", "../share/ude/templates"] {
             let candidate = parent.join(rel);
-            if candidate.exists() {
+            if is_ude_templates(&candidate) {
                 return Some(candidate);
             }
         }
@@ -1505,7 +1523,7 @@ fn find_templates_dir() -> Option<PathBuf> {
 
     if let Some(base_dirs) = directories::BaseDirs::new() {
         let user_templates = base_dirs.data_dir().join("ude/templates");
-        if user_templates.exists() {
+        if is_ude_templates(&user_templates) {
             return Some(user_templates);
         }
     }
