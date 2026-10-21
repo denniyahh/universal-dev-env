@@ -2271,6 +2271,9 @@ mod tests {
             cmd.env("GIT_CONFIG_GLOBAL", &self.gitconfig)
                 .env("GIT_CONFIG_NOSYSTEM", "1")
                 .env("GIT_TERMINAL_PROMPT", "0")
+                // Discovery stops at the temp dir, so a TMPDIR inside a checkout never
+                // puts a fixture inside that repository.
+                .env("GIT_CEILING_DIRECTORIES", std::env::temp_dir())
                 .stdin(Stdio::null());
             cmd
         }
@@ -2303,6 +2306,10 @@ mod tests {
             vec![
                 ("GIT_CONFIG_GLOBAL".into(), self.gitconfig.clone().into()),
                 ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+                (
+                    "GIT_CEILING_DIRECTORIES".into(),
+                    std::env::temp_dir().into(),
+                ),
             ]
         }
     }
@@ -2320,6 +2327,18 @@ mod tests {
                 "{name} must be removed from fixture git commands"
             );
         }
+        let ceiling = std::env::temp_dir();
+        assert_eq!(
+            envs.get(OsStr::new("GIT_CEILING_DIRECTORIES")),
+            Some(&Some(ceiling.as_os_str())),
+            "fixture git discovery must stop at the temp dir"
+        );
+        assert!(
+            fixture.gitconfig_env().iter().any(
+                |(key, value)| key == "GIT_CEILING_DIRECTORIES" && value == ceiling.as_os_str()
+            ),
+            "engine git spawns in tests must stop discovery at the temp dir too"
+        );
         let gitconfig = fixture.gitconfig.as_os_str();
         assert_eq!(
             envs.get(OsStr::new("GIT_CONFIG_NOSYSTEM")),
