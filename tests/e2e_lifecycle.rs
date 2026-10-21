@@ -2194,6 +2194,18 @@ fn test_push_never_deletes_a_template_with_logic() {
         mise_line.contains("push skips it: its template has logic"),
         "{status}"
     );
+    // The template is named by its path in the shared templates, not a local copy's path.
+    assert!(
+        mise_line.contains("delete projects/agents/mise.toml.jinja from the shared templates")
+            && !mise_line.contains(&project.to_string_lossy().to_string()),
+        "{status}"
+    );
+    let pull = outputs(&ude(&project, &["sync", "pull"]));
+    assert!(
+        line_with(&pull, "mise.toml: deleted locally")
+            .contains("push skips it: its template has logic"),
+        "{pull}"
+    );
     assert!(
         line_with(&status, ".gitconfig: Deleted locally")
             .contains("push deletes the shared template"),
