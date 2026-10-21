@@ -38,7 +38,7 @@ created: "2026-10-19"
 | T-01-01 | D | src/process.rs run_bounded | high | mitigate | Deadline poll with ProcessGroup::leader / JobObject group kill on timeout; test_timeout_kills_group asserts < 3 s against a 5 s grandchild and that the grandchild is dead afterwards (the liveness check is what distinguishes a group kill from a leader-only kill); reader threads are joined only within KILL_GRACE after the kill and are otherwise detached, so a descendant that escaped the group with setsid cannot hold the call open (test_pipe_holder_outside_group_timeout_path and _post_exit_path assert < 5 s (about 1.3 s when correct) against a live 10 s outside holder) | closed |
 | T-01-02 | I | run_bounded error messages | medium | mitigate | Messages built from the caller's static label only; test_spawn_failure_names_label asserts a `user:secret@` argument never appears | closed |
 | T-01-03 | T | prepare_command | high | mitigate | env_remove of all 15 `git rev-parse --local-env-vars` names on every spawn; test_env_scrub structural and behavioural checks with negative control | closed |
-| T-01-04 | D | run_bounded on Windows (JobObject) | low | accept | Cannot be compiled on this host; recorded as untested with an end-of-phase human-check; Linux is the operator's platform | closed (accepted) |
+| T-01-04 | D | run_bounded on Windows (JobObject) | low | accept | Compile-checked only (cargo check / clippy for x86_64-pc-windows-msvc pass on this host since 2026-10-20); never run; runtime checks waived by the operator and backlogged as Phase 999.1; Linux is the operator's platform | closed (accepted) |
 | T-01-05 | T | sync and e2e test fixtures | medium | mitigate | GitFixture env_removes the 15 local variables and pins GIT_CONFIG_GLOBAL / GIT_CONFIG_NOSYSTEM, so a fixture can never write into the host checkout or read the host identity; test_git_fixture_scrubs_local_env asserts it with a negative control | closed |
 | T-01-06 | T | SyncEngine git spawns | high | mitigate | Every spawn through run_bounded's 15-variable scrub; e2e test_sync_ignores_inherited_git_dir proves a decoy is byte-identical after status and push; hermeticity gate on the unit suite | closed |
 | T-01-07 | I | clone progress line, git stderr excerpts, main.rs remote URL lines | medium | mitigate | process::redact_userinfo on every printed URL and on stderr_excerpt; labels never contain argv; test_redact_userinfo with negative control | closed |
@@ -95,6 +95,9 @@ Per-threat evidence (file:line and pinning test for each closed row) is in the a
 
 - **Root-layout remote push silently lost edits (pre-existing, not introduced by Phase 01) — fixed.** For a remote with no `templates/` directory, `src/main.rs` derives the cache checkout as `tmpl_dir.parent()`, but `ensure_remote_repo` returns the checkout root itself; `stage_publication` then treats the failed `git status` (empty stdout) as "No changes to push", returns Ok, and the ancestor advances. Reproduced by the auditor through the binary: push exits 0 publishing nothing, the next pull overwrites the local edit. Negative control (remote with `templates/`) publishes and keeps the edit. Disposition: **resolved 2026-10-19** (operator chose fix-before-verification). 40c9c90/05546a5: `RemoteCache` carries `checkout_dir` and push uses it; e2e `test_sync_push_root_layout_remote_publishes_and_pull_keeps_edit` (templates/ control + root layout). cbd4877/c737383: a failed `git status` or `git diff --cached` in `stage_publication` is a hard error (exit 2); `test_stage_publication_fails_when_git_status_fails`. Untested: other remote layouts, `--pr` with a root-layout remote, the diff --cached failure branch.
 
+- **Init symlink pre-flight is not race-safe (found 2026-10-21, outside the register: init writes were not in the Phase 01 threat model) — deferred to Phase 2.** Init refuses symlinked destinations before writing, but its later writes follow links, so a symlink planted in the project while init runs is written through. Host-reproduced at c868d1b: a FIFO template stalls init after the pre-flight, `.agents/AGENTS.md -> <outside file>` is planted, and the outside file is overwritten; control without the symlink leaves it unchanged. Requires a concurrent process that can write into the project; a committed symlink is still refused. Severity medium (below block_on: high). Operator decision 2026-10-21: Phase 2 todo `2026-10-21-make-init-and-sync-writes-refuse-a-symlink-created-mid-run.md`; the code comment now states the limit (ea87575). Sync's staged writes probably share the window between validation and rename (not checked).
+- **Unmanaged files could still be published or deleted (found 2026-10-21 by the external adversarial review; relates to T-01-22) — fixed.** An unreadable committed file with no template skipped its kept tombstone, so push published it; a user's own uncommitted file with no template was recorded as an ancestor, so pull deleted it. b5c11a3: init stops with exit 2 on the unreadable file and tombstones the user's file; e2e `test_init_refuses_unreadable_committed_file_without_template` and `test_init_leaves_uncommitted_file_without_template_unmanaged` (controls: readable file → Unmanaged; template present → In Sync). Still open, tracked as a todo: an uncommitted `.gitignore` with no template is publishable.
+
 ---
 
 ## Security Audit Trail
@@ -112,4 +115,12 @@ Per-threat evidence (file:line and pinning test for each closed row) is in the a
 - [x] `threats_open: 0` confirmed
 - [x] `status: verified` set in frontmatter
 
-**Approval:** verified 2026-10-19
+**Approval:** verified 2026-10-19; re-audited 2026-10-21 (register unchanged, threats_open 0; two findings outside the register recorded above)
+
+## Security Audit 2026-10-21
+
+| Metric | Count |
+|---|---|
+| Threats found | 43 |
+| Closed | 43 |
+| Open | 0 |
