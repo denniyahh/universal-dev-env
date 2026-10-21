@@ -32,6 +32,9 @@ const FIXTURE_GITCONFIG: &str =
 fn ude_command(bin: &str) -> Command {
     let mut cmd = Command::new(bin);
     cmd.env_remove("TYPESAFE_API_KEY");
+    // Git discovery stops at the temp dir: a TMPDIR inside a checkout would otherwise
+    // put every "no git" test inside that repository, and init would write to it.
+    cmd.env("GIT_CEILING_DIRECTORIES", std::env::temp_dir());
     cmd
 }
 
@@ -46,8 +49,22 @@ fn scrubbed_git(dir: &Path, global_config: &Path) -> Command {
     cmd.env("GIT_CONFIG_GLOBAL", global_config)
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_CEILING_DIRECTORIES", std::env::temp_dir())
         .stdin(Stdio::null());
     cmd
+}
+
+#[test]
+fn test_fixture_commands_stop_git_discovery_at_the_temp_dir() {
+    let ceiling = std::env::temp_dir();
+    let global = ceiling.join("unused-gitconfig");
+    for cmd in [ude_command("ude"), scrubbed_git(&ceiling, &global)] {
+        let value = cmd
+            .get_envs()
+            .find(|(name, _)| *name == "GIT_CEILING_DIRECTORIES")
+            .and_then(|(_, value)| value);
+        assert_eq!(value, Some(ceiling.as_os_str()), "{:?}", cmd.get_program());
+    }
 }
 
 /// Runs a fixture git step and panics with its args and stderr if it fails.
@@ -1206,9 +1223,6 @@ fn sync_cli_with_env(
     fs::write(&gitconfig, FIXTURE_GITCONFIG).unwrap();
     let cache_dir = root.join("cache");
     fs::create_dir_all(&cache_dir).unwrap();
-    // Git discovery must stop at the tempdir: a TMPDIR inside a checkout would otherwise
-    // put every "no git" test inside that repository.
-    let ceiling = root.parent().unwrap_or(root).to_path_buf();
     move |project: &Path, args: &[&str]| {
         let mut cmd = ude_command(bin);
         cmd.current_dir(project).args(args);
@@ -1220,7 +1234,6 @@ fn sync_cli_with_env(
             .env("GIT_CONFIG_GLOBAL", &gitconfig)
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("XDG_CACHE_HOME", &cache_dir)
-            .env("GIT_CEILING_DIRECTORIES", &ceiling)
             .envs(extra.iter().map(|(name, value)| (name, value)))
             .stdin(Stdio::null())
             .output()
