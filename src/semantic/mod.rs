@@ -129,6 +129,8 @@ impl TypeSafeClient {
         let req_json = serde_json::to_string(&request)
             .map_err(|e| format!("Failed to serialize request: {e}"))?;
 
+        // The key and body go to curl as a config on stdin: on the command line the key
+        // would be visible to other local users in the process list.
         let mut child = Command::new("curl")
             .args([
                 "-s",
@@ -140,11 +142,9 @@ impl TypeSafeClient {
                 "POST",
                 "https://api.typesafe.ai/v1/systemone",
                 "-H",
-                &format!("Authorization: Bearer {api_key}"),
-                "-H",
                 "Content-Type: application/json",
-                "--data-binary",
-                "@-",
+                "--config",
+                "-",
             ])
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
@@ -154,7 +154,7 @@ impl TypeSafeClient {
 
         if let Some(mut stdin) = child.stdin.take() {
             use std::io::Write;
-            let _ = stdin.write_all(req_json.as_bytes());
+            let _ = stdin.write_all(curl_config(api_key, &req_json).as_bytes());
         }
 
         let output = child
@@ -182,9 +182,98 @@ impl TypeSafeClient {
     }
 }
 
+/// A curl config (read with `--config -`) carrying the bearer token and the request body.
+fn curl_config(api_key: &str, body: &str) -> String {
+    format!(
+        "header = {}\ndata-binary = {}\n",
+        curl_config_quote(&format!("Authorization: Bearer {api_key}")),
+        curl_config_quote(body)
+    )
+}
+
+/// Quotes `value` for a curl config file, where `\\` and `"` must be escaped.
+fn curl_config_quote(value: &str) -> String {
+    let mut quoted = String::with_capacity(value.len() + 2);
+    quoted.push('"');
+    for ch in value.chars() {
+        match ch {
+            '\\' => quoted.push_str("\\\\"),
+            '"' => quoted.push_str("\\\""),
+            '\n' => quoted.push_str("\\n"),
+            '\r' => quoted.push_str("\\r"),
+            '\t' => quoted.push_str("\\t"),
+            _ => quoted.push(ch),
+        }
+    }
+    quoted.push('"');
+    quoted
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Real curl parses the config: the received header and body equal the inputs,
+    /// including quotes, backslashes and newlines.
+    #[test]
+    fn test_curl_config_round_trips_through_curl() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let body = r#"{"state":{"code":"say \"hi\"\\n","path":"C:\\x"},"raw":"tab\there"}"#;
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            let mut request = Vec::new();
+            let mut buf = [0u8; 4096];
+            loop {
+                let n = stream.read(&mut buf).unwrap_or(0);
+                if n == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buf[..n]);
+                let text = String::from_utf8_lossy(&request);
+                if let Some(split) = text.find("\r\n\r\n") {
+                    let length = text[..split]
+                        .lines()
+                        .find_map(|l| l.strip_prefix("Content-Length: "))
+                        .and_then(|v| v.trim().parse::<usize>().ok())
+                        .unwrap_or(0);
+                    if request.len() >= split + 4 + length {
+                        break;
+                    }
+                }
+            }
+            let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+            String::from_utf8(request).unwrap()
+        });
+        let mut child = Command::new("curl")
+            .args([
+                "-s",
+                "-X",
+                "POST",
+                &format!("http://127.0.0.1:{port}/"),
+                "--config",
+                "-",
+            ])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(curl_config("k3y\"x", body).as_bytes())
+            .unwrap();
+        assert!(child.wait().unwrap().success());
+        let request = server.join().unwrap();
+        let (head, received) = request.split_once("\r\n\r\n").unwrap();
+        assert!(head.contains("Authorization: Bearer k3y\"x"), "{head}");
+        assert_eq!(received, body);
+    }
 
     #[test]
     fn test_typesafe_request_serialization() {

@@ -3011,10 +3011,15 @@ fn typesafe_stub_cli(root: &Path) -> (impl Fn(&Path, &[&str]) -> Output, PathBuf
     let stub_dir = root.join("stub_bin");
     fs::create_dir_all(&stub_dir).unwrap();
     let log = root.join("curl_request.json");
+    let argv = root.join("curl_argv.txt");
     let curl = stub_dir.join("curl");
     fs::write(
         &curl,
-        format!("#!/bin/sh\ncat > '{}'\nexit 1\n", log.display()),
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\ncat > '{}'\nexit 1\n",
+            argv.display(),
+            log.display()
+        ),
     )
     .unwrap();
     fs::set_permissions(&curl, fs::Permissions::from_mode(0o755)).unwrap();
@@ -3060,6 +3065,36 @@ fn test_push_typesafe_check_does_not_follow_symlinked_agents() {
     let push = ude(&project, &["sync", "push"]);
     let sent = fs::read_to_string(&log).unwrap_or_default();
     assert!(sent.contains("PRIVATE_PROSE_MARKER"), "{}", outputs(&push));
+}
+
+#[cfg(unix)]
+#[test]
+fn test_typesafe_key_is_not_passed_on_the_curl_command_line() {
+    let temp = tempdir().unwrap();
+    let (ude, stdin_log) = typesafe_stub_cli(temp.path());
+    let argv_log = temp.path().join("curl_argv.txt");
+    let project = project_with_local_templates(temp.path(), "project");
+    reinit_rust(&ude, &project);
+    append_to(&project.join(".agents/AGENTS.md"), "\nA local rule edit.\n");
+
+    let push = ude(&project, &["sync", "push"]);
+    // Negative control: the stub really ran, so an empty argv cannot pass by accident.
+    let argv = fs::read_to_string(&argv_log).expect("curl stub was not invoked");
+    assert!(
+        argv.contains("api.typesafe.ai"),
+        "argv: {argv}\n{}",
+        outputs(&push)
+    );
+    assert!(
+        !argv.contains("stub-key"),
+        "API key visible in argv: {argv}"
+    );
+    let stdin = fs::read_to_string(&stdin_log).unwrap();
+    assert!(
+        stdin.contains("Authorization: Bearer stub-key"),
+        "stdin: {stdin}"
+    );
+    assert!(stdin.contains("A local rule edit."), "stdin: {stdin}");
 }
 
 #[cfg(unix)]
