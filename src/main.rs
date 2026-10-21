@@ -515,7 +515,9 @@ fn main() {
             // 4. Record baseline ancestor checksums in .ude/state.json. Every prior
             // record (files, tombstones, open conflicts) is carried forward unchanged.
             let mut project_state = prior_state.clone();
-            project_state.project_type = Some(project_type);
+            // The type that was rendered: "generic" resolves to a detected type, and
+            // sync must render the same one or mise.toml reads as changed upstream.
+            project_state.project_type = Some(ctx.project_type.clone());
             let mut unmanaged_kept: Vec<&PathBuf> = Vec::new();
             let mut unmanaged_local: Vec<&PathBuf> = Vec::new();
             for rel in &managed_rels {
