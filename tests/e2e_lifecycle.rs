@@ -1766,6 +1766,74 @@ fn test_pull_deletes_only_templates_the_remote_history_deleted() {
     }
 }
 
+#[test]
+fn test_pull_confirms_a_deletion_made_while_resolving_a_merge() {
+    let temp = tempdir().unwrap();
+    let bin = env!("CARGO_BIN_EXE_ude");
+    let git = GitFixture::new();
+    let ude = sync_cli(temp.path());
+    let remote = seed_full_template_remote(&git, temp.path(), "merged");
+    let remote_url = remote.to_string_lossy().to_string();
+    let seed = temp.path().join("merged-seed");
+    let template = seed.join(GITCONFIG_TEMPLATE);
+    let original = fs::read_to_string(&template).unwrap();
+    // Both branches edit the template; the merge conflict is resolved by deleting it.
+    git.run(&seed, &["checkout", "-q", "-b", "side"]);
+    fs::write(&template, format!("{original}# side\n")).unwrap();
+    git.run(&seed, &["commit", "-q", "-am", "side edit"]);
+    git.run(&seed, &["checkout", "-q", "main"]);
+    fs::write(&template, format!("{original}# main\n")).unwrap();
+    git.run(&seed, &["commit", "-q", "-am", "main edit"]);
+    let merge = git
+        .cmd(&seed)
+        .args(["merge", "-q", "side"])
+        .output()
+        .unwrap();
+    assert!(!merge.status.success(), "the fixture merge must conflict");
+    git.run(&seed, &["rm", "-q", GITCONFIG_TEMPLATE]);
+    git.run(&seed, &["commit", "-q", "--no-edit"]);
+    fs::write(seed.join("README.md"), "later change\n").unwrap();
+    git.run(&seed, &["add", "README.md"]);
+    git.run(&seed, &["commit", "-q", "-m", "later change"]);
+    git.run(&seed, &["push", "-q", &remote_url, "main"]);
+
+    let project = temp.path().join("project");
+    init_rust_project(bin, &project);
+    let sync_url = format!("file://{}", remote.display());
+    let status = outputs(&ude(&project, &["sync", "status", "--remote", &sync_url]));
+    assert!(status.contains(".gitconfig: Deleted upstream"), "{status}");
+    let pull = ude(&project, &["sync", "pull", "--remote", &sync_url]);
+    assert_eq!(pull.status.code(), Some(0), "{}", outputs(&pull));
+    assert!(!project.join(".gitconfig").exists(), "{}", outputs(&pull));
+}
+
+#[test]
+fn test_edited_file_with_template_the_remote_never_had_is_missing_upstream() {
+    let temp = tempdir().unwrap();
+    let bin = env!("CARGO_BIN_EXE_ude");
+    let git = GitFixture::new();
+    let ude = sync_cli(temp.path());
+    let project = temp.path().join("project");
+    let init_mise = init_rust_project(bin, &project);
+    let remote = seed_mise_remote(&git, temp.path(), "thin", &init_mise);
+    let remote_url = remote.to_string_lossy().to_string();
+    let edited = append_to(&project.join(".gitconfig"), "# local edit\n");
+
+    let status = outputs(&ude(&project, &["sync", "status", "--remote", &remote_url]));
+    assert!(status.contains(".gitconfig: Missing upstream"), "{status}");
+    let pull = ude(&project, &["sync", "pull", "--remote", &remote_url]);
+    assert_eq!(pull.status.code(), Some(0), "{}", outputs(&pull));
+    assert!(
+        !project.join(".gitconfig.conflict").exists(),
+        "{}",
+        outputs(&pull)
+    );
+    assert_eq!(
+        fs::read_to_string(project.join(".gitconfig")).unwrap(),
+        edited
+    );
+}
+
 /// A bare remote at `<root>/<name>.git` whose main holds a copy of this repository's
 /// `templates/` tree, so a fresh `ude init` project starts in sync with it.
 fn seed_full_template_remote(git: &GitFixture, root: &Path, name: &str) -> PathBuf {
