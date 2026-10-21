@@ -515,6 +515,7 @@ fn main() {
             let mut project_state = prior_state.clone();
             project_state.project_type = Some(project_type);
             let mut unmanaged_kept: Vec<&PathBuf> = Vec::new();
+            let mut unmanaged_local: Vec<&PathBuf> = Vec::new();
             for rel in &managed_rels {
                 // A tracked file keeps its prior record: init did not write it, and a
                 // replacement ancestor (the current template or the local bytes) would
@@ -529,28 +530,47 @@ fn main() {
                 // fresh clone cannot tell a template deleted upstream from one that never
                 // existed, so a committed file is left unmanaged (a kept tombstone): pull
                 // never deletes it, push never resurrects or creates a template from it.
-                // An uncommitted kept .gitignore records nothing.
+                // An unreadable one stops init rather than lose that marker. A file init
+                // did not write because it has no template is the user's own and is left
+                // unmanaged the same way. An uncommitted kept .gitignore records nothing.
                 let committed_keep = keep(&rel.to_string_lossy());
                 let kept =
                     committed_keep || (kept_gitignore && rel.as_path() == Path::new(".gitignore"));
-                let recorded = if kept {
-                    match kept_ancestor(&renderer, root_template_dir.as_deref(), rel, &ctx) {
-                        Ok(None) if committed_keep => {
-                            if let Ok(bytes) = fs::read(project_path.join(rel)) {
-                                let hash = sync::SyncEngine::fingerprint(&bytes);
-                                project_state.record_tombstone(rel, hash, true);
-                                unmanaged_kept.push(rel);
-                            }
-                            None
-                        }
-                        Ok(bytes) => bytes,
-                        Err(e) => {
+                let template = || {
+                    kept_ancestor(&renderer, root_template_dir.as_deref(), rel, &ctx)
+                        .unwrap_or_else(|e| {
                             eprintln!("  {} Initialization failed: {e}", "✗".red());
                             std::process::exit(1);
+                        })
+                };
+                let recorded = if kept {
+                    match template() {
+                        None if committed_keep => {
+                            let bytes = fs::read(project_path.join(rel)).unwrap_or_else(|e| {
+                                eprintln!(
+                                    "  {} Cannot read committed {}: {e}",
+                                    "✗".red(),
+                                    rel.display()
+                                );
+                                std::process::exit(EXIT_HARD_FAILURE);
+                            });
+                            let hash = sync::SyncEngine::fingerprint(&bytes);
+                            project_state.record_tombstone(rel, hash, true);
+                            unmanaged_kept.push(rel);
+                            None
                         }
+                        bytes => bytes,
                     }
                 } else {
-                    fs::read(project_path.join(rel)).ok()
+                    match fs::read(project_path.join(rel)) {
+                        Ok(bytes) if root_template_dir.is_some() && template().is_none() => {
+                            let hash = sync::SyncEngine::fingerprint(&bytes);
+                            project_state.record_tombstone(rel, hash, true);
+                            unmanaged_local.push(rel);
+                            None
+                        }
+                        read => read.ok(),
+                    }
                 };
                 if let Some(bytes) = recorded {
                     let hash = sync::SyncEngine::fingerprint(&bytes);
@@ -586,6 +606,13 @@ fn main() {
                         rel.display()
                     );
                 }
+            }
+            for rel in &unmanaged_local {
+                println!(
+                    "  {} Kept existing {} (not overwritten); no shared template, so sync leaves it unmanaged",
+                    "✓".green(),
+                    rel.display()
+                );
             }
 
             // A tracked file that is missing stays missing (D-15). Say so, and what
