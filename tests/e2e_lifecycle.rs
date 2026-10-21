@@ -2225,6 +2225,12 @@ fn test_push_never_deletes_a_template_with_logic() {
     let push = ude(&project, &["sync", "push"]);
     let text = outputs(&push);
     assert_eq!(push.status.code(), Some(1), "{text}");
+    let skip = line_with(&text, "mise.toml: upstream template");
+    assert!(
+        skip.contains("projects/agents/mise.toml.jinja")
+            && !skip.contains(&project.to_string_lossy().to_string()),
+        "{text}"
+    );
     assert!(
         line_with(&text, "mise.toml: upstream template")
             .contains("deleting it would remove it for every project"),
