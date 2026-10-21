@@ -78,6 +78,6 @@ mise trust && mise install && mise run install-hooks
 ```
 
 - `scripts/hooks/pre-commit` scans staged changes for secrets (gitleaks). It fails if mise or the pinned gitleaks is missing.
-- `scripts/hooks/pre-push` runs the full `cargo deny check` (advisories, bans, licenses, sources); any failure blocks the push. An advisory that cannot be fixed yet goes under `[advisories] ignore` in `deny.toml` with a reason.
+- `scripts/hooks/pre-push` runs the full `cargo deny check` (advisories, bans, licenses, sources); any failure blocks the push. An advisory that cannot be fixed yet goes under `[advisories] ignore` in `deny.toml` with a reason. When the advisory database cannot be fetched (offline, outage), the hook checks the cached copy and warns that it may be stale; with no cached copy the push is refused.
 - `mise run supply-chain` runs the same check by hand.
 - `.github/workflows/supply-chain.yml` runs both scans on every push and pull request, and weekly from the default branch.
