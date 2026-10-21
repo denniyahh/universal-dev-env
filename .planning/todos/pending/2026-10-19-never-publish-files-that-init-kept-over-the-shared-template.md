@@ -32,3 +32,14 @@ asserting upstream `gitignore.repo` stays byte-identical, with a negative contro
 ordinary local edit still publishes.
 Source: phase 01 code-review fix report; also logged in
 .planning/phases/01-sync-engine-state-hermeticity/deferred-items.md.
+
+## Update 2026-10-21
+
+The same hole exists when the template is absent: an uncommitted pre-existing
+`.gitignore` with no `gitignore.repo` records nothing at init, reads as
+"Locally Modified (ready to push)", and push creates the template from it (reproduced on
+HEAD and pre-fix code; external adversarial review, agy and pi lanes).
+`test_init_keeps_uncommitted_gitignore_when_template_is_absent` stops at pull and never
+runs push, so it does not catch this; add a push assertion when fixing.
+Committed kept files with no template, and uncommitted non-.gitignore managed files with
+no template, are already left Unmanaged (539a3d7, b5c11a3).
