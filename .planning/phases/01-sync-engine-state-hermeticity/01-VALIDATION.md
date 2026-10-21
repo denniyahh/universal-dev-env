@@ -69,7 +69,7 @@ Seeded at requirement level from RESEARCH.md; task IDs bound from the planner's 
 | post-review b5c11a3 | — | — | SYNC-01 | — | User's own file with no template left Unmanaged, not deleted by pull. NC: template present → init writes it, In Sync | e2e | `cargo test --test e2e_lifecycle test_init_leaves_uncommitted_file_without_template_unmanaged` | ✅ | ✅ green |
 | post-review b5c11a3 | — | — | SYNC-01 | — | Unreadable committed file with no template stops init (exit 2), no state recorded. NC: readable file → Unmanaged | e2e (unix) | `cargo test --test e2e_lifecycle test_init_refuses_unreadable_committed_file_without_template` | ✅ | ✅ green |
 | post-review 464bfc4 | — | — | SYNC-01 | — | A project's own templates/ is not taken as upstream; pull deletes nothing. NC: no templates/ → 11 In Sync | e2e | `cargo test --test e2e_lifecycle test_sync_ignores_a_project_templates_dir_that_is_not_ude` | ✅ | ✅ green |
-| post-verify 8349e70 | — | — | SYNC-01 | — | A remote without projects/ is refused (status/pull/push exit 2), files and remote unchanged. NC: template remotes in the root-layout test still publish | e2e | `cargo test --test e2e_lifecycle test_sync_refuses_a_remote_that_is_not_a_template_repo` | ✅ | ✅ green |
+| post-verify 8349e70, 577c520 | — | — | SYNC-01 | — | A remote with no template for any managed file (README-only, or its own projects/) is refused (status/pull/push exit 2), files and remote unchanged. NC: template remotes in the root-layout test still publish | e2e | `cargo test --test e2e_lifecycle test_sync_refuses_a_remote_that_is_not_a_template_repo` | ✅ | ✅ green |
 
 *Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
 
