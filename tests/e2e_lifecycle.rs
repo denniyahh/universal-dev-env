@@ -1614,6 +1614,50 @@ fn test_sync_push_root_layout_remote_publishes_and_pull_keeps_edit() {
     );
 }
 
+#[test]
+fn test_sync_refuses_a_remote_that_is_not_a_template_repo() {
+    let temp = tempdir().unwrap();
+    let bin = env!("CARGO_BIN_EXE_ude");
+    let git = GitFixture::new();
+    let ude = sync_cli(temp.path());
+    let project = temp.path().join("project");
+    init_rust_project(bin, &project);
+    let gitconfig = fs::read(project.join(".gitconfig")).unwrap();
+    // A repository that is not a ude template tree: no projects/ at its root or under
+    // templates/.
+    let bare = temp.path().join("other.git");
+    let bare_url = bare.to_string_lossy().to_string();
+    git.run(
+        temp.path(),
+        &["init", "--bare", "-q", "-b", "main", &bare_url],
+    );
+    let seed = temp.path().join("other-seed");
+    git.run(
+        temp.path(),
+        &["init", "-q", "-b", "main", &seed.to_string_lossy()],
+    );
+    fs::write(seed.join("README.md"), "not templates\n").unwrap();
+    git.run(&seed, &["add", "-A"]);
+    git.run(&seed, &["commit", "-q", "-m", "seed"]);
+    git.run(&seed, &["push", "-q", &bare_url, "main"]);
+    let head_before = git.output(&bare, &["rev-parse", "refs/heads/main"]);
+
+    for action in ["status", "pull", "push"] {
+        let out = ude(&project, &["sync", action, "--remote", &bare_url]);
+        let text = outputs(&out);
+        assert_eq!(out.status.code(), Some(2), "{action}: {text}");
+        assert!(
+            text.contains("not a ude template repository"),
+            "{action}: {text}"
+        );
+    }
+    assert_eq!(fs::read(project.join(".gitconfig")).unwrap(), gitconfig);
+    assert_eq!(
+        git.output(&bare, &["rev-parse", "refs/heads/main"]),
+        head_before
+    );
+}
+
 /// A bare remote at `<root>/<name>.git` whose main holds a copy of this repository's
 /// `templates/` tree, so a fresh `ude init` project starts in sync with it.
 fn seed_full_template_remote(git: &GitFixture, root: &Path, name: &str) -> PathBuf {
