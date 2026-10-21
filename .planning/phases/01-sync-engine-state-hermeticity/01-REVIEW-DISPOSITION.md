@@ -5,19 +5,19 @@ titles: json
 findings:
   - id: CR-01
     severity: critical
-    disposition: open
+    disposition: fixed
     title: "Init with no templates directory found records the user's files as managed; the next pull deletes them"
   - id: CR-02
     severity: critical
-    disposition: open
+    disposition: fixed
     title: "`sync pull` without a remote deletes every managed file when the template root is wrong or missing (predates the diff)"
   - id: CR-03
     severity: critical
-    disposition: open
+    disposition: fixed
     title: "A monorepo subdirectory whose parent repo git cannot read gets its committed edits overwritten (exit 0)"
   - id: WR-01
     severity: warning
-    disposition: open
+    disposition: fixed
     title: "`--type generic` (or `\"\"`) records a type that sync renders differently; mise.toml reads \"Upstream Updated\" right after init"
   - id: WR-02
     severity: warning
@@ -25,62 +25,62 @@ findings:
     title: "pre-push now blocks every push when the advisory database cannot be fetched"
   - id: WR-03
     severity: warning
-    disposition: open
+    disposition: fixed
     title: "A failed state save is only a warning (exit 0), which silently drops the new kept-tombstone markers"
   - id: IN-01
     severity: info
-    disposition: open
+    disposition: fixed
     title: "Init hard failures exit 1, which this binary defines as \"drift\""
   - id: IN-02
     severity: info
-    disposition: open
+    disposition: fixed
     title: "Fresh-clone default ignores project detection; `--type` is not validated"
   - id: IN-03
     severity: info
-    disposition: open
+    disposition: fixed
     title: "`--mempalace` and `--graphify` cannot be turned off, so their pre-flight guards never skip"
   - id: IN-04
     severity: info
-    disposition: open
+    disposition: deferred
     title: "\"No shared template\" is judged against the local templates, not the remote that sync uses (unverified)"
   - id: IN-05
     severity: info
-    disposition: open
+    disposition: deferred
     title: "The supply-chain workflow has never run; push and pull_request both trigger it"
   - id: IN-06
     severity: info
-    disposition: open
+    disposition: fixed
     title: "e2e tests that assume \"no git\" now depend on the tempdir not being inside a repository"
   - id: IN-07
     severity: info
-    disposition: open
+    disposition: fixed
     title: "The pre-push hook checks the working tree, not the commits being pushed"
   - id: WR-04
     severity: warning
     disposition: fixed
     title: "The TypeSafe drift check reads `.agents/AGENTS.md` through symlinks and sends it to the external API before push's symlink refusal runs"
-open: 13
+open: 1
 total: 14
-recorded: 2026-10-21T18:00:17.811Z
+recorded: 2026-10-21T18:06:23.443Z
 ---
 
 # Phase 01: Code Review Disposition
 
 | Finding | Severity | Disposition | Source |
 |---------|----------|-------------|--------|
-| CR-01 | critical | open | - |
-| CR-02 | critical | open | - |
-| CR-03 | critical | open | - |
-| WR-01 | warning | open | - |
+| CR-01 | critical | fixed | 464bfc4: init exits 2 when no ude templates directory is found; verified with a templates-hidden copy build (control: same build with templates inits) |
+| CR-02 | critical | fixed | 464bfc4: a templates dir counts only with projects/generic; sync without a remote exits 2 when none is found; e2e test_sync_ignores_a_project_templates_dir_that_is_not_ude |
+| CR-03 | critical | fixed | 3249d70: a parent repo git recognises but cannot read stops init; e2e test_init_fails_when_parent_repo_index_is_unreadable (control: empty parent .git still ignored); dubious ownership untested (needs a second uid) |
+| WR-01 | warning | fixed | db2e1a8: init records the rendered type; e2e test_init_records_the_detected_type_for_generic |
 | WR-02 | warning | open | - |
-| WR-03 | warning | open | - |
-| IN-01 | info | open | - |
-| IN-02 | info | open | - |
-| IN-03 | info | open | - |
-| IN-04 | info | open | - |
-| IN-05 | info | open | - |
-| IN-06 | info | open | - |
-| IN-07 | info | open | - |
+| WR-03 | warning | fixed | 6b0a2d3: a failed state save exits 2; e2e test_init_fails_when_state_cannot_be_saved |
+| IN-01 | info | fixed | 7e44cf1: every init failure exits 2 |
+| IN-02 | info | fixed | 8b41fcb: --type validated (rust, node, polyglot, generic); the rust fallback for a fresh clone is the documented default and is unchanged |
+| IN-03 | info | fixed | 8b41fcb: --mempalace=false / --graphify=false work; a bare flag still means true |
+| IN-04 | info | deferred | unverified; init vs remote template root belongs with .ude.toml / central_repo work (Phase 4) |
+| IN-05 | info | deferred | CI cannot run until the branch is pushed; operator said push nothing (2026-10-20) |
+| IN-06 | info | fixed | 9bd2777: e2e helper sets GIT_CEILING_DIRECTORIES; verified with TMPDIR inside the checkout (2 failures before, 64/64 after) |
+| IN-07 | info | fixed | d7d0848: documented in the hook comment |
 | WR-04 | warning | fixed | operator-approved fix (2026-10-20), 374a208 (not in the current review) |
 
 Dispositions: `open` (recorded, not yet triaged), `fixed`, `skipped`, `deferred`.
