@@ -582,11 +582,14 @@ fn main() {
                     project_state.record_file(rel, hash, content);
                 }
             }
+            // Without state.json the unmanaged markers are lost and push would treat
+            // a user's own file as publishable.
             if let Err(e) = project_state.save_to_dir(&project_path) {
                 eprintln!(
-                    "  {} Warning: Failed to persist ancestor state: {e}",
-                    "!".yellow()
+                    "  {} Initialization failed: cannot persist .ude/state.json: {e}",
+                    "✗".red()
                 );
+                std::process::exit(EXIT_HARD_FAILURE);
             } else {
                 println!(
                     "  {} Recorded baseline ancestor state in .ude/state.json",
