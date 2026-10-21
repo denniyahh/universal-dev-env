@@ -115,6 +115,7 @@ Recent decisions affecting current work:
 - [2026-10-19] [general] Template-logic push guard only checks .jinja files — [todo file](.planning/todos/pending/2026-10-19-template-logic-push-guard-only-checks-jinja-files.md)
 - [2026-10-20] [general] Classify a symlinked managed file per file instead of aborting sync — [todo file](.planning/todos/pending/2026-10-20-classify-a-symlinked-managed-file-per-file-instead-of-aborti.md) — Needs Test-first:.
 - [2026-10-20] [tooling] Make generated projects' secret-scan hook self-sufficient — [todo file](.planning/todos/pending/2026-10-20-make-generated-projects-secret-scan-hook-self-sufficient.md) — Needs Test-first:.
+- [2026-10-21] [general] Make init and sync writes refuse a symlink created mid-run — [todo file](.planning/todos/pending/2026-10-21-make-init-and-sync-writes-refuse-a-symlink-created-mid-run.md)
 - [2026-10-21] [general] Make init refusals happen before any file is written — [todo file](.planning/todos/pending/2026-10-21-make-init-refusals-happen-before-any-file-is-written.md)
 - [2026-10-21] [general] Refuse or resolve a symlinked project root in init — [todo file](.planning/todos/pending/2026-10-21-refuse-or-resolve-a-symlinked-project-root-in-init.md)
 - [2026-10-21] [general] Register hooks and gitconfig when init runs in a monorepo subdirectory — [todo file](.planning/todos/pending/2026-10-21-register-hooks-and-gitconfig-when-init-runs-in-a-monorepo-su.md)
@@ -123,7 +124,7 @@ Recent decisions affecting current work:
 
 - ⚠️ [Phase 01] Windows runtime behavior (bounded-runner kill, lock release, state.json replace) is unverified: compile-checked only, deferred to Phase 999.1
 - ⚠️ [Phase 01] One symlinked managed file stops status/pull/push for all files (review WR-01): todo logged, no phase owns it
-- ⚠️ [Phase 01] Post-close adversarial review (2026-10-21, .planning/reviews/phase-01-fixes-adversarial-2026-10-21/): 3 defects fixed (bd08717, b5c11a3); 4 pre-existing logged as todos; init symlink-preflight TOCTOU reported by codex, not host-verified
+- ⚠️ [Phase 01] Post-close adversarial review (2026-10-21, .planning/reviews/phase-01-fixes-adversarial-2026-10-21/): 3 defects fixed (bd08717, b5c11a3); 4 pre-existing logged as todos; init symlink-preflight race host-reproduced and deferred to Phase 2 (todo); status wording fixed (c868d1b)
 - ⚠️ [Phase 01] Seven info-level review findings (IN-01..IN-07) are untriaged; IN-01: a local deletion of a templated file deletes the shared .jinja template
 
 ## Deferred Items
