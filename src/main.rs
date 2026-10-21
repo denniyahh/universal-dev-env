@@ -157,7 +157,7 @@ fn main() {
                     "✗".red(),
                     project_path.display()
                 );
-                std::process::exit(1);
+                std::process::exit(EXIT_HARD_FAILURE);
             }
 
             if let Err(e) = fs::create_dir_all(&project_path) {
@@ -166,7 +166,7 @@ fn main() {
                     "✗".red(),
                     project_path.display()
                 );
-                std::process::exit(1);
+                std::process::exit(EXIT_HARD_FAILURE);
             }
 
             // Records of an earlier `ude init` or sync. Unreadable state is never reset
@@ -211,7 +211,7 @@ fn main() {
                 Ok(paths) => paths,
                 Err(e) => {
                     eprintln!("  {} Initialization failed: {e}", "✗".red());
-                    std::process::exit(1);
+                    std::process::exit(EXIT_HARD_FAILURE);
                 }
             };
             let kept_committed: Vec<&PathBuf> = managed_rels
@@ -297,19 +297,19 @@ fn main() {
             let container_dir = project_path.join("scripts");
             if let Err(e) = fs::create_dir_all(&hooks_dir) {
                 eprintln!("  {} Initialization failed: {e}", "✗".red());
-                std::process::exit(1);
+                std::process::exit(EXIT_HARD_FAILURE);
             }
             if let Err(e) = fs::create_dir_all(&scratch_dir) {
                 eprintln!("  {} Initialization failed: {e}", "✗".red());
-                std::process::exit(1);
+                std::process::exit(EXIT_HARD_FAILURE);
             }
             if let Err(e) = fs::create_dir_all(&agents_dir) {
                 eprintln!("  {} Initialization failed: {e}", "✗".red());
-                std::process::exit(1);
+                std::process::exit(EXIT_HARD_FAILURE);
             }
             if let Err(e) = fs::create_dir_all(&container_dir) {
                 eprintln!("  {} Initialization failed: {e}", "✗".red());
-                std::process::exit(1);
+                std::process::exit(EXIT_HARD_FAILURE);
             }
 
             // A pre-existing .gitignore init kept instead of materializing; its template
@@ -327,7 +327,7 @@ fn main() {
                     )
                 {
                     eprintln!("  {} Initialization failed: {e}", "✗".red());
-                    std::process::exit(1);
+                    std::process::exit(EXIT_HARD_FAILURE);
                 }
 
                 // Preserve existing customized .gitignore rules if already present
@@ -357,14 +357,14 @@ fn main() {
                         updated.extend_from_slice(append_block.as_bytes());
                         if let Err(e) = fs::write(&target_gitignore, updated) {
                             eprintln!("  {} Failed to update existing .gitignore: {e}", "✗".red());
-                            std::process::exit(1);
+                            std::process::exit(EXIT_HARD_FAILURE);
                         }
                     }
                 } else if src_gitignore.exists()
                     && let Err(e) = copy_template_file(tdir, &src_gitignore, &target_gitignore)
                 {
                     eprintln!("  {} Initialization failed: {e}", "✗".red());
-                    std::process::exit(1);
+                    std::process::exit(EXIT_HARD_FAILURE);
                 }
 
                 // Materialize hook suite
@@ -377,7 +377,7 @@ fn main() {
                     let dst_hook = hooks_dir.join(hook);
                     if let Err(e) = copy_template_file(tdir, &src_hook, &dst_hook) {
                         eprintln!("  {} Initialization failed: {e}", "✗".red());
-                        std::process::exit(1);
+                        std::process::exit(EXIT_HARD_FAILURE);
                     }
                     set_executable(&dst_hook);
                 }
@@ -390,7 +390,7 @@ fn main() {
                     let dst_cont = container_dir.join("check-in-container.sh");
                     if let Err(e) = copy_template_file(tdir, &src_cont, &dst_cont) {
                         eprintln!("  {} Initialization failed: {e}", "✗".red());
-                        std::process::exit(1);
+                        std::process::exit(EXIT_HARD_FAILURE);
                     }
                     set_executable(&dst_cont);
                 }
@@ -409,7 +409,7 @@ fn main() {
                     let dst_s = scratch_dir.join(s);
                     if let Err(e) = copy_template_file(tdir, &src_s, &dst_s) {
                         eprintln!("  {} Initialization failed: {e}", "✗".red());
-                        std::process::exit(1);
+                        std::process::exit(EXIT_HARD_FAILURE);
                     }
                     set_executable(&dst_s);
                 }
@@ -426,7 +426,7 @@ fn main() {
                     )
                 {
                     eprintln!("  {} Initialization failed: {e}", "✗".red());
-                    std::process::exit(1);
+                    std::process::exit(EXIT_HARD_FAILURE);
                 }
 
                 if !tracked(".agents/AGENTS.md")
@@ -440,14 +440,14 @@ fn main() {
                     )
                 {
                     eprintln!("  {} Initialization failed: {e}", "✗".red());
-                    std::process::exit(1);
+                    std::process::exit(EXIT_HARD_FAILURE);
                 }
 
                 if init_args.mempalace {
                     let stage_dir = project_path.join(".planning/.mempalace-stage");
                     if let Err(e) = fs::create_dir_all(&stage_dir) {
                         eprintln!("  {} Initialization failed: {e}", "✗".red());
-                        std::process::exit(1);
+                        std::process::exit(EXIT_HARD_FAILURE);
                     }
                     if let Err(e) = render_and_write(
                         &renderer,
@@ -457,7 +457,7 @@ fn main() {
                         &ctx,
                     ) {
                         eprintln!("  {} Initialization failed: {e}", "✗".red());
-                        std::process::exit(1);
+                        std::process::exit(EXIT_HARD_FAILURE);
                     }
                 }
 
@@ -465,11 +465,11 @@ fn main() {
                     let graphify_dir = project_path.join("graphify-out");
                     if let Err(e) = fs::create_dir_all(&graphify_dir) {
                         eprintln!("  {} Initialization failed: {e}", "✗".red());
-                        std::process::exit(1);
+                        std::process::exit(EXIT_HARD_FAILURE);
                     }
                     if let Err(e) = fs::write(graphify_dir.join(".graphify_root"), ".\n") {
                         eprintln!("  {} Initialization failed: {e}", "✗".red());
-                        std::process::exit(1);
+                        std::process::exit(EXIT_HARD_FAILURE);
                     }
                 }
             }
@@ -553,7 +553,7 @@ fn main() {
                     kept_ancestor(&renderer, root_template_dir.as_deref(), rel, &ctx)
                         .unwrap_or_else(|e| {
                             eprintln!("  {} Initialization failed: {e}", "✗".red());
-                            std::process::exit(1);
+                            std::process::exit(EXIT_HARD_FAILURE);
                         })
                 };
                 let recorded = if kept {
