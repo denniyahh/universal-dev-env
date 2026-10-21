@@ -3273,6 +3273,37 @@ fn test_init_keeps_uncommitted_gitignore_when_template_is_absent() {
 }
 
 #[test]
+fn test_init_ignores_unusable_git_dir_above_project() {
+    let temp = tempdir().unwrap();
+    let ude = sync_cli(temp.path());
+    let outer = temp.path().join("outer");
+    fs::create_dir_all(outer.join(".git")).unwrap();
+    let project = project_with_local_templates(&outer, "svc");
+
+    let init = init_output(&ude, &project);
+    assert!(
+        init.contains("not treating the project as a git checkout"),
+        "{init}"
+    );
+    assert!(project.join(".ude/state.json").exists(), "{init}");
+}
+
+#[test]
+fn test_init_fails_on_unusable_git_dir_in_project() {
+    // Negative control for the case above: the project's own .git must work.
+    let temp = tempdir().unwrap();
+    let ude = sync_cli(temp.path());
+    let project = project_with_local_templates(temp.path(), "svc");
+    fs::create_dir_all(project.join(".git")).unwrap();
+
+    let path = project.to_string_lossy().to_string();
+    let init = ude(&project, &["init", "--path", &path, "--type", "rust"]);
+    let text = outputs(&init);
+    assert_eq!(init.status.code(), Some(1), "{text}");
+    assert!(text.contains("git ls-files failed"), "{text}");
+}
+
+#[test]
 fn test_reinit_missing_file_warning_follows_upstream() {
     let temp = tempdir().unwrap();
     let ude = sync_cli(temp.path());

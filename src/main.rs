@@ -1563,8 +1563,10 @@ fn kept_ancestor(
 
 /// The paths in `rels` that git tracks in `project`'s index; empty when neither
 /// `project` nor any parent has a `.git` (a project in a monorepo subdirectory has none
-/// of its own). A git failure is an error: init must not overwrite files it could not
-/// check.
+/// of its own). A git failure is an error when the project has its own `.git`: init
+/// must not overwrite files it could not check. A `.git` only in a parent that git
+/// cannot use (an empty leftover directory, a copied worktree) is warned about and
+/// ignored, as if there were none.
 fn committed_paths(
     project: &Path,
     rels: &[PathBuf],
@@ -1580,10 +1582,18 @@ fn committed_paths(
         .args(rels);
     let out = process::run_bounded(cmd, "git ls-files", process::LOCAL_TIMEOUT)?;
     if !out.status.success() {
-        return Err(format!(
+        let reason = format!(
             "git ls-files failed: {}",
             String::from_utf8_lossy(&out.stderr).trim()
-        ));
+        );
+        if project.join(".git").exists() {
+            return Err(reason);
+        }
+        eprintln!(
+            "  {} Warning: {reason}; not treating the project as a git checkout",
+            "!".yellow()
+        );
+        return Ok(std::collections::HashSet::new());
     }
     Ok(out
         .stdout
