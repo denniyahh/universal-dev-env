@@ -103,7 +103,7 @@
     "enabled": true,
     "auto_update": true
   },
-  "runtime": "codex",
+  "runtime": "claude",
   "mempalace": {
     "enabled": true
   }
