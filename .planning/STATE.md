@@ -122,6 +122,7 @@ Recent decisions affecting current work:
 - [2026-10-21] [general] Refuse or resolve a symlinked project root in init — [todo file](.planning/todos/pending/2026-10-21-refuse-or-resolve-a-symlinked-project-root-in-init.md)
 - [2026-10-21] [general] Register hooks and gitconfig when init runs in a monorepo subdirectory — [todo file](.planning/todos/pending/2026-10-21-register-hooks-and-gitconfig-when-init-runs-in-a-monorepo-su.md)
 - [2026-10-21] [general] Triage the five info findings from the first phase 01 code review — [todo file](.planning/todos/pending/2026-10-21-triage-the-five-info-findings-from-the-first-phase-01-code-r.md)
+- [2026-10-22] [testing] Close two push test gaps from the phase 01 verification — [todo file](.planning/todos/pending/2026-10-22-close-two-push-test-gaps-from-the-phase-01-verification.md)
 
 ### Blockers/Concerns
 
