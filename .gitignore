@@ -16,3 +16,7 @@ Thumbs.db
 
 # GSD research cache (regenerated)
 .planning/research/.cache/
+
+# Knowledge graph build outputs (rebuild with /gsd-graphify build)
+graphify-out/
+.planning/graphs/
