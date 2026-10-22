@@ -20,3 +20,6 @@ Thumbs.db
 # Knowledge graph build outputs (rebuild with /gsd-graphify build)
 graphify-out/
 .planning/graphs/
+
+# MemPalace capture staging (GSD)
+.planning/.mempalace-stage/
