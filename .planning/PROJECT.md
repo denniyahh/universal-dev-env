@@ -18,7 +18,7 @@ Reliable, hermetic, bidirectional developer environment and agent baseline synch
 - ✓ **Anti-Symlink Traversal Validation** — Target paths and parent directories validated to block writes through malicious external symlinks. (`src/sync/mod.rs`)
 - ✓ **Binary & Non-UTF-8 State Tracking** — Raw byte SHA-256 fingerprinting and converged ancestor reconciliation in `.ude/state.json`. (`src/sync/mod.rs`, `src/sync/state.rs`)
 - ✓ **Machine & Repository Doctor Audits** — System checks for SSH signing keys, tools (`git`, `gh`, `mise`, `gitleaks`), hooks, and global configs with text/JSON outputs and exit-code contracts. (`src/audit/mod.rs`)
-- ✓ **Track 1: Sync Engine & State Hermeticity** — Deletion tombstones, two-phase staged materialization, push continuity checks, CRLF normalization, diff3 `.conflict` sidecars with `ude sync resolve`, and bounded subprocess timeouts. — Phase 1 (verified 12/12 on Linux; Windows runtime checks deferred to Phase 999.1)
+- ✓ **Track 1: Sync Engine & State Hermeticity** — Deletion tombstones, two-phase staged materialization, push continuity checks, CRLF normalization, diff3 `.conflict` sidecars with `ude sync resolve`, and bounded subprocess timeouts. — Phase 1 (re-verified 18/18 on Linux 2026-10-22 after two code reviews and an adversarial review; Windows runtime checks deferred to Phase 999.1)
 - ✓ **Jinja Archetype Scaffolding** — Project initialization across Rust, Node, and Polyglot archetypes using Minijinja with embedded hooks and agent guidelines. (`src/template/mod.rs`, `src/manifest/mod.rs`)
 
 ### Active
@@ -56,6 +56,8 @@ Reliable, hermetic, bidirectional developer environment and agent baseline synch
 | Native Rust Minijinja instead of external template engine | Avoids external runtime dependencies (Python/Node) for core CLI scaffolding | ✓ Good |
 | Fresh-clone init keeps committed managed files; one with no template is left Unmanaged (kept tombstone) | Without state.json a clone cannot tell a template deleted upstream from one that never existed; Unmanaged is the only state that neither deletes data nor resurrects a template | — Pending (Phase 1; stale copies stay on clones) |
 | Init refuses any symlinked write destination (exit 2) before writing anything | Hermeticity: init must never write outside the project | ✓ Good (Phase 1) |
+| Push never deletes a shared template that contains logic (D-14 amended) | A local deletion of a rendered file such as mise.toml would remove the template every project renders from | ✓ Good (Phase 1, operator) |
+| With a remote, pull deletes a file only when the remote's history shows its template was deleted (D-12 amended); a template the remote never had is "Missing upstream" and kept | A missing template alone cannot tell a deletion from a remote that never carried it; deleting on that guess loses data | ✓ Good (Phase 1, operator) |
 | Supply-chain advisories block pushes (pre-push and CI); Dependabot alerts only until git flow | A known-vulnerable dependency should not ship; security-fix PRs would bypass a future `develop` branch | — Pending |
 
 ## Evolution
@@ -76,4 +78,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-10-20 after Phase 1*
+*Last updated: 2026-10-22 after Phase 1 re-verification*

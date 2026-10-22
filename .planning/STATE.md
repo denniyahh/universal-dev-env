@@ -3,11 +3,11 @@ gsd_state_version: "1.0"
 current_phase: 2
 current_phase_name: Sanitizer, Boundaries & Security Hardening
 status: planning
-stopped_at: Phase 01 complete, ready to plan Phase 2
-last_updated: "2026-10-20T20:52:03.752Z"
-last_activity: 2026-10-20
-last_activity_desc: Phase 01 complete, transitioned to Phase 2
-state_head: 77e216c14b22601a676a4e4740acd9c850798201
+stopped_at: Phase 1 complete, ready to plan Phase 2
+last_updated: "2026-10-22T11:56:48.411Z"
+last_activity: 2026-10-22
+last_activity_desc: Phase 1 complete, transitioned to Phase 2
+state_head: 0fc3e0506eeecf05daf188ea4dfa76f70578936e
 progress:
   total_phases: 4
   completed_phases: 1
@@ -20,7 +20,7 @@ progress:
 
 ## Project Reference
 
-See: `.planning/PROJECT.md` (updated 2026-10-20)
+See: `.planning/PROJECT.md` (updated 2026-10-22)
 
 **Core value:** Reliable, hermetic, bidirectional developer environment and agent baseline synchronization with cryptographic ancestor state tracking and zero credential leakage.
 **Current focus:** Phase 2 — Sanitizer, Boundaries & Security Hardening
@@ -30,7 +30,7 @@ See: `.planning/PROJECT.md` (updated 2026-10-20)
 Phase: 2 — Sanitizer, Boundaries & Security Hardening
 Plan: Not started
 Status: Ready to plan
-Last activity: 2026-10-20 — Phase 01 complete, transitioned to Phase 2
+Last activity: 2026-10-22 — Phase 1 complete, transitioned to Phase 2
 
 Progress: [███░░░░░░░] 25%
 
@@ -49,7 +49,7 @@ Progress: [███░░░░░░░] 25%
 | Phase 2: Sanitizer, Boundaries & Security Hardening | 0/3 | - | - |
 | Phase 3: Doctor & CLI Hardening | 0/3 | - | - |
 | Phase 4: Templates, Archetypes & Manifest Decoupling | 0/3 | - | - |
-| 01 | 11 | - | - |
+| 1 | 11 | - | - |
 
 **Recent Trend:**
 - Trend: Stable
@@ -130,6 +130,7 @@ Recent decisions affecting current work:
 - ⚠️ [Phase 01] One symlinked managed file stops status/pull/push for all files (review WR-01): todo logged, no phase owns it
 - ⚠️ [Phase 01] Post-close adversarial review (2026-10-21, .planning/reviews/phase-01-fixes-adversarial-2026-10-21/): 3 defects fixed (bd08717, b5c11a3); 4 pre-existing logged as todos; init symlink-preflight race host-reproduced and deferred to Phase 2 (todo); status wording fixed (c868d1b)
 - ⚠️ [Phase 01] Four info findings from the first code review (97fe52a, IN-02..IN-05) are tracked in a todo; IN-01 was decided and fixed (65b9931)
+- ⚠️ [Phase 01] Final re-verification (2026-10-22, 18/18): two push test gaps backlogged as a todo (operator); the leaked TypeSafe API key is to be rotated by the operator
 - ⚠️ [Phase 01] Second code review (2026-10-21): 3 critical, 3 warnings, 7 info — 12 fixed, 2 deferred (remote-vs-local template root to Phase 4; CI needs a push); re-verification found and fixed a foreign-remote deletion and the TypeSafe key in curl argv
 
 ## Deferred Items
@@ -143,6 +144,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-20T20:55:00Z
-Stopped at: Phase 01 complete, ready to plan Phase 2
+Last session: 2026-10-22T12:00:00Z
+Stopped at: Phase 1 complete, ready to plan Phase 2
 Resume file: None
