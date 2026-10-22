@@ -6,7 +6,7 @@ Systematic execution of the 4-track remediation plan derived from external adver
 
 ## Phases
 
-- [x] **Phase 1: Sync Engine & State Hermeticity** - Deletion tombstones, 2-phase shadow materialization, CRLF normalization, Myers diff conflicts, and bounded subprocess timeouts. (completed 2026-10-20)
+- [x] **Phase 1: Sync Engine & State Hermeticity** - Deletion tombstones, 2-phase shadow materialization, CRLF normalization, Myers diff conflicts, and bounded subprocess timeouts. (completed 2026-10-22)
 - [ ] **Phase 2: Sanitizer, Boundaries & Security Hardening** - Shannon entropy analysis, expanded Gitleaks-equivalent regex screening, boundary-safe path parameterization, and reversible token verification.
 - [ ] **Phase 3: Doctor & CLI Hardening** - Strict OpenSSH public key parsing, dual disk/git-index hook mode audits, canonical relative include resolution against `.git/`, and strict POSIX exit codes.
 - [ ] **Phase 4: Templates, Archetypes & Manifest Decoupling** - Parameterized `.ude.toml` manifest variables, safe re-initialization with backup semantics, strict Minijinja undefined checks, and config precedence.
@@ -121,7 +121,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Sync Engine & State Hermeticity | 11/11 | Complete    | 2026-10-20 |
+| 1. Sync Engine & State Hermeticity | 11/11 | Complete    | 2026-10-22 |
 | 2. Sanitizer, Boundaries & Security Hardening | 0/3 | Not started | - |
 | 3. Doctor & CLI Hardening | 0/3 | Not started | - |
 | 4. Templates, Archetypes & Manifest Decoupling | 0/3 | Not started | - |

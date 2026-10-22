@@ -52,7 +52,9 @@
     "inline_plan_threshold": 1,
     "use_worktrees": true,
     "tdd_mode": true,
-    "ui_review": true
+    "ui_review": true,
+    "_auto_chain_active": false,
+    "subagent_timeout": 900000
   },
   "ship": {
     "pr_body_sections": []
@@ -70,9 +72,9 @@
   },
   "mode": "yolo",
   "granularity": "fine",
-  "subagent_timeout": 900000,
   "features": {
-    "thinking_partner": true
+    "thinking_partner": true,
+    "global_learnings": true
   },
   "intel": {
     "enabled": true
@@ -101,5 +103,8 @@
     "enabled": true,
     "auto_update": true
   },
-  "runtime": "codex"
+  "runtime": "codex",
+  "mempalace": {
+    "enabled": true
+  }
 }
