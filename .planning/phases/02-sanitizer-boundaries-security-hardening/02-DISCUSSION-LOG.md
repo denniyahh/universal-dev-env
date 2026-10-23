@@ -43,9 +43,23 @@ Post-discussion measurement (Claude): 4.2 threshold catches only 18.6% of random
 flags a 39-char CamelCase English token (4.26) — threshold left to Claude's discretion with a
 two-direction fixture requirement.
 
+## Entropy rule calibration (follow-up, 2026-10-23)
+
+Operator asked to resolve the entropy numbers before execution. Claude prototyped candidate rules in
+Python against random tokens and the repo + host corpus.
+
+| Option | Description | Selected |
+|--------|-------------|----------|
+| R11 class-relative | len-aware entropy + switch rate >= 0.75x expected for classes present; 93-100% mixed, 77-82% base36, 1 repo FP (JWT fixture, src/sanitizer tests) | ✓ |
+| R7 fixed switch rate | switch >= 0.40; 97-99% mixed, ~48% base36, 1 repo FP | |
+| R0 remediation 4.2 | 19% at 20 chars; 300 repo FPs | |
+
+## TypeSafe hardening scope (follow-up, 2026-10-23)
+
+Operator: move to Phase 3. Roadmap edit (SEC-05, criterion 5, plan 03-04) shown as diff and approved.
+
 ## Claude's Discretion
 
-- Entropy threshold calibration (with fixture table + `templates/` negative control)
 - Refusal output format
 - Secret rule source for SEC-02
 - Non-UTF-8 blob screening at the gate
@@ -53,4 +67,4 @@ two-direction fixture requirement.
 
 ## Deferred Ideas
 
-- TypeSafe System One hardening (remediation plan 2.3) — not in SEC-01..04
+- TypeSafe System One hardening (remediation plan 2.3) — moved to Phase 3 (SEC-05)

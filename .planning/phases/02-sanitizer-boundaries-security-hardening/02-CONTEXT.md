@@ -39,20 +39,58 @@ path parameterization (SEC-03), and verified reversibility between placeholders 
   It does not score assignment values only. Bare tokens in prose (AGENTS.md), scripts and comments
   are in scope. The built-in shapes (D-02) and the marker absorb the false positives.
 
+### Entropy rule (SEC-01) — calibrated and chosen 2026-10-23
+- **D-05:** The remediation plan's fixed "≥20 chars, entropy > 4.2" rule is **replaced** by rule "R11".
+  A token blocks only if it passes **both** tests:
+  1. **Tokenize:** take maximal runs of `[A-Za-z0-9+/=_\-.]` that are at least 20 characters long,
+     after removing the D-02 shapes (ssh public key lines, 40/64/128-char hex digests, UUIDs, SRI hashes).
+  2. **Entropy test:** Shannon entropy over the token's characters ≥ `0.80 × log2(min(len, 64))`.
+     This is length-aware, because a string of length n can never score above log2(n).
+  3. **Randomness test:** over the token's alphanumeric characters only (symbols are skipped),
+     classify each as upper, lower or digit, then
+     `observed = (adjacent class changes) / (alnum_count − 1)`. Expected for random text over the
+     classes present is `E = 1 − Σ(size_c / Σsize)²`, with sizes upper = 26, lower = 26, digit = 10.
+     It requires `E > 0` (at least two classes present) and `observed ≥ 0.75 × E`.
+  — **Reversibility:** reversible — two constants and one function; the fixture table (below) is
+  what makes a change safe.
+- **Measured results**, from a Python prototype on 2026-10-23. Each positive row is 1000 random
+  tokens, so read it as ±~1.5 points.
+
+  | Input | Remediation rule (4.2) | **R11 (chosen)** |
+  |---|---|---|
+  | random mixed-case Base64 / URL-safe / alnum, 20–24 chars | 18–70% blocked | **93–94% blocked** |
+  | same, 32 chars | 99% | **93–97%** |
+  | same, 40–88 chars, AWS-secret-shaped, JWT-shaped | 100% | **96–100%** |
+  | random lowercase+digit or uppercase+digit (base36), 20–40 chars | 2–96% | **77–82%** |
+  | random hex-only (32 chars) | 0% | **0%** (see limits) |
+  | this repo, every git-tracked file (148 files, 4421 tokens ≥20 chars) | 300 false positives | **1** (a JWT test fixture in `src/sanitizer/mod.rs` tests) |
+  | `templates/` + `template/` only (34 files, 281 tokens) | 72 | **0** |
+  | operator's host agent-rule files (6 files) | 2 | **0** |
+
+  Of the candidates tried, two came close. "R7" (a fixed switch-rate ≥ 0.40) blocked 97–99% of
+  mixed-case tokens but only about 48% of base36 tokens. "R10/R12" (looser class-relative factors)
+  produced 5–26 false positives on CamelCase `A/B` slash lists.
+- **What this calibration does not establish** (the planner must carry these forward):
+  - Hex-only and single-case-only secrets are **never** caught by entropy, because a 16- or 26-symbol
+    alphabet can't clear the bar without also flagging English. Only named rules (SEC-02) can catch
+    them.
+  - About 3–7% of random mixed-case keys and about 18–23% of base36 keys get through, by chance
+    switching patterns. Entropy is a backstop, not the primary guard.
+  - The false-positive corpus is this repo plus 6 host files. That is mostly planning prose, not
+    other users' managed files. The real false-positive rate on other machines is unmeasured.
+  - These are prototype numbers. The Rust implementation must reproduce them, and is verified only
+    by the fixture table below.
+- **Required tests** (two directions, and the corpus negative control is mandatory):
+  - **Positive fixtures, built at runtime and never committed as literals:** random Base64 and
+    URL-safe tokens at 20, 32 and 64 chars, an AWS-secret-shaped 40-char token, a JWT-shaped token,
+    and a token starting with `+` or containing `/`. Assert a block rate over a seeded sample, not a
+    single lucky draw.
+  - **Negative fixtures:** CamelCase and snake_case identifiers, file paths, URLs, target triples
+    (`x86_64-pc-windows-msvc`), UUIDs, hex digests, an ssh-ed25519 public key line, and
+    `ThisIsAPerfectlyNormalSentenceWithWords`.
+  - **Corpus control:** scanning every file under `templates/` and `template/` yields **zero** hits.
+
 ### Claude's Discretion
-- **Entropy threshold calibration.** The remediation plan's fixed numbers (≥20 chars, entropy > 4.2)
-  are *not* locked. They were measured on 2026-10-23 (Python, 2000 random samples per length):
-  - random Base64 cut to 20 chars exceeds 4.2 only **18.6%** of the time (a 20-char string tops out at
-    log2(20) ≈ 4.32); at 32 chars it is 99.4%, at 40 chars 100%;
-  - the CamelCase English token `ThisIsAPerfectlyNormalSentenceWithWords` scores **4.26**, which would
-    break the remediation plan's "natural English passes" negative control;
-  - UUID ≈ 3.86, 40-char hex ≈ 3.70, and an ed25519 public key body ≈ 5.05 (so it needs D-02's shape
-    exemption).
-  The planner and researcher choose a threshold that is length-aware or charset-aware (or both).
-  Whatever they choose must pass a fixture table with both directions: random Base64/URL-safe
-  tokens at 20, 32 and 40+ chars must block, and CamelCase/snake_case English identifiers, UUIDs,
-  hex digests, ssh pubkeys and the shipped `templates/` tree must pass. Running the scan over every
-  file in `templates/` and `template/` is a required negative control.
 - **Refusal output.** Name the rule (or `high-entropy`) with file:line. Never print the matched value
   (pattern carried over from devflow T-30-26). Exit code follows Phase 1: 1 for drift or refusal,
   2 for hard failure. The gate keeps Phase 1's rollback.
@@ -118,12 +156,11 @@ path parameterization (SEC-03), and verified reversibility between placeholders 
 <deferred>
 ## Deferred Ideas
 
-- **TypeSafe System One hardening** (remediation plan 2.3: fail closed when confidence < 0.85 or the
-  top-two margin < 0.20; pre-scan the upstream text as well as the local text). It sits in PROJECT.md's
-  Track 2 but is not among the Phase 2 requirements SEC-01..04, so it stays out of this phase
-  following the roadmap. Today the code ignores `confidence` entirely (`src/semantic/mod.rs`
-  `evaluate_drift`). It needs a requirement and a phase, or an explicit fold-in by the operator.
-  Moving the API key to stdin is already done.
+- **TypeSafe System One hardening** (remediation plan 2.3) **moved to Phase 3 as SEC-05**
+  (operator, 2026-10-23): plan stub 03-04 and success criterion 5. It is out of scope here. Today the
+  code ignores `confidence` entirely (`src/semantic/mod.rs` `evaluate_drift`). Moving the API key to
+  stdin is already done. Phase 2's new scanner still applies to the existing pre-API scan of the
+  local text (`src/main.rs` ~L1074), because that call site goes through `check_secrets`.
 
 ### Reviewed Todos (not folded)
 - *Home-path placeholders leak the pusher's home path into shared templates* (2026-10-19): this overlaps SEC-03 from the push side. The operator chose not to fold it in, so it stays a standalone todo. Fixing SEC-03 may make it moot; re-check the todo after this phase.
