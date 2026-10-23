@@ -80,21 +80,23 @@ Plans:
 
 ### Phase 3: Doctor & CLI Hardening
 
-**Goal**: Make host and repository health diagnostics foolproof with strict parsing, dual permission audits, and standard POSIX exit codes.
+**Goal**: Make host and repository health diagnostics foolproof with strict parsing, dual permission audits, and standard POSIX exit codes, and make TypeSafe semantic drift checks fail closed.
 **Depends on**: Phase 2
-**Requirements**: CLI-01, CLI-02, CLI-03, CLI-04
+**Requirements**: CLI-01, CLI-02, CLI-03, CLI-04, SEC-05
 **Success Criteria** (what must be TRUE):
   1. Host doctor verifies OpenSSH public keys against standard `ssh-ed25519` wire formats and catches malformed or corrupted keys.
   2. Repository doctor audits both filesystem executable bits (`0o755`) and Git index mode flags (`100755` vs `100644`) for all hook templates.
   3. Include directives in `.gitconfig.repo` are resolved canonically relative to the Git repository root (`.git/`), preventing false failures in subdirectories.
   4. All CLI invocations return POSIX exit code `0` on clean success, `1` on non-critical warning/drift, and `2` on critical security/system failures.
+  5. TypeSafe drift verdicts with confidence < 0.85 or a top-two margin < 0.20 fail closed (never authorize publication); both local and upstream texts are secret-scanned and local-only/overridden files are never transmitted to the API.
 
-**Plans**: 3 plans
+**Plans**: 4 plans
 
 Plans:
 - [ ] 03-01: Implement strict OpenSSH public key parsing for SSH signing verification in host doctor (`src/audit/mod.rs`).
 - [ ] 03-02: Implement dual filesystem and Git index mode flag audit for repository hooks (`src/audit/mod.rs`).
 - [ ] 03-03: Implement canonical repository-relative path resolution for git includes and enforce exit code contracts (`src/audit/mod.rs`, `src/main.rs`).
+- [ ] 03-04: Enforce TypeSafe confidence/margin guardrails and two-sided pre-transmission secret scanning (`src/semantic/mod.rs`, `src/main.rs`).
 
 ### Phase 4: Templates, Archetypes & Manifest Decoupling
 
@@ -123,7 +125,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 |-------|----------------|--------|-----------|
 | 1. Sync Engine & State Hermeticity | 11/11 | Complete    | 2026-10-22 |
 | 2. Sanitizer, Boundaries & Security Hardening | 0/3 | Not started | - |
-| 3. Doctor & CLI Hardening | 0/3 | Not started | - |
+| 3. Doctor & CLI Hardening | 0/4 | Not started | - |
 | 4. Templates, Archetypes & Manifest Decoupling | 0/3 | Not started | - |
 
 ## Backlog

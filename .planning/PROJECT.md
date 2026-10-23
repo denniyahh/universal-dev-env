@@ -23,7 +23,7 @@ Reliable, hermetic, bidirectional developer environment and agent baseline synch
 
 ### Active
 
-- [ ] **Track 2: Sanitizer, Boundaries & Security** — Implement Shannon entropy and Base64 credential screening, strict word and punctuation boundary matching for path parameterization, and TypeSafe System One confidence guardrails.
+- [ ] **Track 2: Sanitizer, Boundaries & Security** — Implement Shannon entropy and Base64 credential screening, and strict word and punctuation boundary matching for path parameterization. (TypeSafe System One confidence guardrails moved to Phase 3 as SEC-05, 2026-10-23.)
 - [ ] **Track 3: Doctor & CLI Hardening** — Implement strict OpenSSH public key parsing, dual disk/git-index executable bit auditing for hooks, relative include path resolution against repository roots, and strict exit code contracts (1 for warnings, 2 for critical errors).
 - [ ] **Track 4: Templates, Archetypes & Manifest** — Decouple personal repository URLs into parameterized manifest variables, implement safe re-initialization with backup semantics, enforce strict Minijinja undefined variable checking, and wire `.ude.toml` policy loading.
 

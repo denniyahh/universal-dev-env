@@ -4,10 +4,10 @@ current_phase: 2
 current_phase_name: Sanitizer, Boundaries & Security Hardening
 status: planning
 stopped_at: Phase 2 context gathered
-last_updated: "2026-10-23T17:33:20.519Z"
+last_updated: "2026-10-23T19:24:53.166Z"
 last_activity: 2026-10-22
 last_activity_desc: Phase 1 complete, transitioned to Phase 2
-state_head: 76265b58ef1dce1ed82cd03917e0792ea04fd489
+state_head: 50ee85585f251cfb95d87d446a55196ea9c87b1c
 progress:
   total_phases: 4
   completed_phases: 1
@@ -132,6 +132,10 @@ Recent decisions affecting current work:
 - ⚠️ [Phase 01] Four info findings from the first code review (97fe52a, IN-02..IN-05) are tracked in a todo; IN-01 was decided and fixed (65b9931)
 - ⚠️ [Phase 01] Final re-verification (2026-10-22, 18/18): two push test gaps backlogged as a todo (operator); the leaked TypeSafe API key is to be rotated by the operator
 - ⚠️ [Phase 01] Second code review (2026-10-21): 3 critical, 3 warnings, 7 info — 12 fixed, 2 deferred (remote-vs-local template root to Phase 4; CI needs a push); re-verification found and fixed a foreign-remote deletion and the TypeSafe key in curl argv
+
+### Roadmap Evolution
+
+- Phase 3 edited: edited fields: goal, requirements (+SEC-05), success_criteria (+5), plans (+03-04) — TypeSafe hardening moved from Phase 2 deferral (operator, 2026-10-23)
 
 ## Deferred Items
 

@@ -22,6 +22,7 @@ Requirements for initial release, mapping directly to remediation tracks from [`
 - [ ] **SEC-02**: Outbound content screening expands regex token patterns to cover full Gitleaks secret categories before git staging.
 - [ ] **SEC-03**: Path parameterization enforces strict word and punctuation boundaries (`\b` and path delimiters) to prevent partial substring corruption.
 - [ ] **SEC-04**: Sanitizer verifies token substitution reversibility between templated placeholders and local machine environments.
+- [ ] **SEC-05**: TypeSafe semantic drift evaluation fails closed below 0.85 confidence or 0.20 top-two margin, and never transmits unscanned or local-only content.
 
 ### Doctor & CLI Hardening (Track 3)
 
@@ -81,14 +82,15 @@ Which phases cover which requirements. Updated during roadmap creation.
 | CLI-02 | Phase 3 | Pending |
 | CLI-03 | Phase 3 | Pending |
 | CLI-04 | Phase 3 | Pending |
+| SEC-05 | Phase 3 | Pending |
 | TMPL-01 | Phase 4 | Pending |
 | TMPL-02 | Phase 4 | Pending |
 | TMPL-03 | Phase 4 | Pending |
 | TMPL-04 | Phase 4 | Pending |
 
 **Coverage:**
-- v1 requirements: 18 total
-- Mapped to phases: 18
+- v1 requirements: 19 total
+- Mapped to phases: 19
 - Unmapped: 0
 
 ---
