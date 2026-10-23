@@ -71,12 +71,26 @@ Plans:
   3. Path parameterization matches only full word and punctuation boundaries (`\b`, path delimiters), preventing corruption of partial substring tokens.
   4. Sanitizer round-tripping verifies that templated tokens substitute back cleanly to local machine environments on initialization.
 
-**Plans**: 3 plans
+**Plans**: 8 plans
 
 Plans:
-- [ ] 02-01: Implement Shannon entropy calculation and Base64 credential screening in `Sanitizer` (`src/sanitizer/mod.rs`).
-- [ ] 02-02: Expand secret regex patterns to mirror full Gitleaks rule categories and integrate into the pre-push publication gate (`src/sanitizer/mod.rs`, `src/sync/mod.rs`).
-- [ ] 02-03: Enforce word and delimiter boundaries for path parameterization and add reversible substitution unit tests (`src/sanitizer/mod.rs`).
+**Wave 1**
+- [ ] 02-01: One byte-level scanner (`Sanitizer::scan_bytes`) for push staging and both publication gates; non-UTF-8 files scanned, no lossy decode, refusals name rule + line (SEC-02).
+- [ ] 02-02: `ude init` renders `{{`-bearing static templates with a shared `template::should_render`, byte-copies the rest, records rendered ancestors (SEC-04).
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [ ] 02-03: R11 entropy rule (D-05) with D-02 shape exemptions in `src/sanitizer/entropy.rs`, seeded rate floors and templates corpus control (SEC-01).
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [ ] 02-04: `ude:allow-entropy` per-line marker (D-02, D-03) and mutation gate over entropy.rs (SEC-01).
+- [ ] 02-05: Vendored, SHA-256-pinned gitleaks v8.30.1 rules matched with gitleaks semantics in `src/sanitizer/gitleaks.rs`, wired between named rules and R11 (SEC-02).
+
+**Wave 4** *(blocked on Wave 3 completion)*
+- [ ] 02-06: Gitleaks category coverage: CLI refusal e2e, category table, D-03 for gitleaks rules, full-scanner corpus control, mutation gate, parity with the gitleaks binary (SEC-02).
+- [ ] 02-07: Word/punctuation boundary predicate for path parameterization, degenerate-home guard, round-trip properties, mutation gate, placeholder doc fix (SEC-03, SEC-04).
+
+**Wave 5** *(blocked on Wave 4 completion)*
+- [ ] 02-08: Push render-back reversibility gate (`PushResult::ReversibilityBlocked`, exit 1), one render rule for scan/pull, hermeticity gate (SEC-04).
 
 ### Phase 3: Doctor & CLI Hardening
 
@@ -124,7 +138,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Sync Engine & State Hermeticity | 11/11 | Complete    | 2026-10-22 |
-| 2. Sanitizer, Boundaries & Security Hardening | 0/3 | Not started | - |
+| 2. Sanitizer, Boundaries & Security Hardening | 0/8 | Not started | - |
 | 3. Doctor & CLI Hardening | 0/4 | Not started | - |
 | 4. Templates, Archetypes & Manifest Decoupling | 0/3 | Not started | - |
 

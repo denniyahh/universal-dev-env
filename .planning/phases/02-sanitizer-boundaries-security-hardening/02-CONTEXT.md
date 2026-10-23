@@ -26,6 +26,8 @@ path parameterization (SEC-03), and verified reversibility between placeholders 
 - **D-02:** Known non-secret high-entropy values pass through two mechanisms:
   1. **Built-in shape exemptions**: ssh public key lines (`ssh-ed25519 AAAA…`, `ssh-rsa`, `ecdsa-sha2-*`,
      `sk-*@openssh.com`), hex digests (40/64/128 hex chars), UUIDs, SRI hashes (`sha256-`/`sha384-`/`sha512-`).
+     *Amended (operator, 2026-10-23, during plan-phase):* the ssh exemption covers only the base64 key
+     body that follows a key type, not the whole line; the rest of the line is still scanned.
   2. **A per-line inline marker `ude:allow-entropy`**: an entropy-only hit on a line carrying the
      marker is not reported.
   No config file is used (`.ude.toml` policy loading is Phase 4). — **Reversibility:** costly — the

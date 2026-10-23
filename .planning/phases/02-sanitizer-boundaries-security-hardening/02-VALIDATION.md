@@ -66,7 +66,7 @@ Filled in by the planner / executor from the PLAN.md task IDs. Requirement-to-te
 
 ## Wave 0 Requirements
 
-- [ ] Seeded fixture helper (proptest `TestRunner::deterministic()`) in `src/sanitizer` tests
+- [ ] Seeded fixture helper in `src/sanitizer` tests: uniform per-character draws over an explicit alphabet (`proptest::sample::select` under `TestRunner::deterministic()`, plan 02-03 `SeededChars`), pinned by a symbol-frequency test with a skewed-alphabet negative control. Not proptest regex-string strategies: they skew character frequencies and moved R11 block rates below every floor (RESEARCH "Fixture generator check")
 - [ ] Corpus walker helper (lists `templates/`, `template/` under `CARGO_MANIFEST_DIR`)
 - [ ] Vendored `src/sanitizer/rules/gitleaks.toml` + `LICENSE-gitleaks`, checked against SHA-256 `e163e53b9e7e8a8511e77271e2b323ed057759542a6d988258afe3a1fa329caf`
 - [ ] Convert the literal JWT fixture in `src/sanitizer/mod.rs` tests to a runtime-built fixture

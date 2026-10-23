@@ -175,7 +175,7 @@ Single-binary CLI; the "tiers" are modules.
 | `serde` | 1.0 (derive) | Rule structs | existing |
 | `sha2` | 0.10 | Test that pins the vendored rule file's SHA-256 | existing |
 | `minijinja` | 2.24.0 | Render-back check reuses `crate::template::TemplateRenderer` | existing [VERIFIED: Cargo.lock] |
-| `proptest` (dev) | 1.11.0 | `TestRunner::deterministic()` + regex-string strategies for seeded fixtures; round-trip properties | [CITED: Context7 /proptest-rs/proptest — `TestRunner::deterministic()`, `"<regex>".new_tree(&mut runner)`] |
+| `proptest` (dev) | 1.11.0 | `TestRunner::deterministic()` + `sample::select` per-character draws for seeded fixtures (not regex-string strategies, which are skewed; see Don't Hand-Roll); round-trip properties | [CITED: Context7 /proptest-rs/proptest — `TestRunner::deterministic()`; VERIFIED at plan revision: proptest-1.11.0 `src/sample.rs` `select` maps a `0..len` range strategy, which `src/num.rs` samples with rand `Uniform`] |
 
 ### Alternatives Considered
 | Instead of | Could Use | Tradeoff |
@@ -294,7 +294,7 @@ Push-time (UTF-8 candidates only): build a context whose `user.home` / `user.xdg
 |---------|-------------|-------------|-----|
 | Secret rule catalogue | Your own list of provider regexes | Vendored gitleaks v8.30.1 `config/gitleaks.toml` | 222 maintained rules with keywords, entropy floors and allowlists; regenerated upstream |
 | TOML parsing of rules | Line-based parser | `toml` 0.8 + serde | Rule file uses `'''` literal strings and nested `[[rules.allowlists]]` |
-| Seeded random fixtures | Ad-hoc RNG in tests | `proptest::test_runner::TestRunner::deterministic()` + `"[A-Za-z0-9+/]{20}".new_tree(&mut runner)` | Deterministic, already a dev-dependency |
+| Seeded random fixtures | Ad-hoc RNG in tests; also not proptest regex-string strategies for rate fixtures | `proptest::test_runner::TestRunner::deterministic()` + `proptest::sample::select` over an explicit alphabet, one uniform index draw per character (corrected at plan revision, 2026-10-23) | Deterministic, already a dev-dependency, and uniform over the alphabet like the calibration generators. proptest 1.11.0 regex-string strategies skew character frequencies, which moved R11 block rates to 0.17-0.90 (see "Fixture generator check" under Probe Evidence) |
 | Placeholder inverse | `str::replace("{{ user.home }}", home)` | `crate::template::TemplateRenderer::render_str` | The real renderer is what init/scan/pull use; minijinja parses `{#`, `{%`, `{{` |
 
 Hand-writing is right for: Shannon entropy (D-05 fully specifies it; gitleaks does the same), the R11 randomness test, the path boundary predicate (no look-around in `regex`), and the Go `{` escape (15 lines).
@@ -426,6 +426,23 @@ templates/ + template/: files=33 tokens>=20=260 hits=0
 ```
 What this does not establish: the RNG differs from the Python prototype, so rows agree within the stated ±1.5 points, not exactly. The corpus counts are still this repo only. Hex 20–24 chars is *sometimes* blocked (28% / 9%), which the CONTEXT table did not show.
 
+**Fixture generator check** (plan revision, 2026-10-23; scratch Rust crate, proptest 1.11.0 pinned from this repo's Cargo.lock, scratch removed): R11 as plan 02-03 specifies it, 1000 samples per row, two generators.
+```
+                      regex-string strategy   uniform select (deterministic seed; in parentheses: min, or range, over 20 more seeds)
+base64 20/32/64       0.802 / 0.782 / 0.418    0.931 / 0.951 / 0.997   (min 0.919 / 0.933 / 0.987)
+urlsafe 20/32/64      0.687 / 0.621 / 0.168    0.931 / 0.951 / 0.997
+aws-40                0.730                    0.981                   (min 0.961)
+jwt-shaped            0.898                    0.999                   (min 0.997)
+leading-plus-24       0.722                    0.932                   (min 0.919)
+contains-slash-24     0.833                    0.938                   (min 0.917)
+base36-lower 20/32/40 0.904 / 0.857 / 0.715    0.795 / 0.811 / 0.825   (min 0.784 over all three; upper+digit identical)
+base36-lower 64       0.047                    0.179                   (0.171 - 0.207)
+hex-32, lower-32      0.000                    0.000
+char frequency, 64,000 base64 chars:  regex '+' 17.6%, '/' 3.8%, digits 20.0%, min symbol 676, max 11274
+                                      select '+' 1.6%, '/' 1.5%, digits 15.7%, min symbol 940, max 1077
+```
+The regex-string strategy is skewed (in this sample `+` alone is 17.6% of characters instead of 1.6%), so rates measured through it describe the generator, not R11. The uniform generator reproduces the xorshift numbers above within 3 points (largest gap: base36-lower 32, 81.1% vs 78.2%) and agrees with the CONTEXT table's ranges within their stated ±1.5 points (only base36 40, at 82.5% against 77-82%, sits outside the bare range). What this does not establish: it is one R11 implementation written for the probe, not the executor's code; the plan's tests are what pin the shipped code.
+
 **Boundary semantics** (`regex` 1.13.1):
 ```
 case                       naive_b  current  remediation
@@ -458,15 +475,18 @@ one-pass replace_all("/home/alice:/home/alice") = "H:/home/alice"
 | A3 | Not porting gitleaks' encoded-segment decoding is acceptable (R11 catches most encoded blobs) | Pattern 2 | A base64-wrapped short secret that fails R11 is missed. |
 | A4 | Not honouring gitleaks' global `paths` allowlist is correct for UDE's 11 managed files | Pattern 2 | None foreseen; the list is fixed in code. |
 | A5 | A refusal on reversibility failure should be exit 1 (refusal), matching `SecretBlocked` | Pattern 4 | Scripts branching on exit 2 would misclassify. |
-| A6 | The gate's existing exit 2 (`PushRemoteError::Failed` → `EXIT_HARD_FAILURE`, `src/main.rs:1290-1295`) stays as-is for gate-level secret hits: such a hit means content mutated after the staging scan | Discretion: refusal output | If the operator wants all secret refusals at exit 1, the gate needs its own error variant. |
+| A6 | The gate's existing exit 2 (`PushRemoteError::Failed` → `EXIT_HARD_FAILURE`, `src/main.rs:1290-1295`) stays as-is for gate-level secret hits: such a hit means content mutated after the staging scan | Discretion: refusal output | Settled: see Open Question 2 (RESOLVED). |
 
 ## Open Questions
 
-1. **Alias and unparameterizable home paths (`/home/<u>` vs `/var/home/<u>`, `-I/home/<u>/include`).**
+1. **Alias and unparameterizable home paths (`/home/<u>` vs `/var/home/<u>`, `-I/home/<u>/include`). (RESOLVED)**
    - Known: these publish the username today and still will after SEC-03 (the render-back check passes them).
-   - Unclear: whether the operator wants push to refuse a residual occurrence of the home path, or of its `/home` alias.
-   - Recommendation: keep it out of this phase (the deferred todo already covers it). Mention it in the phase summary so the todo gets re-checked.
-2. **Should a gate-level secret hit exit 1 or 2?** Today it exits 2 (see A6). Recommendation: keep 2. Decided within Claude's discretion unless the operator objects.
+   - Resolution: out of scope for Phase 2. Source: CONTEXT Deferred Ideas, "Reviewed Todos (not folded)": the operator chose not to fold the home-path todo into this phase, so it stays a standalone todo to re-check after the phase. The orchestrator verified the CONTEXT text on 2026-10-23. Plan 02-07 records it as accepted risk T-02-21.
+2. **Should a gate-level secret hit exit 1 or 2? (RESOLVED)** Resolution: exit 2, through the existing `PushRemoteError::Failed` path, as in Phase 1 (see A6). Source: CONTEXT "Claude's Discretion: Refusal output" ("Exit code follows Phase 1: 1 for drift or refusal, 2 for hard failure"); the orchestrator verified the CONTEXT text on 2026-10-23. Plan 02-01 records it.
+
+Also settled on 2026-10-23 (raised during planning, not listed above):
+- ssh public-key exemption reading: **key body only** (operator, 2026-10-23). Only the base64 key body after a key type is exempt; the rest of the line is still scanned. This matches Pitfall 3 above; the operator chose it over CONTEXT D-02's literal "ssh public key lines" wording. Plan 02-03 records it.
+- 64-char base36 block rate (about 16-20%): accepted as risk T-02-07 for Phase 2 (operator, 2026-10-23); the orchestrator logs a calibration todo, and D-05's constants stay locked. Plan 02-03 records it.
 
 ## Environment Availability
 
@@ -518,7 +538,7 @@ Every row carries its negative control and its failing direction.
 - **Phase gate:** full suite green; `cargo mutants -v --file src/sanitizer/entropy.rs` and `--file src/sanitizer/mod.rs` (boundary predicate), with no surviving mutants in R11 or the boundary predicate. Plus a one-off parity step: generate positives at runtime in a scratch dir, run both the port and `gitleaks dir --config <vendored>`, and diff rule ids (expect the generic-dedupe difference only). Delete the scratch dir afterwards.
 
 ### Wave 0 Gaps
-- [ ] Seeded fixture helper (proptest `TestRunner::deterministic()`) in `src/sanitizer` tests.
+- [ ] Seeded fixture helper in `src/sanitizer` tests: uniform per-character draws over an explicit alphabet (`proptest::sample::select` under `TestRunner::deterministic()`), with a symbol-frequency test; not proptest regex-string strategies (skewed; see Don't Hand-Roll).
 - [ ] Corpus walker helper (lists `templates/`, `template/` under `CARGO_MANIFEST_DIR`).
 - [ ] Vendored `src/sanitizer/rules/gitleaks.toml` + `LICENSE-gitleaks`, fetched by the executor and checked against SHA-256 `e163e53b9e7e8a8511e77271e2b323ed057759542a6d988258afe3a1fa329caf`.
 - [ ] Convert the literal JWT at `src/sanitizer/mod.rs:231` to a runtime-built fixture (it is the 1 repo FP and breaks the fixture policy).
@@ -553,7 +573,7 @@ Every row carries its negative control and its failing direction.
 - Codebase, read this session: `src/sanitizer/mod.rs:1-343`; `src/sync/mod.rs:125-175, 207-219, 620-660, 1321-1500, 1597-2057, 2262-2330, 6127-6185, 6246-6310, 6966-7030, 7158-7208`; `src/main.rs:14-20, 1060-1095, 1130-1150, 1240-1350, 1641-1730`; `src/template/mod.rs:1-175`; `docs/REMEDIATION_PLAN.md:93-130`; `docs/ARCHITECTURE.md:70-90`; `templates/universal/generic/security/gitleaks.toml`.
 - gitleaks v8.30.1 `config/gitleaks.toml`, `detect/detect.go`, `detect/utils.go`, `LICENSE` (raw.githubusercontent.com, fetched this session); GitHub API latest release.
 - Context7 `/rust-lang/regex`: no look-around; `\b` semantics; linear time.
-- Context7 `/proptest-rs/proptest`: `TestRunner::deterministic()`, regex strategies.
+- Context7 `/proptest-rs/proptest`: `TestRunner::deterministic()`, regex strategies (the latter found skewed at plan revision and replaced by `sample::select`; see Don't Hand-Roll).
 - golang/go `src/regexp/syntax/parse.go` (literal `{`); pkg.go.dev/regexp/syntax (ASCII-only classes).
 - Probes (Rust, offline, crate versions pinned to this repo's Cargo.lock) and `gitleaks` 8.30.1 binary cross-check.
 
