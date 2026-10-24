@@ -153,6 +153,15 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 Plans:
 - [ ] TBD (promote with /gsd-review-backlog when ready)
 
+### Phase 999.2: Apply tracked repo git policy by copy, not include (BACKLOG)
+
+**Goal:** Replace the project baseline's `include.path ../.gitconfig` pattern. An include makes git read the tracked file live from whatever branch is checked out, so a branch (an untrusted PR, an agent's branch) can set a key that runs a program on the next `git status` (`core.fsmonitor`, `core.pager`, `diff.external`); wsx proved this with a test on 2026-10-24. New practice, already running in wsx as the stand-in `scripts/setup-repo.sh` (commit b16287f on wsx feature/phase-1): (1) the tracked `.gitconfig` is data; `ude init` copies it into `.git/config` and never writes an include; (2) only an allowlist of keys that cannot run a program is copied (signing, git-flow names), and any other key refuses the whole run before anything is written; (3) `ude audit` reports drift between local config and the tracked file, and flags a remaining include, instead of warning when the include is missing (today's audit would warn on wsx after its migration); (4) a clone with the old include has it removed. Also decide whether `core.hooksPath scripts/hooks` should become config hooks (`hook.<name>.command`, git >= 2.54) that run installed, pinned tools: a tracked hooks directory runs whatever the checked-out branch contains, on commit and push. Touches `docs/PORTABLE_PROJECT_BASELINE.md` section 1, `template/.gitconfig` header, `src/main.rs` init include step, `src/audit/mod.rs` include check, and supersedes CLI-03 (include path canonicalisation). Rollout: devflow's clone still uses the include and its CONTRIBUTING and DEV-SETUP-CHECKLIST document it. Source: owner decision 2026-10-24 in the wsx session.
+**Requirements:** TBD
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (promote with /gsd-review-backlog when ready)
+
 ---
 *Roadmap created: 2026-10-12*
 *Last updated: 2026-10-12*
