@@ -1114,4 +1114,142 @@ mod tests {
             copy.display()
         );
     }
+
+    /// The D-02 marker as users write it, spelled out so the tests pin the
+    /// contract rather than whatever the constant holds.
+    const MARKER: &str = "ude:allow-entropy";
+
+    /// A managed-file path for the marker fixtures (scan_bytes ignores it today).
+    fn marker_path() -> &'static std::path::Path {
+        std::path::Path::new("projects/generic/gitconfig.repo")
+    }
+
+    fn entropy_finding(line: usize) -> Option<crate::sanitizer::Finding> {
+        Some(crate::sanitizer::Finding {
+            rule: RULE_NAME.to_string(),
+            line,
+        })
+    }
+
+    /// UTF-16LE bytes of `text` with a BOM.
+    fn utf16le(text: &str) -> Vec<u8> {
+        let mut out = vec![0xFF, 0xFE];
+        for unit in text.encode_utf16() {
+            out.extend_from_slice(&unit.to_le_bytes());
+        }
+        out
+    }
+
+    #[test]
+    fn test_marker_silences_entropy_only_on_its_line() {
+        use crate::sanitizer::{SanitizationResult, Sanitizer};
+        let sanitizer = Sanitizer::new();
+        let tok = class_cycling_token();
+        let marked = format!("# build fingerprint {tok} {MARKER}\n");
+        let unmarked = format!("# build fingerprint {tok}\n");
+
+        assert_eq!(
+            sanitizer.scan_bytes(unmarked.as_bytes(), marker_path()),
+            entropy_finding(1),
+            "control: the unmarked line must block"
+        );
+        assert_eq!(
+            sanitizer.scan_bytes(marked.as_bytes(), marker_path()),
+            None,
+            "the marked line must scan clean"
+        );
+        assert_eq!(
+            sanitizer.scan_bytes(format!("{marked}{unmarked}").as_bytes(), marker_path()),
+            entropy_finding(2),
+            "the marker must not reach the next line"
+        );
+
+        assert_eq!(
+            sanitizer.check_secrets(&marked),
+            SanitizationResult::Clean(marked.clone()),
+            "check_secrets must pass the marked text through unchanged"
+        );
+        match sanitizer.check_secrets(&unmarked) {
+            SanitizationResult::SecretDetected { pattern, .. } => {
+                assert_eq!(pattern, RULE_NAME, "check_secrets on the unmarked text");
+            }
+            SanitizationResult::Clean(_) => panic!("check_secrets passed the unmarked token"),
+        }
+
+        // UTF-16 content reaches R11 through the NUL-stripped view, marker included.
+        assert_eq!(
+            sanitizer.scan_bytes(&utf16le(&unmarked), marker_path()),
+            entropy_finding(1),
+            "control: unmarked UTF-16LE must block"
+        );
+        assert_eq!(
+            sanitizer.scan_bytes(&utf16le(&marked), marker_path()),
+            None,
+            "marked UTF-16LE must scan clean"
+        );
+    }
+
+    #[test]
+    fn test_marker_does_not_silence_named_rules() {
+        use crate::sanitizer::{Finding, Sanitizer};
+        let sanitizer = Sanitizer::new();
+        let tok = class_cycling_token();
+        let github_prefix = "ghp_";
+        let github_body = format!("{tok}wxyz");
+        let gitlab_prefix = "glpat-";
+        let cases = [
+            (
+                "GitHub Personal Access Token",
+                format!("{github_prefix}{github_body}"),
+            ),
+            (
+                "GitLab Personal Access Token",
+                format!("{gitlab_prefix}{tok}"),
+            ),
+        ];
+        for (rule, token) in &cases {
+            let expected = Some(Finding {
+                rule: (*rule).to_string(),
+                line: 1,
+            });
+            assert_eq!(
+                sanitizer.scan_bytes(format!("token {token}\n").as_bytes(), marker_path()),
+                expected,
+                "control: {rule} on an unmarked line"
+            );
+            assert_eq!(
+                sanitizer.scan_bytes(
+                    format!("token {token} {MARKER}\n").as_bytes(),
+                    marker_path()
+                ),
+                expected,
+                "{rule} on a marked line must still be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn test_marker_near_misses_do_not_silence() {
+        use crate::sanitizer::Sanitizer;
+        let sanitizer = Sanitizer::new();
+        let tok = class_cycling_token();
+        let cases = [
+            ("underscore", format!("{tok} ude:allow_entropy\n"), 1),
+            ("upper case", format!("{tok} UDE:ALLOW-ENTROPY\n"), 1),
+            (
+                "space after colon",
+                format!("{tok} ude: allow-entropy\n"),
+                1,
+            ),
+            ("marker on the line before", format!("{MARKER}\n{tok}\n"), 2),
+            ("marker on the line after", format!("{tok}\n{MARKER}\n"), 1),
+        ];
+        for (variant, text, line) in &cases {
+            assert_eq!(
+                sanitizer.scan_bytes(text.as_bytes(), marker_path()),
+                entropy_finding(*line),
+                "{variant} must not silence the entropy hit"
+            );
+        }
+    }
 }
