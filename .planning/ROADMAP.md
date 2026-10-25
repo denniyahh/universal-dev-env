@@ -75,11 +75,11 @@ Plans:
 
 Plans:
 **Wave 1**
-- [ ] 02-01: One byte-level scanner (`Sanitizer::scan_bytes`) for push staging and both publication gates; non-UTF-8 files scanned, no lossy decode, refusals name rule + line (SEC-02).
+- [ ] 02-01: One byte-level scanner (`Sanitizer::scan_bytes`) for push staging and both publication gates; non-UTF-8 files scanned, UTF-16 scanned through a NUL-stripped view, no lossy decode, refusals name rule + line (SEC-02).
 - [ ] 02-02: `ude init` renders `{{`-bearing static templates with a shared `template::should_render`, byte-copies the rest, records rendered ancestors (SEC-04).
 
 **Wave 2** *(blocked on Wave 1 completion)*
-- [ ] 02-03: R11 entropy rule (D-05) with D-02 shape exemptions in `src/sanitizer/entropy.rs`, seeded rate floors and templates corpus control (SEC-01).
+- [ ] 02-03: R11 entropy rule (D-05; `=` delimiter per amended D-04) with exact D-02 shape exemptions in `src/sanitizer/entropy.rs`, seeded rate floors incl. `NAME=value` lines, and templates corpus control (SEC-01).
 
 **Wave 3** *(blocked on Wave 2 completion)*
 - [ ] 02-04: `ude:allow-entropy` per-line marker (D-02, D-03) and mutation gate over entropy.rs (SEC-01).
@@ -90,7 +90,7 @@ Plans:
 - [ ] 02-07: Word/punctuation boundary predicate for path parameterization, degenerate-home guard, round-trip properties, mutation gate, placeholder doc fix (SEC-03, SEC-04).
 
 **Wave 5** *(blocked on Wave 4 completion)*
-- [ ] 02-08: Push render-back reversibility gate (`PushResult::ReversibilityBlocked`, exit 1), one render rule for scan/pull, hermeticity gate (SEC-04).
+- [ ] 02-08: Push render-back reversibility gate (`PushResult::ReversibilityBlocked`, exit 1, no template text in the reason), one render rule for scan/pull, staged and committed blobs bound to the fingerprints of the validated bytes, hermeticity gate (SEC-04).
 
 ### Phase 3: Doctor & CLI Hardening
 
