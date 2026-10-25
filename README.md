@@ -68,3 +68,16 @@ universal-dev-env/
 - [x] **Phase 3: Rust CLI Engine (`ude`) Scaffolding** — Implement core engine crate with manifest parsing, path resolution, and template renderer.
 - [x] **Phase 4: Non-Destructive Auditor (`ude doctor`)** — Implement host and project integrity scanner asserting signing keys, hooks, and agent rules mesh.
 - [x] **Phase 5: Bidirectional Reconciler (`ude sync`)** — Implement 3-way diffing, `.local` overlay handling, secret sanitization, and upstream push with high-assurance negative controls.
+
+## 5. Development: Supply-Chain Scanning
+
+Scanner versions are pinned in `mise.toml`; the dependency policy is `deny.toml`. On a new clone:
+
+```bash
+mise trust && mise install && mise run install-hooks
+```
+
+- `scripts/hooks/pre-commit` scans staged changes for secrets (gitleaks). It fails if mise or the pinned gitleaks is missing.
+- `scripts/hooks/pre-push` runs the full `cargo deny check` (advisories, bans, licenses, sources); any failure blocks the push. An advisory that cannot be fixed yet goes under `[advisories] ignore` in `deny.toml` with a reason. When the advisory database cannot be fetched (offline, outage), the hook checks the cached copy and warns that it may be stale; with no cached copy the push is refused.
+- `mise run supply-chain` runs the same check by hand.
+- `.github/workflows/supply-chain.yml` runs both scans on every push and pull request, and weekly from the default branch.

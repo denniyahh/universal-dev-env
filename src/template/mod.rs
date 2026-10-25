@@ -32,7 +32,11 @@ pub struct TemplateContext {
 
 impl TemplateContext {
     /// Detects host defaults from system environment and git config for a specific project directory
-    pub fn detect_for_project(project_dir: &std::path::Path, project_name: &str, default_project_type: &str) -> Self {
+    pub fn detect_for_project(
+        project_dir: &std::path::Path,
+        project_name: &str,
+        default_project_type: &str,
+    ) -> Self {
         let base_dirs = BaseDirs::new();
         let user_home = base_dirs
             .as_ref()
@@ -53,33 +57,43 @@ impl TemplateContext {
             .map(|b| b.data_dir().to_string_lossy().to_string())
             .unwrap_or_else(|| format!("{}/.local/share", user_home));
 
-        let git_user_name = std::process::Command::new("git")
+        let mut name_cmd = std::process::Command::new("git");
+        name_cmd
             .current_dir(project_dir)
-            .args(["config", "--get", "user.name"])
-            .output()
-            .ok()
-            .and_then(|out| {
-                if out.status.success() {
-                    Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
-                } else {
-                    None
-                }
-            })
-            .unwrap_or_else(|| "Developer".to_string());
+            .args(["config", "--get", "user.name"]);
+        let git_user_name = crate::process::run_bounded(
+            name_cmd,
+            "git config user.name",
+            crate::process::LOCAL_TIMEOUT,
+        )
+        .ok()
+        .and_then(|out| {
+            if out.status.success() {
+                Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| "Developer".to_string());
 
-        let git_email = std::process::Command::new("git")
+        let mut email_cmd = std::process::Command::new("git");
+        email_cmd
             .current_dir(project_dir)
-            .args(["config", "--get", "user.email"])
-            .output()
-            .ok()
-            .and_then(|out| {
-                if out.status.success() {
-                    Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
-                } else {
-                    None
-                }
-            })
-            .unwrap_or_else(|| "developer@example.com".to_string());
+            .args(["config", "--get", "user.email"]);
+        let git_email = crate::process::run_bounded(
+            email_cmd,
+            "git config user.email",
+            crate::process::LOCAL_TIMEOUT,
+        )
+        .ok()
+        .and_then(|out| {
+            if out.status.success() {
+                Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| "developer@example.com".to_string());
 
         let user = UserContext {
             home: user_home.clone(),
@@ -87,7 +101,9 @@ impl TemplateContext {
             xdg_data: xdg_data.clone(),
         };
 
-        let effective_project_type = if default_project_type != "generic" && !default_project_type.is_empty() {
+        let effective_project_type = if default_project_type != "generic"
+            && !default_project_type.is_empty()
+        {
             default_project_type.to_string()
         } else if let Ok(state_str) = std::fs::read_to_string(project_dir.join(".ude/state.json"))
             && let Ok(state_json) = serde_json::from_str::<serde_json::Value>(&state_str)

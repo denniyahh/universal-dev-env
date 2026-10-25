@@ -1,191 +1,150 @@
-use similar::{capture_diff_slices, Algorithm, DiffOp};
+//! Three-way text merge for managed files (D-02), backed by diffy.
 
+use std::path::Path;
+
+use diffy::{ConflictStyle, IncompleteHunkStyle, MergeOptions};
+
+/// Result of a three-way text merge.
 #[derive(Debug, PartialEq, Eq)]
-pub enum MergeResult {
+pub enum MergeOutcome {
+    /// Local and upstream changes combine without overlap; carries the merged text.
     Clean(String),
-    Conflict,
+    /// Local and upstream changes overlap or touch adjacent lines; carries the text
+    /// with diff3 conflict markers, each marker starting its own line.
+    Conflict(String),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Edit<'a> {
-    base_start: usize,
-    base_end: usize,
-    replacement: Vec<&'a str>,
-}
-
-fn extract_edits<'a>(ops: Vec<DiffOp>, modified_lines: &'a [&'a str]) -> Vec<Edit<'a>> {
-    let mut edits = Vec::new();
-    for op in ops {
-        match op {
-            DiffOp::Equal { .. } => {}
-            DiffOp::Delete {
-                old_index, old_len, ..
-            } => {
-                edits.push(Edit {
-                    base_start: old_index,
-                    base_end: old_index + old_len,
-                    replacement: Vec::new(),
-                });
-            }
-            DiffOp::Insert {
-                old_index,
-                new_index,
-                new_len,
-            } => {
-                let replacement = modified_lines[new_index..new_index + new_len].to_vec();
-                edits.push(Edit {
-                    base_start: old_index,
-                    base_end: old_index,
-                    replacement,
-                });
-            }
-            DiffOp::Replace {
-                old_index,
-                old_len,
-                new_index,
-                new_len,
-            } => {
-                let replacement = modified_lines[new_index..new_index + new_len].to_vec();
-                edits.push(Edit {
-                    base_start: old_index,
-                    base_end: old_index + old_len,
-                    replacement,
-                });
-            }
-        }
-    }
-    edits
-}
-
-fn edits_overlap(a: &Edit, b: &Edit) -> bool {
-    let a_is_insert = a.base_start == a.base_end;
-    let b_is_insert = b.base_start == b.base_end;
-
-    if a_is_insert && b_is_insert {
-        a.base_start == b.base_start
-    } else if a_is_insert {
-        a.base_start > b.base_start && a.base_start < b.base_end
-    } else if b_is_insert {
-        b.base_start > a.base_start && b.base_start < a.base_end
-    } else {
-        a.base_start < b.base_end && b.base_start < a.base_end
+/// Merges `local_lf` and `upstream_lf` against their common `ancestor_lf`.
+///
+/// All three inputs must be LF-normalized text. An absent file must never be
+/// passed as an empty string: diffy treats `""` as real content, so a deletion on
+/// both sides would read as a clean merge to an empty file.
+///
+/// Edits on adjacent lines conflict (as in git); edits separated by at least one
+/// unchanged line merge cleanly, and identical edits on both sides merge cleanly.
+pub fn merge_texts(ancestor_lf: &str, local_lf: &str, upstream_lf: &str) -> MergeOutcome {
+    let mut opts = MergeOptions::new();
+    opts.set_conflict_style(ConflictStyle::Diff3)
+        .set_incomplete_hunk_style(IncompleteHunkStyle::Git);
+    // diffy calls the sides "ours" and "theirs": ours = local, theirs = upstream.
+    match opts.merge(ancestor_lf, local_lf, upstream_lf) {
+        Ok(merged) => MergeOutcome::Clean(merged),
+        Err(marked) => MergeOutcome::Conflict(relabel_conflict_markers(&marked)),
     }
 }
 
-/// Performs a 3-way line merge between ancestor (base), local, and upstream text.
-/// If changes from local and upstream are orthogonal or identical, returns MergeResult::Clean.
-/// If changes collide on overlapping lines, returns MergeResult::Conflict.
-pub fn merge_3way_text(base: &str, local: &str, upstream: &str) -> MergeResult {
-    if local == upstream {
-        return MergeResult::Clean(local.to_string());
-    }
-    if local == base {
-        return MergeResult::Clean(upstream.to_string());
-    }
-    if upstream == base {
-        return MergeResult::Clean(local.to_string());
-    }
+/// Rewrites diffy's hard-coded conflict labels to LOCAL / ANCESTOR / UPSTREAM.
+///
+/// diffy has no label option and always writes `ours`, `original` and `theirs`.
+/// Only lines that are exactly one of those marker lines, LF included, are
+/// rewritten; a content line that merely resembles a marker is left untouched.
+pub fn relabel_conflict_markers(text: &str) -> String {
+    text.split_inclusive('\n')
+        .map(|line| match line {
+            "<<<<<<< ours\n" => "<<<<<<< LOCAL\n",
+            "||||||| original\n" => "||||||| ANCESTOR\n",
+            ">>>>>>> theirs\n" => ">>>>>>> UPSTREAM\n",
+            other => other,
+        })
+        .collect()
+}
 
-    let base_lines: Vec<&str> = base.lines().collect();
-    let local_lines: Vec<&str> = local.lines().collect();
-    let upstream_lines: Vec<&str> = upstream.lines().collect();
+/// One version of a conflicted file, as shown in its `.conflict` sidecar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConflictSide<'a> {
+    /// LF-normalized text content.
+    Text(&'a str),
+    /// The file does not exist on this side.
+    Absent,
+    /// Non-text content, identified by its fingerprint.
+    Binary { fingerprint: &'a str },
+}
 
-    let local_ops = capture_diff_slices(Algorithm::Myers, &base_lines, &local_lines);
-    let upstream_ops = capture_diff_slices(Algorithm::Myers, &base_lines, &upstream_lines);
+/// Explains the three sidecar sections; the last fixed line of every header.
+const SIDECAR_LEGEND: &str =
+    "# LOCAL = your working copy, ANCESTOR = last synced version, UPSTREAM = central template\n";
 
-    let local_edits = extract_edits(local_ops, &local_lines);
-    let upstream_edits = extract_edits(upstream_ops, &upstream_lines);
+/// Sidecar body when any side is binary: there is no meaningful text diff.
+const BINARY_BODY: &str = "# Binary content: no text diff available.\n";
 
-    // Check for collisions between any local edit and upstream edit
-    for l in &local_edits {
-        for u in &upstream_edits {
-            if edits_overlap(l, u) {
-                // If they overlap but are identical edits, they don't conflict
-                if l.base_start == u.base_start
-                    && l.base_end == u.base_end
-                    && l.replacement == u.replacement
-                {
-                    continue;
-                }
-                return MergeResult::Conflict;
+/// Renders the body of the `.conflict` sidecar for the managed file `rel`.
+///
+/// The result is a header of `# ` lines (file, resolve command, section legend,
+/// then one note per absent or binary side), a blank line, and a body:
+/// - any binary side: a single comment line, no markers;
+/// - three text sides: the relabeled diff3 conflict from [`merge_texts`];
+/// - otherwise (a deletion, or text diffy unexpectedly merges cleanly): an
+///   explicit LOCAL / ANCESTOR / UPSTREAM block where an absent side is an empty
+///   section.
+///
+/// Text inputs must be LF-normalized. Every marker starts a line. This is a pure
+/// function; writing the file is the caller's job.
+pub fn render_conflict_sidecar(
+    rel: &Path,
+    ancestor: ConflictSide<'_>,
+    local: ConflictSide<'_>,
+    upstream: ConflictSide<'_>,
+) -> String {
+    let rel = rel.display();
+    let mut out = format!(
+        "# UDE sync conflict: {rel}\n# Resolve with: ude sync resolve {rel}\n{SIDECAR_LEGEND}"
+    );
+    for (label, absent_note, side) in [
+        ("LOCAL", "deleted locally", local),
+        ("ANCESTOR", "none (never synced)", ancestor),
+        ("UPSTREAM", "deleted upstream", upstream),
+    ] {
+        match side {
+            ConflictSide::Text(_) => {}
+            ConflictSide::Absent => out.push_str(&format!("# {label}: {absent_note}\n")),
+            ConflictSide::Binary { fingerprint } => {
+                out.push_str(&format!("# {label} fingerprint: {fingerprint}\n"));
             }
         }
     }
+    out.push('\n');
+    out.push_str(&sidecar_body(ancestor, local, upstream));
+    out
+}
 
-    // Combine all edits tagged with their source
-    enum TaggedEdit<'a> {
-        Local(Edit<'a>),
-        Upstream(Edit<'a>),
-        Both(Edit<'a>),
-    }
-
-    let mut combined: Vec<TaggedEdit> = Vec::new();
-
-    let mut u_used = vec![false; upstream_edits.len()];
-    for l in local_edits {
-        let mut matched = false;
-        for (u_idx, u) in upstream_edits.iter().enumerate() {
-            if l.base_start == u.base_start
-                && l.base_end == u.base_end
-                && l.replacement == u.replacement
-            {
-                combined.push(TaggedEdit::Both(l.clone()));
-                u_used[u_idx] = true;
-                matched = true;
-                break;
-            }
-        }
-        if !matched {
-            combined.push(TaggedEdit::Local(l));
-        }
-    }
-
-    for (u_idx, u) in upstream_edits.into_iter().enumerate() {
-        if !u_used[u_idx] {
-            combined.push(TaggedEdit::Upstream(u));
-        }
-    }
-
-    // Sort edits by base_start. If base_start is equal (e.g. insertion followed by replace),
-    // stable sort ensures order.
-    combined.sort_by_key(|e| match e {
-        TaggedEdit::Local(ed) | TaggedEdit::Upstream(ed) | TaggedEdit::Both(ed) => (ed.base_start, ed.base_end),
-    });
-
-    let mut result_lines: Vec<&str> = Vec::new();
-    let mut current_base_idx = 0;
-
-    for te in combined {
-        let edit = match &te {
-            TaggedEdit::Local(e) | TaggedEdit::Upstream(e) | TaggedEdit::Both(e) => e,
-        };
-
-        // Emit untouched base lines up to edit start
-        if edit.base_start > current_base_idx {
-            result_lines.extend_from_slice(&base_lines[current_base_idx..edit.base_start]);
-        }
-
-        // Emit replacement lines
-        result_lines.extend_from_slice(&edit.replacement);
-
-        // Advance base index
-        current_base_idx = current_base_idx.max(edit.base_end);
-    }
-
-    // Emit remaining base lines
-    if current_base_idx < base_lines.len() {
-        result_lines.extend_from_slice(&base_lines[current_base_idx..]);
-    }
-
-    let mut merged = result_lines.join("\n");
-    if (base.ends_with('\n') || local.ends_with('\n') || upstream.ends_with('\n'))
-        && !merged.is_empty()
-        && !merged.ends_with('\n')
+/// The part of the sidecar after the header and its blank line.
+fn sidecar_body(
+    ancestor: ConflictSide<'_>,
+    local: ConflictSide<'_>,
+    upstream: ConflictSide<'_>,
+) -> String {
+    let sides = [local, ancestor, upstream];
+    if sides
+        .iter()
+        .any(|side| matches!(side, ConflictSide::Binary { .. }))
     {
-        merged.push('\n');
+        return BINARY_BODY.to_string();
     }
+    if let (ConflictSide::Text(a), ConflictSide::Text(l), ConflictSide::Text(u)) =
+        (ancestor, local, upstream)
+        && let MergeOutcome::Conflict(marked) = merge_texts(a, l, u)
+    {
+        return marked;
+    }
+    let mut out = String::from("<<<<<<< LOCAL\n");
+    push_section(&mut out, local);
+    out.push_str("||||||| ANCESTOR\n");
+    push_section(&mut out, ancestor);
+    out.push_str("=======\n");
+    push_section(&mut out, upstream);
+    out.push_str(">>>>>>> UPSTREAM\n");
+    out
+}
 
-    MergeResult::Clean(merged)
+/// Appends a text side as one explicit-block section, LF-terminated so the next
+/// marker starts a line. Absent sides (and binary, never reached) add nothing.
+fn push_section(out: &mut String, side: ConflictSide<'_>) {
+    if let ConflictSide::Text(text) = side {
+        out.push_str(text);
+        if !text.is_empty() && !text.ends_with('\n') {
+            out.push('\n');
+        }
+    }
 }
 
 #[cfg(test)]
@@ -194,16 +153,14 @@ mod tests {
 
     #[test]
     fn test_merge_orthogonal_changes_clean() {
-        let base = "a=1\nb=1\n";
-        let local = "a=2\nb=1\n";
-        let upstream = "a=1\nb=2\n";
+        let base = "a=1\nx\nb=1\n";
+        let local = "a=2\nx\nb=1\n";
+        let upstream = "a=1\nx\nb=2\n";
 
-        match merge_3way_text(base, local, upstream) {
-            MergeResult::Clean(merged) => {
-                assert_eq!(merged, "a=2\nb=2\n");
-            }
-            MergeResult::Conflict => panic!("Expected clean merge for orthogonal changes"),
-        }
+        assert_eq!(
+            merge_texts(base, local, upstream),
+            MergeOutcome::Clean("a=2\nx\nb=2\n".to_string())
+        );
     }
 
     #[test]
@@ -212,10 +169,13 @@ mod tests {
         let local = "a=2\nb=1\n";
         let upstream = "a=3\nb=1\n";
 
-        match merge_3way_text(base, local, upstream) {
-            MergeResult::Clean(_) => panic!("Expected conflict for overlapping changes"),
-            MergeResult::Conflict => {}
-        }
+        assert!(
+            matches!(
+                merge_texts(base, local, upstream),
+                MergeOutcome::Conflict(_)
+            ),
+            "Expected conflict for overlapping changes"
+        );
     }
 
     #[test]
@@ -224,12 +184,10 @@ mod tests {
         let local = "a=2\nb=1\n";
         let upstream = "a=2\nb=1\n";
 
-        match merge_3way_text(base, local, upstream) {
-            MergeResult::Clean(merged) => {
-                assert_eq!(merged, "a=2\nb=1\n");
-            }
-            MergeResult::Conflict => panic!("Expected clean merge for identical changes"),
-        }
+        assert_eq!(
+            merge_texts(base, local, upstream),
+            MergeOutcome::Clean("a=2\nb=1\n".to_string())
+        );
     }
 
     #[test]
@@ -238,11 +196,317 @@ mod tests {
         let local = "line1\nlocal_extra\n";
         let upstream = "upstream_top\nline1\n";
 
-        match merge_3way_text(base, local, upstream) {
-            MergeResult::Clean(merged) => {
-                assert_eq!(merged, "upstream_top\nline1\nlocal_extra\n");
+        assert_eq!(
+            merge_texts(base, local, upstream),
+            MergeOutcome::Clean("upstream_top\nline1\nlocal_extra\n".to_string())
+        );
+    }
+
+    /// Every occurrence of a 7-character conflict marker, and how many of them do
+    /// not start a line (glued onto the end of the previous line).
+    fn marker_positions(text: &str) -> (usize, usize) {
+        let mut total = 0;
+        let mut glued = 0;
+        for marker in ["<<<<<<<", "|||||||", "=======", ">>>>>>>"] {
+            for (offset, _) in text.match_indices(marker) {
+                total += 1;
+                if offset != 0 && !text[..offset].ends_with('\n') {
+                    glued += 1;
+                }
             }
-            MergeResult::Conflict => panic!("Expected clean merge for disjoint insertions"),
+        }
+        (total, glued)
+    }
+
+    #[test]
+    fn test_adjacent_edits_conflict() {
+        assert!(
+            matches!(
+                merge_texts("a=1\nb=1\n", "a=2\nb=1\n", "a=1\nb=2\n"),
+                MergeOutcome::Conflict(_)
+            ),
+            "edits on adjacent lines must conflict"
+        );
+        // Negative control: one unchanged line between the edits merges cleanly.
+        assert_eq!(
+            merge_texts("a=1\nx\nb=1\n", "a=2\nx\nb=1\n", "a=1\nx\nb=2\n"),
+            MergeOutcome::Clean("a=2\nx\nb=2\n".to_string())
+        );
+    }
+
+    #[test]
+    fn test_relabel_conflict_markers() {
+        let marked = "<<<<<<< ours\nl\n||||||| original\no\n=======\nu\n>>>>>>> theirs\n";
+        assert_eq!(
+            relabel_conflict_markers(marked),
+            "<<<<<<< LOCAL\nl\n||||||| ANCESTOR\no\n=======\nu\n>>>>>>> UPSTREAM\n"
+        );
+        // Negative control: lines that only resemble a marker are left untouched.
+        for line in [
+            "<<<<<<< oursX\n",
+            "  <<<<<<< ours\n",
+            "||||||| original \n",
+            ">>>>>>> theirs!\n",
+            "<<<<<<< ours",
+        ] {
+            assert_eq!(relabel_conflict_markers(line), line);
+        }
+    }
+
+    #[test]
+    fn test_merge_conflict_labels() {
+        let MergeOutcome::Conflict(text) = merge_texts("a=1\n", "a=2\n", "a=3\n") else {
+            panic!("expected a conflict");
+        };
+        for marker in [
+            "<<<<<<< LOCAL\n",
+            "||||||| ANCESTOR\n",
+            "=======\n",
+            ">>>>>>> UPSTREAM\n",
+        ] {
+            assert!(text.contains(marker), "missing {marker:?} in {text:?}");
+        }
+        for label in ["ours", "original", "theirs"] {
+            assert!(!text.contains(label), "diffy label {label:?} in {text:?}");
+        }
+    }
+
+    #[test]
+    fn test_merge_crlf() {
+        assert_eq!(
+            merge_texts(
+                "a=1\r\nb=1\r\nc=1\r\nd=1\r\n",
+                "a=2\r\nb=1\r\nc=1\r\nd=1\r\n",
+                "a=1\r\nb=1\r\nc=1\r\nd=2\r\n",
+            ),
+            MergeOutcome::Clean("a=2\r\nb=1\r\nc=1\r\nd=2\r\n".to_string())
+        );
+        // Negative control: the same edits in LF produce no CR.
+        let MergeOutcome::Clean(lf) = merge_texts(
+            "a=1\nb=1\nc=1\nd=1\n",
+            "a=2\nb=1\nc=1\nd=1\n",
+            "a=1\nb=1\nc=1\nd=2\n",
+        ) else {
+            panic!("expected a clean LF merge");
+        };
+        assert_eq!(lf, "a=2\nb=1\nc=1\nd=2\n");
+        assert!(!lf.contains('\r'));
+    }
+
+    #[test]
+    fn test_merge_no_trailing_newline_markers_start_line() {
+        let (ancestor, local, upstream) = ("a=1\nb=1", "a=1\nb=2", "a=1\nb=3");
+        let outcome = merge_texts(ancestor, local, upstream);
+        assert_eq!(
+            outcome,
+            MergeOutcome::Conflict(
+                "a=1\n<<<<<<< LOCAL\nb=2\n||||||| ANCESTOR\nb=1\n=======\nb=3\n>>>>>>> UPSTREAM\n"
+                    .to_string()
+            )
+        );
+        let MergeOutcome::Conflict(text) = outcome else {
+            unreachable!()
+        };
+        assert_eq!(marker_positions(&text), (4, 0));
+
+        // Negative control: diffy's default incomplete-hunk style glues markers onto
+        // the last line of each side, and the helper sees it.
+        let glued = MergeOptions::new()
+            .merge(ancestor, local, upstream)
+            .expect_err("the fixture must conflict");
+        assert_eq!(
+            glued,
+            "a=1\n<<<<<<< ours\nb=2||||||| original\nb=1=======\nb=3>>>>>>> theirs\n"
+        );
+        assert_eq!(marker_positions(&glued), (4, 3));
+    }
+
+    const HEADER: &str = "# UDE sync conflict: .gitconfig\n\
+        # Resolve with: ude sync resolve .gitconfig\n\
+        # LOCAL = your working copy, ANCESTOR = last synced version, UPSTREAM = central template\n";
+
+    #[test]
+    fn test_render_conflict_sidecar_text() {
+        let rel = Path::new(".gitconfig");
+        let rendered = render_conflict_sidecar(
+            rel,
+            ConflictSide::Text("a=1\nb=1\n"),
+            ConflictSide::Text("a=2\nb=1\n"),
+            ConflictSide::Text("a=1\nb=2\n"),
+        );
+        let MergeOutcome::Conflict(body) = merge_texts("a=1\nb=1\n", "a=2\nb=1\n", "a=1\nb=2\n")
+        else {
+            panic!("expected a conflict");
+        };
+        assert_eq!(rendered, format!("{HEADER}\n{body}"));
+        assert!(rendered.contains(".gitconfig"));
+        assert!(rendered.contains("ude sync resolve .gitconfig"));
+        let mut rest = rendered.as_str();
+        for marker in [
+            "<<<<<<< LOCAL\n",
+            "||||||| ANCESTOR\n",
+            "=======\n",
+            ">>>>>>> UPSTREAM\n",
+        ] {
+            let at = rest
+                .find(marker)
+                .unwrap_or_else(|| panic!("{marker:?} missing or out of order"));
+            rest = &rest[at + marker.len()..];
+        }
+        // Negative control: an all-text render never carries diffy's labels.
+        assert!(!rendered.contains("ours"), "{rendered}");
+        assert!(!rendered.contains("theirs"), "{rendered}");
+        assert!(!rendered.contains("{{"), "{rendered}");
+
+        // Three text sides that diffy merges cleanly still show all three versions.
+        assert_eq!(
+            render_conflict_sidecar(
+                rel,
+                ConflictSide::Text("a\n"),
+                ConflictSide::Text("a\n"),
+                ConflictSide::Text("b\n"),
+            ),
+            format!(
+                "{HEADER}\n<<<<<<< LOCAL\na\n||||||| ANCESTOR\na\n=======\nb\n>>>>>>> UPSTREAM\n"
+            )
+        );
+    }
+
+    #[test]
+    fn test_render_conflict_sidecar_deleted_upstream() {
+        let rel = Path::new(".gitconfig");
+        let rendered = render_conflict_sidecar(
+            rel,
+            ConflictSide::Text("a=1\n"),
+            ConflictSide::Text("a=2"),
+            ConflictSide::Absent,
+        );
+        assert_eq!(
+            rendered,
+            format!(
+                "{HEADER}# UPSTREAM: deleted upstream\n\n\
+                 <<<<<<< LOCAL\na=2\n||||||| ANCESTOR\na=1\n=======\n>>>>>>> UPSTREAM\n"
+            )
+        );
+        assert!(
+            rendered.contains("=======\n>>>>>>> UPSTREAM\n"),
+            "UPSTREAM section must be empty"
+        );
+        assert_eq!(marker_positions(&rendered), (4, 0));
+
+        // Symmetric: a local deletion against an upstream edit.
+        let rendered = render_conflict_sidecar(
+            rel,
+            ConflictSide::Text("a=1\n"),
+            ConflictSide::Absent,
+            ConflictSide::Text("a=3\n"),
+        );
+        assert_eq!(
+            rendered,
+            format!(
+                "{HEADER}# LOCAL: deleted locally\n\n\
+                 <<<<<<< LOCAL\n||||||| ANCESTOR\na=1\n=======\na=3\n>>>>>>> UPSTREAM\n"
+            )
+        );
+
+        // Never synced: no ancestor, and an empty text side stays an empty section.
+        assert_eq!(
+            render_conflict_sidecar(
+                rel,
+                ConflictSide::Absent,
+                ConflictSide::Text(""),
+                ConflictSide::Text("u"),
+            ),
+            format!(
+                "{HEADER}# ANCESTOR: none (never synced)\n\n\
+                 <<<<<<< LOCAL\n||||||| ANCESTOR\n=======\nu\n>>>>>>> UPSTREAM\n"
+            )
+        );
+    }
+
+    #[test]
+    fn test_render_conflict_sidecar_binary() {
+        let rel = Path::new(".gitconfig");
+        let rendered = render_conflict_sidecar(
+            rel,
+            ConflictSide::Text("a=1\n"),
+            ConflictSide::Binary {
+                fingerprint: "fp-local",
+            },
+            ConflictSide::Binary {
+                fingerprint: "fp-upstream",
+            },
+        );
+        assert_eq!(
+            rendered,
+            format!(
+                "{HEADER}# LOCAL fingerprint: fp-local\n# UPSTREAM fingerprint: fp-upstream\n\n\
+                 # Binary content: no text diff available.\n"
+            )
+        );
+        assert!(!rendered.contains("<<<<<<<"));
+
+        // One binary side is enough to suppress the text body; the other notes stay.
+        let rendered = render_conflict_sidecar(
+            rel,
+            ConflictSide::Binary {
+                fingerprint: "fp-ancestor",
+            },
+            ConflictSide::Text("a=2\n"),
+            ConflictSide::Absent,
+        );
+        assert_eq!(
+            rendered,
+            format!(
+                "{HEADER}# ANCESTOR fingerprint: fp-ancestor\n# UPSTREAM: deleted upstream\n\n\
+                 # Binary content: no text diff available.\n"
+            )
+        );
+        let rendered = render_conflict_sidecar(
+            rel,
+            ConflictSide::Text("a=1\n"),
+            ConflictSide::Text("a=2\n"),
+            ConflictSide::Binary {
+                fingerprint: "fp-upstream",
+            },
+        );
+        assert!(rendered.contains("# UPSTREAM fingerprint: fp-upstream\n"));
+        assert!(!rendered.contains("<<<<<<<"), "{rendered}");
+    }
+
+    const DIFFY_MARKERS: [&str; 3] = ["<<<<<<< ours", "||||||| original", ">>>>>>> theirs"];
+
+    proptest::proptest! {
+        #[test]
+        fn test_relabel_prop(
+            lines in proptest::collection::vec(
+                proptest::strategy::Strategy::prop_filter(
+                    r"[^\n]{0,24}",
+                    "exact diffy marker line",
+                    |line: &String| !DIFFY_MARKERS.contains(&line.as_str()),
+                ),
+                0..=12,
+            ),
+            index in proptest::prelude::any::<proptest::sample::Index>(),
+        ) {
+            let text = format!("{}\n", lines.join("\n"));
+            proptest::prop_assert_eq!(relabel_conflict_markers(&text), text.clone());
+
+            // Negative control: an exact diffy marker line inserted anywhere is relabeled,
+            // and only that line changes.
+            let at = index.index(lines.len() + 1);
+            let mut marked = lines.clone();
+            marked.insert(at, DIFFY_MARKERS[0].to_string());
+            let relabeled = relabel_conflict_markers(&format!("{}\n", marked.join("\n")));
+            let out: Vec<&str> = relabeled.split('\n').collect();
+            proptest::prop_assert_eq!(out.len(), marked.len() + 1);
+            for (i, line) in marked.iter().enumerate() {
+                if i == at {
+                    proptest::prop_assert_eq!(out[i], "<<<<<<< LOCAL");
+                } else {
+                    proptest::prop_assert_eq!(out[i], line.as_str());
+                }
+            }
         }
     }
 }

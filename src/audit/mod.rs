@@ -50,7 +50,9 @@ impl Auditor {
         let user_home = base_dirs
             .as_ref()
             .map(|b| b.home_dir().to_path_buf())
-            .unwrap_or_else(|| PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".to_string())));
+            .unwrap_or_else(|| {
+                PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".to_string()))
+            });
         let xdg_config = base_dirs
             .as_ref()
             .map(|b| b.config_dir().to_path_buf())
@@ -115,7 +117,10 @@ impl Auditor {
                         ))
                     }
                 }
-                Err(e) => CheckStatus::Critical(format!("Failed to read {}: {e}", allowed_signers.display())),
+                Err(e) => CheckStatus::Critical(format!(
+                    "Failed to read {}: {e}",
+                    allowed_signers.display()
+                )),
             }
         };
         reports.push(AuditReport {
@@ -125,12 +130,16 @@ impl Auditor {
         });
 
         // 3. Global git config GPG format
-        let gpg_format = std::process::Command::new("git")
-            .args(["config", "--global", "--get", "gpg.format"])
-            .output()
-            .ok()
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-            .unwrap_or_default();
+        let mut gpg_format_cmd = std::process::Command::new("git");
+        gpg_format_cmd.args(["config", "--global", "--get", "gpg.format"]);
+        let gpg_format = crate::process::run_bounded(
+            gpg_format_cmd,
+            "git config gpg.format",
+            crate::process::LOCAL_TIMEOUT,
+        )
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
 
         reports.push(AuditReport {
             category: "Git & SSH Security".to_string(),
@@ -138,17 +147,23 @@ impl Auditor {
             status: if gpg_format == "ssh" {
                 CheckStatus::Pass
             } else {
-                CheckStatus::Critical("Global git gpg.format is not configured to 'ssh'".to_string())
+                CheckStatus::Critical(
+                    "Global git gpg.format is not configured to 'ssh'".to_string(),
+                )
             },
         });
 
         // 4. Global git commit signing
-        let gpg_sign = std::process::Command::new("git")
-            .args(["config", "--global", "--get", "commit.gpgsign"])
-            .output()
-            .ok()
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-            .unwrap_or_default();
+        let mut gpg_sign_cmd = std::process::Command::new("git");
+        gpg_sign_cmd.args(["config", "--global", "--get", "commit.gpgsign"]);
+        let gpg_sign = crate::process::run_bounded(
+            gpg_sign_cmd,
+            "git config commit.gpgsign",
+            crate::process::LOCAL_TIMEOUT,
+        )
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
 
         reports.push(AuditReport {
             category: "Git & SSH Security".to_string(),
@@ -156,7 +171,9 @@ impl Auditor {
             status: if gpg_sign == "true" {
                 CheckStatus::Pass
             } else {
-                CheckStatus::Critical("Global git commit.gpgsign is not enabled ('true')".to_string())
+                CheckStatus::Critical(
+                    "Global git commit.gpgsign is not enabled ('true')".to_string(),
+                )
             },
         });
 
@@ -183,7 +200,10 @@ impl Auditor {
             reports.push(AuditReport {
                 category: "Repository Baseline".to_string(),
                 name: "Git Repository".to_string(),
-                status: CheckStatus::Fail(format!("{} is not a git repository", repo_path.display())),
+                status: CheckStatus::Fail(format!(
+                    "{} is not a git repository",
+                    repo_path.display()
+                )),
             });
             return reports;
         }
@@ -196,13 +216,21 @@ impl Auditor {
             CheckStatus::Warning("Root .gitconfig template is empty (0 bytes)".to_string())
         } else {
             // Verify repository-local .git/config includes the root .gitconfig
-            let include_out = std::process::Command::new("git")
-                .current_dir(repo_path)
-                .args(["config", "--local", "--get-all", "include.path"])
-                .output()
-                .ok()
-                .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
-                .unwrap_or_default();
+            let mut include_cmd = std::process::Command::new("git");
+            include_cmd.current_dir(repo_path).args([
+                "config",
+                "--local",
+                "--get-all",
+                "include.path",
+            ]);
+            let include_out = crate::process::run_bounded(
+                include_cmd,
+                "git config include.path",
+                crate::process::LOCAL_TIMEOUT,
+            )
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+            .unwrap_or_default();
             let has_include = include_out
                 .lines()
                 .any(|l| l.trim() == "../.gitconfig" || l.trim() == ".gitconfig");
@@ -221,13 +249,18 @@ impl Auditor {
         });
 
         // 2. Check core.hooksPath configuration
-        let hooks_path_out = std::process::Command::new("git")
+        let mut hooks_path_cmd = std::process::Command::new("git");
+        hooks_path_cmd
             .current_dir(repo_path)
-            .args(["config", "--get", "core.hooksPath"])
-            .output()
-            .ok()
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-            .unwrap_or_default();
+            .args(["config", "--get", "core.hooksPath"]);
+        let hooks_path_out = crate::process::run_bounded(
+            hooks_path_cmd,
+            "git config core.hooksPath",
+            crate::process::LOCAL_TIMEOUT,
+        )
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
         reports.push(AuditReport {
             category: "Git Hooks".to_string(),
             name: "Repository core.hooksPath".to_string(),
@@ -252,13 +285,20 @@ impl Auditor {
                 CheckStatus::Warning(format!("Hook 'scripts/hooks/{hook}' is empty (0 bytes)"))
             } else {
                 // Verify tracked executable mode 100755 in git index
-                let ls_stage = std::process::Command::new("git")
-                    .current_dir(repo_path)
-                    .args(["ls-files", "--stage", &format!("scripts/hooks/{hook}")])
-                    .output()
-                    .ok()
-                    .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
-                    .unwrap_or_default();
+                let mut ls_stage_cmd = std::process::Command::new("git");
+                ls_stage_cmd.current_dir(repo_path).args([
+                    "ls-files",
+                    "--stage",
+                    &format!("scripts/hooks/{hook}"),
+                ]);
+                let ls_stage = crate::process::run_bounded(
+                    ls_stage_cmd,
+                    "git ls-files --stage",
+                    crate::process::LOCAL_TIMEOUT,
+                )
+                .ok()
+                .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+                .unwrap_or_default();
                 let first_word = ls_stage.split_whitespace().next().unwrap_or("");
                 if first_word == "100755" {
                     CheckStatus::Pass
@@ -270,7 +310,9 @@ impl Auditor {
                     #[cfg(unix)]
                     {
                         use std::os::unix::fs::PermissionsExt;
-                        let perms = std::fs::metadata(&hook_file).map(|m| m.permissions().mode()).unwrap_or(0);
+                        let perms = std::fs::metadata(&hook_file)
+                            .map(|m| m.permissions().mode())
+                            .unwrap_or(0);
                         if perms & 0o111 != 0 {
                             CheckStatus::Pass
                         } else {
@@ -294,7 +336,59 @@ impl Auditor {
             });
         }
 
+        // 4. Per-machine sync state must not be committed
+        reports.push(AuditReport {
+            category: "Repository Baseline".to_string(),
+            name: format!("Per-machine sync state ({SYNC_STATE_PATH})"),
+            status: sync_state_tracking_status(repo_path),
+        });
+
         reports
+    }
+}
+
+/// Project-relative path of UDE's per-machine sync ancestor state.
+const SYNC_STATE_PATH: &str = ".ude/state.json";
+
+/// Warns when [`SYNC_STATE_PATH`] is tracked by git although the project's ignore
+/// rules ignore it: the committed copy makes init on another machine treat every
+/// uncommitted managed file as deleted locally. The warning names the remedy.
+fn sync_state_tracking_status(repo_path: &Path) -> CheckStatus {
+    let tracked = git_exit_flag(
+        repo_path,
+        &["ls-files", "--error-unmatch", "--", SYNC_STATE_PATH],
+        "git ls-files --error-unmatch",
+    );
+    // `--no-index`: without it check-ignore reports every tracked path as not ignored.
+    let ignored = git_exit_flag(
+        repo_path,
+        &["check-ignore", "-q", "--no-index", "--", SYNC_STATE_PATH],
+        "git check-ignore",
+    );
+    match (tracked, ignored) {
+        (Ok(true), Ok(true)) => CheckStatus::Warning(format!(
+            "{SYNC_STATE_PATH} is tracked by git but is per-machine sync state that .gitignore ignores; another machine's init would treat uncommitted managed files as deleted (run 'git rm --cached {SYNC_STATE_PATH}', then commit)"
+        )),
+        (Err(e), _) | (_, Err(e)) => CheckStatus::Warning(format!(
+            "Could not check whether {SYNC_STATE_PATH} is tracked and ignored: {e}"
+        )),
+        _ => CheckStatus::Pass,
+    }
+}
+
+/// Runs `git <args>` in `repo_path` through the bounded runner and maps exit 0 to
+/// `true` and exit 1 to `false`. Any other outcome is an error naming `label`.
+fn git_exit_flag(repo_path: &Path, args: &[&str], label: &str) -> Result<bool, String> {
+    let mut cmd = std::process::Command::new("git");
+    cmd.current_dir(repo_path).args(args);
+    let out = crate::process::run_bounded(cmd, label, crate::process::LOCAL_TIMEOUT)?;
+    match out.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        code => Err(format!(
+            "{label} exited with {code:?}: {}",
+            crate::process::stderr_excerpt(&out)
+        )),
     }
 }
 

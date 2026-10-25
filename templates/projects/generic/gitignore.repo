@@ -25,3 +25,12 @@ Thumbs.db
 graphify-out/*
 !graphify-out/graph.json
 !graphify-out/manifest.json
+
+# UDE sync conflict sidecars (resolve with: ude sync resolve <file>)
+*.conflict
+
+# UDE sync ancestor state is per machine; committing it makes init on another
+# machine treat every uncommitted managed file as deleted locally
+.ude/state.json
+# Temp files from staging state.json writes (tempfile prefix .tmp), left by a crash
+.ude/.tmp*

@@ -63,16 +63,17 @@ pub struct InitArgs {
     #[arg(long)]
     pub path: Option<PathBuf>,
 
-    /// Project ecosystem type (rust, node, polyglot)
-    #[arg(short = 't', long = "type", default_value = "rust")]
-    pub project_type: String,
+    /// Project ecosystem type (rust, node, polyglot, or generic to detect it). Default: the
+    /// type recorded by an earlier init, else rust
+    #[arg(short = 't', long = "type", value_parser = ["rust", "node", "polyglot", "generic"])]
+    pub project_type: Option<String>,
 
-    /// Enable MemPalace memory stage
-    #[arg(long, default_value_t = true)]
+    /// Enable MemPalace memory stage (`--mempalace=false` to skip)
+    #[arg(long, default_value_t = true, num_args = 0..=1, default_missing_value = "true", action = clap::ArgAction::Set)]
     pub mempalace: bool,
 
-    /// Enable Graphify knowledge graph scaffold
-    #[arg(long, default_value_t = true)]
+    /// Enable Graphify knowledge graph scaffold (`--graphify=false` to skip)
+    #[arg(long, default_value_t = true, num_args = 0..=1, default_missing_value = "true", action = clap::ArgAction::Set)]
     pub graphify: bool,
 }
 
@@ -114,5 +115,10 @@ pub enum SyncAction {
         /// Open a GitHub Pull Request via gh instead of pushing directly to target branch
         #[arg(long)]
         pr: bool,
+    },
+    /// Mark a conflicted file as resolved using its current local state
+    Resolve {
+        /// Managed file path relative to the project root
+        file: PathBuf,
     },
 }

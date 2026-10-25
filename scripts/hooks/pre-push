@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# Dependency policy (deny.toml) with the cargo-deny version pinned in mise.toml.
+# Every check blocks the push, advisories included; an advisory that cannot be
+# fixed yet must be listed under [advisories] ignore in deny.toml with a reason.
+# It checks the working tree's Cargo.lock, not the commits being pushed, so an
+# uncommitted lockfile edit (or pushing another ref) is judged on the wrong graph.
+set -euo pipefail
+
+# Hooks started from GUI clients may not inherit the login PATH.
+export PATH="$HOME/.local/bin:$PATH"
+
+if ! command -v mise >/dev/null 2>&1; then
+    echo "pre-push: mise not found; it provides the pinned cargo-deny (see mise.toml)" >&2
+    exit 1
+fi
+
+cd "$(git rev-parse --show-toplevel)"
+# `mise which` names the pinned install (or fails); `mise exec` would let an
+# unpinned cargo-deny earlier on PATH win.
+cargo_deny=$(mise which cargo-deny)
+"$cargo_deny" check --hide-inclusion-graph bans licenses sources
+
+# Advisories fetch the RustSec database first. When only that fetch fails
+# (offline, filtered network, GitHub outage), check against the cached copy and
+# say it may be stale: a known advisory still blocks, and no cache still fails.
+if ! output=$("$cargo_deny" check --hide-inclusion-graph advisories 2>&1); then
+    if printf '%s\n' "$output" | grep -q "failed to fetch advisory database"; then
+        echo "pre-push: could not fetch the advisory database; checking the cached copy, which may be stale" >&2
+        exec "$cargo_deny" --offline check --hide-inclusion-graph advisories
+    fi
+    printf '%s\n' "$output" >&2
+    exit 1
+fi
+printf '%s\n' "$output" >&2
