@@ -71,11 +71,11 @@ Plans:
   3. Path parameterization matches only full word and punctuation boundaries (`\b`, path delimiters), preventing corruption of partial substring tokens.
   4. Sanitizer round-tripping verifies that templated tokens substitute back cleanly to local machine environments on initialization.
 
-**Plans**: 8 plans
+**Plans**: 1/8 plans executed
 
 Plans:
 **Wave 1**
-- [ ] 02-01: One byte-level scanner (`Sanitizer::scan_bytes`) for push staging and both publication gates; non-UTF-8 files scanned, UTF-16 scanned through a NUL-stripped view, no lossy decode, refusals name rule + line (SEC-02).
+- [x] 02-01: One byte-level scanner (`Sanitizer::scan_bytes`) for push staging and both publication gates; non-UTF-8 files scanned, UTF-16 scanned through a NUL-stripped view, no lossy decode, refusals name rule + line (SEC-02).
 - [ ] 02-02: `ude init` renders `{{`-bearing static templates with a shared `template::should_render`, byte-copies the rest, records rendered ancestors (SEC-04).
 
 **Wave 2** *(blocked on Wave 1 completion)*
@@ -138,7 +138,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Sync Engine & State Hermeticity | 11/11 | Complete    | 2026-10-22 |
-| 2. Sanitizer, Boundaries & Security Hardening | 0/8 | Not started | - |
+| 2. Sanitizer, Boundaries & Security Hardening | 1/8 | In Progress | - |
 | 3. Doctor & CLI Hardening | 0/4 | Not started | - |
 | 4. Templates, Archetypes & Manifest Decoupling | 0/3 | Not started | - |
 
