@@ -8,6 +8,32 @@ pub enum SanitizationResult {
     SecretDetected { reason: String, pattern: String },
 }
 
+/// One secret-scan hit: the rule that fired and the 1-based line it fired on.
+///
+/// It never holds the matched value, so a refusal built from it cannot leak the secret.
+#[allow(dead_code)] // RED stub: wired into push staging by the GREEN commit
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Finding {
+    pub rule: String,
+    pub line: usize,
+}
+
+#[allow(dead_code)] // RED stub: wired into push staging by the GREEN commit
+impl Finding {
+    /// Refusal text naming the rule and the line, never the matched value.
+    pub fn reason(&self) -> String {
+        format!(
+            "Forbidden secret pattern matched: {} at line {}",
+            self.rule, self.line
+        )
+    }
+}
+
+#[allow(dead_code)] // RED stub: wired into push staging by the GREEN commit
+fn first_named_rule(_bytes: &[u8]) -> Option<Finding> {
+    None
+}
+
 pub struct Sanitizer {
     secret_patterns: Vec<(&'static str, Regex)>,
 }
@@ -68,6 +94,11 @@ impl Sanitizer {
             }
         }
         SanitizationResult::Clean(content.to_string())
+    }
+
+    #[allow(dead_code)] // RED stub: wired into push staging by the GREEN commit
+    pub fn scan_bytes(&self, _bytes: &[u8], _path: &Path) -> Option<Finding> {
+        None
     }
 
     /// Parameterizes hardcoded user home and config paths into portable tokens.
@@ -339,5 +370,108 @@ mod tests {
         // Generic repo files are publishable
         assert!(!sanitizer.is_local_only_path(Path::new("src/main.rs"), false));
         assert!(!sanitizer.is_local_only_path(Path::new("Cargo.toml"), false));
+    }
+
+    /// Encodes `text` as UTF-16, optionally preceded by `bom`, with each unit
+    /// serialized by `unit_bytes` (little- or big-endian).
+    fn utf16_bytes(text: &str, bom: &[u8], unit_bytes: fn(u16) -> [u8; 2]) -> Vec<u8> {
+        let mut out = bom.to_vec();
+        for unit in text.encode_utf16() {
+            out.extend_from_slice(&unit_bytes(unit));
+        }
+        out
+    }
+
+    #[test]
+    fn test_scan_bytes_non_utf8() {
+        let sanitizer = Sanitizer::new();
+        let path = Path::new("scripts/hooks/pre-push");
+        // 0xFF never occurs in UTF-8, so these bytes are invalid UTF-8 by definition
+        // (rustc's invalid_from_utf8 lint rejects asserting it on a literal).
+        let invalid: &[u8] = &[0xFF, 0xFE, 0xFD, 0x80];
+
+        let prefix = "ghp_";
+        let body = "111122223333444455556666777788889999";
+        let mut dirty = invalid.to_vec();
+        dirty.push(b'\n');
+        dirty.extend_from_slice(format!("{prefix}{body}").as_bytes());
+
+        assert_eq!(
+            sanitizer.scan_bytes(&dirty, path),
+            Some(Finding {
+                rule: "GitHub Personal Access Token".to_string(),
+                line: 2,
+            })
+        );
+        // Negative control: the invalid bytes alone hold no token.
+        assert_eq!(sanitizer.scan_bytes(invalid, path), None);
+    }
+
+    #[test]
+    fn test_scan_bytes_reports_rule_and_line_without_value() {
+        let sanitizer = Sanitizer::new();
+        let path = Path::new("AGENTS.md");
+        let prefix = "glpat-";
+        let body = "0123456789abcdefghij";
+        let dirty = format!("first line\nsecond line\nGITLAB_TOKEN={prefix}{body}\n");
+
+        let finding = sanitizer
+            .scan_bytes(dirty.as_bytes(), path)
+            .expect("GitLab token on line 3 must be found");
+        assert_eq!(
+            finding,
+            Finding {
+                rule: "GitLab Personal Access Token".to_string(),
+                line: 3,
+            }
+        );
+        let reason = finding.reason();
+        assert!(reason.contains("GitLab Personal Access Token"), "{reason}");
+        assert!(reason.contains("at line 3"), "{reason}");
+        assert!(!reason.contains(body), "reason leaked the token body");
+
+        // Negative control: prose with no run of 20 or more candidate characters.
+        let benign = "just some plain words\nanother short line\nand a third one\n";
+        assert_eq!(sanitizer.scan_bytes(benign.as_bytes(), path), None);
+    }
+
+    #[test]
+    fn test_scan_bytes_utf16() {
+        let sanitizer = Sanitizer::new();
+        let path = Path::new("AGENTS.md");
+        let prefix = "ghp_";
+        let body = "111122223333444455556666777788889999";
+        let text = format!("x\nexport TOKEN={prefix}{body}\n");
+        let expected = Some(Finding {
+            rule: "GitHub Personal Access Token".to_string(),
+            line: 2,
+        });
+
+        let le_bom = utf16_bytes(&text, &[0xFF, 0xFE], u16::to_le_bytes);
+        let be_bom = utf16_bytes(&text, &[0xFE, 0xFF], u16::to_be_bytes);
+        let le_plain = utf16_bytes(&text, &[], u16::to_le_bytes);
+        assert_eq!(
+            sanitizer.scan_bytes(&le_bom, path),
+            expected,
+            "UTF-16LE + BOM"
+        );
+        assert_eq!(
+            sanitizer.scan_bytes(&be_bom, path),
+            expected,
+            "UTF-16BE + BOM"
+        );
+        assert_eq!(
+            sanitizer.scan_bytes(&le_plain, path),
+            expected,
+            "UTF-16LE, no BOM"
+        );
+
+        // Negative control 1 (the escape the NUL-stripped view closes): the named
+        // rules alone see nothing in the raw, NUL-interleaved bytes.
+        assert_eq!(first_named_rule(&le_bom), None);
+
+        // Negative control 2: benign UTF-16 text scans clean.
+        let benign = utf16_bytes("just some plain words\n", &[0xFF, 0xFE], u16::to_le_bytes);
+        assert_eq!(sanitizer.scan_bytes(&benign, path), None);
     }
 }

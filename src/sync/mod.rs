@@ -5522,6 +5522,107 @@ mod tests {
         }
     }
 
+    /// Pushes a local `scripts/hooks/pre-push` holding `local_bytes` (no upstream file,
+    /// no state) and returns the result plus the upstream root.
+    fn push_local_hook(local_bytes: &[u8]) -> (PushResult, tempfile::TempDir) {
+        let engine = SyncEngine::new();
+        let local_dir = tempdir().unwrap();
+        let upstream_dir = tempdir().unwrap();
+        let loc_hook = local_dir.path().join("scripts/hooks/pre-push");
+        fs::create_dir_all(loc_hook.parent().unwrap()).unwrap();
+        fs::write(&loc_hook, local_bytes).unwrap();
+        let res = engine.push_updates(
+            local_dir.path(),
+            upstream_dir.path(),
+            "/home/denniyahh",
+            "/home/denniyahh/.config",
+            false,
+            true,
+        );
+        (res, upstream_dir)
+    }
+
+    /// True when the upstream hooks directory is absent or holds no entry.
+    fn upstream_hooks_empty(upstream_root: &Path) -> bool {
+        let hooks = upstream_root.join("projects/generic/hooks");
+        match fs::read_dir(&hooks) {
+            Ok(mut entries) => entries.next().is_none(),
+            Err(e) => e.kind() == std::io::ErrorKind::NotFound,
+        }
+    }
+
+    /// Asserts a staging refusal of the hook for a GitHub PAT on line 2 that names
+    /// the rule and line, never the token body, and published nothing.
+    fn assert_hook_secret_blocked(res: &PushResult, upstream_root: &Path, body: &str) {
+        match res {
+            PushResult::SecretBlocked { path, reason } => {
+                assert_eq!(path, &PathBuf::from("scripts/hooks/pre-push"));
+                assert!(reason.contains("GitHub Personal Access Token"), "{reason}");
+                assert!(reason.contains("at line 2"), "{reason}");
+                assert!(!reason.contains(body), "refusal leaked the token body");
+            }
+            other => panic!("Expected SecretBlocked, got {other:?}"),
+        }
+        assert!(
+            upstream_hooks_empty(upstream_root),
+            "nothing may be written upstream on a refusal"
+        );
+    }
+
+    /// Asserts the hook was published byte-for-byte.
+    fn assert_hook_published(res: &PushResult, upstream_root: &Path, local_bytes: &[u8]) {
+        match res {
+            PushResult::Success { synced_files, .. } => assert_eq!(*synced_files, 1),
+            other => panic!("Expected Success, got {other:?}"),
+        }
+        let published = fs::read(upstream_root.join("projects/generic/hooks/pre-push")).unwrap();
+        assert_eq!(published, local_bytes);
+    }
+
+    #[test]
+    fn test_push_blocks_secret_in_non_utf8_file() {
+        let prefix = "ghp_";
+        let body = "111122223333444455556666777788889999";
+        let mut dirty = vec![0xFF, 0xFE, b'\n'];
+        dirty.extend_from_slice(format!("export TOKEN={prefix}{body}\n").as_bytes());
+        assert!(
+            std::str::from_utf8(&dirty).is_err(),
+            "fixture must be non-UTF-8"
+        );
+
+        let (res, upstream) = push_local_hook(&dirty);
+        assert_hook_secret_blocked(&res, upstream.path(), body);
+
+        // Negative control: the same bytes without the token line are published as-is.
+        let clean = vec![0xFF, 0xFE, b'\n'];
+        let (res, upstream) = push_local_hook(&clean);
+        assert_hook_published(&res, upstream.path(), &clean);
+    }
+
+    /// UTF-16LE with the BOM bytes 0xFF 0xFE.
+    fn utf16le_bom(text: &str) -> Vec<u8> {
+        let mut out = vec![0xFF, 0xFE];
+        for unit in text.encode_utf16() {
+            out.extend_from_slice(&unit.to_le_bytes());
+        }
+        out
+    }
+
+    #[test]
+    fn test_push_blocks_secret_in_utf16_file() {
+        let prefix = "ghp_";
+        let body = "111122223333444455556666777788889999";
+        let dirty = utf16le_bom(&format!("#!/bin/sh\nexport TOKEN={prefix}{body}\n"));
+
+        let (res, upstream) = push_local_hook(&dirty);
+        assert_hook_secret_blocked(&res, upstream.path(), body);
+
+        // Negative control: benign UTF-16 is published byte-for-byte.
+        let clean = utf16le_bom("#!/bin/sh\necho ok\n");
+        let (res, upstream) = push_local_hook(&clean);
+        assert_hook_published(&res, upstream.path(), &clean);
+    }
+
     #[test]
     fn test_push_updates_atomic_prevalidation_no_partial_writes() {
         let engine = SyncEngine::new();
