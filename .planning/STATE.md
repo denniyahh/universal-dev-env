@@ -4,16 +4,16 @@ milestone: v8.30.1
 current_phase: 02
 current_phase_name: Sanitizer, Boundaries & Security Hardening
 status: executing
-stopped_at: Completed 02-01-PLAN.md
-last_updated: "2026-10-25T18:28:22.025Z"
+stopped_at: Completed 02-02-PLAN.md
+last_updated: "2026-10-25T18:39:44.775Z"
 last_activity: 2026-10-25
 last_activity_desc: Phase 02 execution started
-state_head: b03648ed7c3bbb29f2327b0bd0fbd2f325c853ed
+state_head: d2dcfbae6eb56f511984f75e47ac1bdb6b1098ec
 progress:
   total_phases: 4
   completed_phases: 1
   total_plans: 19
-  completed_plans: 12
+  completed_plans: 13
 ---
 
 # Project State
@@ -28,7 +28,7 @@ See: `.planning/PROJECT.md` (updated 2026-10-22)
 ## Current Position
 
 Phase: 02 (Sanitizer, Boundaries & Security Hardening) — EXECUTING
-Plan: 2 of 8
+Plan: 3 of 8
 Status: Ready to execute
 Last activity: 2026-10-25 — Phase 02 execution started
 
@@ -71,6 +71,7 @@ Progress: [███░░░░░░░] 25%
 | Phase 01 P10 | 14min | 3 tasks | 4 files |
 | Phase 01 P11 | 12min | 3 tasks | 3 files |
 | Phase 02 P01 | 8 min | 2 tasks | 2 files |
+| Phase 02 P02 | 7 min | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -113,6 +114,9 @@ Recent decisions affecting current work:
 - [Phase 02]: 02-01: Named secret rules use ASCII byte semantics (Go/gitleaks parity); tokens next to non-ASCII letters are now caught
 - [Phase 02]: 02-01: UTF-16/UTF-32 content is scanned via a NUL-stripped second view in scan_bytes rather than refused
 - [Phase 02]: 02-01: Push staging scans the published bytes (post-parameterization), so staging and both gates scan identical bytes
+- [Phase 02]: Init renders `{{`-bearing non-.jinja templates with the initializing machine context via template::should_render (one render rule for init write, kept ancestor and recovery hint)
+- [Phase 02]: A template that fails to render stops init with exit 2 naming the template (same refusal as pull), instead of a raw copy
+- [Phase 02]: A non-UTF-8 template is never rendered by init; a non-UTF-8 .jinja kept ancestor is recorded raw instead of failing
 
 ### Pending Todos
 
@@ -152,6 +156,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-25T18:28:21.868Z
-Stopped at: Completed 02-01-PLAN.md
+Last session: 2026-10-25T18:39:44.581Z
+Stopped at: Completed 02-02-PLAN.md
 Resume file: None
