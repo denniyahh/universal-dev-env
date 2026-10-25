@@ -1,0 +1,38 @@
+# Branch hygiene: shared branches (main, develop) never carry personal or agent
+# artifacts. Server-side counterpart of the pre-push guard, which a clone
+# without the hooks, or `git push --no-verify`, would skip.
+name: hygiene
+
+on:
+  pull_request:
+    branches: [main, develop]
+  push:
+    branches: [main, develop]
+
+permissions:
+  contents: read
+
+jobs:
+  personal-artifacts:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Full history: an artifact added and removed again inside the range
+          # is still published.
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Refuse personal and agent artifacts
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          if [ "$EVENT" = pull_request ]; then
+            scripts/check-personal-artifacts.sh HEAD "origin/$BASE_REF..HEAD"
+          elif [ "$BEFORE" = 0000000000000000000000000000000000000000 ]; then
+            scripts/check-personal-artifacts.sh HEAD HEAD
+          else
+            scripts/check-personal-artifacts.sh HEAD "$BEFORE..HEAD"
+          fi

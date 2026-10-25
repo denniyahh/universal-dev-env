@@ -81,3 +81,23 @@ mise trust && mise install && mise run install-hooks
 - `scripts/hooks/pre-push` runs the full `cargo deny check` (advisories, bans, licenses, sources); any failure blocks the push. An advisory that cannot be fixed yet goes under `[advisories] ignore` in `deny.toml` with a reason. When the advisory database cannot be fetched (offline, outage), the hook checks the cached copy and warns that it may be stale; with no cached copy the push is refused.
 - `mise run supply-chain` runs the same check by hand.
 - `.github/workflows/supply-chain.yml` runs both scans on every push and pull request, and weekly from the default branch.
+
+## 6. Development: Branching (git flow)
+
+- `develop` is the default branch; work reaches it through pull requests (merge commit or squash). `main` only receives releases, by squash pull request. Feature branches are `feature/<name>`, releases `release/<version>`, hotfixes `hotfix/<version>`, tags `v<version>`.
+- Planning state and agent configuration (`.planning/`, `.claude/`, `GEMINI.md`, …) never go on `main`, `develop` or `feature/*`. They live on personal branches: `workspace/<handle>`, `personal/<handle>`, or a planning-bearing `gsd/*` phase branch. `scripts/check-personal-artifacts.sh` enforces this in `scripts/hooks/pre-push` and in `.github/workflows/hygiene.yml`.
+- Keep a workspace branch current with `git merge origin/develop`.
+- `.gitconfig` holds the shared git-flow names and signing policy. Copy it into your local config once; do not `include` it:
+
+```bash
+git config --local gpg.format ssh
+git config --local commit.gpgsign true
+git config --local tag.gpgsign true
+git config --local gitflow.branch.master main
+git config --local gitflow.branch.develop develop
+git config --local gitflow.prefix.feature feature/
+git config --local gitflow.prefix.release release/
+git config --local gitflow.prefix.hotfix hotfix/
+git config --local gitflow.prefix.support support/
+git config --local gitflow.prefix.versiontag v
+```

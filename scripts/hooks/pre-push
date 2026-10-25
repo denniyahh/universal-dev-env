@@ -6,6 +6,27 @@
 # uncommitted lockfile edit (or pushing another ref) is judged on the wrong graph.
 set -euo pipefail
 
+# Personal/agent artifacts never go to shared branches; this repository is
+# public, so a push publishes them at once. workspace/*, personal/* and gsd/*
+# branches carry them by design.
+zero_sha=0000000000000000000000000000000000000000
+repo_root="$(git rev-parse --show-toplevel)"
+while read -r _local_ref local_sha remote_ref remote_sha; do
+    [ "$local_sha" = "$zero_sha" ] && continue # branch deletion
+    case "$remote_ref" in
+        refs/heads/workspace/* | refs/heads/personal/* | refs/heads/gsd/*) continue ;;
+    esac
+    if [ "$remote_sha" = "$zero_sha" ]; then
+        range=("$local_sha" --not --remotes="$1")
+    else
+        range=("$remote_sha..$local_sha")
+    fi
+    if ! "$repo_root/scripts/check-personal-artifacts.sh" "$local_sha" "${range[@]}"; then
+        echo "pre-push: refusing push to $remote_ref" >&2
+        exit 1
+    fi
+done
+
 # Hooks started from GUI clients may not inherit the login PATH.
 export PATH="$HOME/.local/bin:$PATH"
 
