@@ -90,9 +90,10 @@ fn first_named_rule(bytes: &[u8]) -> Option<Finding> {
     })
 }
 
-pub struct Sanitizer {
-    secret_patterns: Vec<(&'static str, Regex)>,
-}
+/// Secret scanning, home-path parameterization and the local-only path boundary.
+///
+/// Holds no state: the secret rules are process-wide statics compiled once.
+pub struct Sanitizer;
 
 impl Default for Sanitizer {
     fn default() -> Self {
@@ -102,54 +103,21 @@ impl Default for Sanitizer {
 
 impl Sanitizer {
     pub fn new() -> Self {
-        let patterns = vec![
-            // Private SSH, TLS, or PKCS keys (including PKCS8 headers)
-            (
-                "Private Key",
-                Regex::new(r"-----BEGIN (?:[A-Z0-9_-]+ )?PRIVATE KEY-----").unwrap(),
-            ),
-            // GitHub personal access tokens (classic ghp/gho/ghu/ghs/ghr and fine-grained github_pat)
-            (
-                "GitHub Personal Access Token",
-                Regex::new(r"\b(?:gh[pousr]_[A-Za-z0-9_]{36,255}|github_pat_[A-Za-z0-9_]{50,255})\b").unwrap(),
-            ),
-            // GitLab personal access tokens
-            (
-                "GitLab Personal Access Token",
-                Regex::new(r"\bglpat-[A-Za-z0-9_\-]{20,}\b").unwrap(),
-            ),
-            // HTTP Bearer tokens
-            (
-                "Bearer Token",
-                Regex::new(r"(?i)\bBearer\s+[A-Za-z0-9_\-\.]{20,}\b").unwrap(),
-            ),
-            // Generic high-entropy API keys / secrets (quoted and unquoted assignments, including JSON syntax)
-            (
-                "Generic API Key",
-                Regex::new(r#"(?i)["']?(?:api[_-]?key|secret[_-]?key|access[_-]?token|auth[_-]?token)["']?\s*[:=]\s*['"]?[A-Za-z0-9_\-\.]{20,}['"]?"#).unwrap(),
-            ),
-            // AWS Access Key ID
-            (
-                "AWS Access Key",
-                Regex::new(r"\b(A3T[A-Z0-9]|AKIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA|ASIA)[A-Z0-9]{16}\b").unwrap(),
-            ),
-        ];
-        Self {
-            secret_patterns: patterns,
-        }
+        Self
     }
 
-    /// Checks content for secrets and credentials. Rejects if any match.
+    /// Checks text for secrets and credentials; a thin wrapper over [`Self::scan_bytes`]
+    /// for callers that hold a `&str` (the pre-API AGENTS.md scan).
+    ///
+    /// It passes an empty path, so path-scoped rules never fire through it.
     pub fn check_secrets(&self, content: &str) -> SanitizationResult {
-        for (name, regex) in &self.secret_patterns {
-            if regex.is_match(content) {
-                return SanitizationResult::SecretDetected {
-                    reason: format!("Forbidden secret pattern matched: {name}"),
-                    pattern: name.to_string(),
-                };
-            }
+        match self.scan_bytes(content.as_bytes(), Path::new("")) {
+            None => SanitizationResult::Clean(content.to_string()),
+            Some(finding) => SanitizationResult::SecretDetected {
+                reason: finding.reason(),
+                pattern: finding.rule,
+            },
         }
-        SanitizationResult::Clean(content.to_string())
     }
 
     /// The single secret-scan entry point for every outbound check.
@@ -336,7 +304,13 @@ mod tests {
     fn test_secret_detection_bearer_and_unquoted_key() {
         let sanitizer = Sanitizer::new();
         let b_hdr = "Bearer";
-        let b_jwt = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0";
+        // JWT assembled at runtime from separately bound parts (header split too), so
+        // no whole token or header occurs as a literal in this file.
+        let jwt_header_p1 = "eyJhbGciOiJIUzI1NiIs";
+        let jwt_header_p2 = "InR5cCI6IkpXVCJ9";
+        let jwt_payload = "eyJzdWIiOiIxMjM0NTY3ODkwIn0";
+        let jwt_signature = "dGVzdC1zaWduYXR1cmU";
+        let b_jwt = format!("{jwt_header_p1}{jwt_header_p2}.{jwt_payload}.{jwt_signature}");
         let bearer_dirty = format!("Authorization: {b_hdr} {b_jwt}");
         match sanitizer.check_secrets(&bearer_dirty) {
             SanitizationResult::SecretDetected { pattern, .. } => {

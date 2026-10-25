@@ -5,7 +5,7 @@ use state::STATE_FILE_REL;
 pub use state::{FileStateRecord, ProjectState};
 
 use crate::process::{self, RunOutput};
-use crate::sanitizer::{SanitizationResult, Sanitizer};
+use crate::sanitizer::Sanitizer;
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::ffi::OsString;
@@ -1735,14 +1735,12 @@ impl SyncEngine {
                 ));
             }
 
-            let blob_content = String::from_utf8_lossy(&blob_res.stdout);
-            if let SanitizationResult::SecretDetected { reason, .. } =
-                self.sanitizer.check_secrets(&blob_content)
-            {
+            if let Some(finding) = self.sanitizer.scan_bytes(&blob_res.stdout, &p) {
                 self.reset_index(remote_checkout);
                 return Err(format!(
-                    "Publication gate violation: secret detected in staged index blob {}: {reason}",
-                    p.display()
+                    "Publication gate violation: secret detected in staged index blob {}: {}",
+                    p.display(),
+                    finding.reason()
                 ));
             }
         }
@@ -2032,13 +2030,11 @@ impl SyncEngine {
                 ));
             }
 
-            let blob_content = String::from_utf8_lossy(&blob_res.stdout);
-            if let SanitizationResult::SecretDetected { reason, .. } =
-                self.sanitizer.check_secrets(&blob_content)
-            {
+            if let Some(finding) = self.sanitizer.scan_bytes(&blob_res.stdout, &p) {
                 return Err(format!(
-                    "Post-commit publication gate violation: secret detected in committed HEAD blob {}: {reason}",
-                    p.display()
+                    "Post-commit publication gate violation: secret detected in committed HEAD blob {}: {}",
+                    p.display(),
+                    finding.reason()
                 ));
             }
         }
