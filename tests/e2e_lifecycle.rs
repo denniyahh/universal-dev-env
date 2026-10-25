@@ -4160,3 +4160,74 @@ fn test_init_refuses_unrenderable_template() {
     assert!(stderr.contains("gitconfig.repo"), "{stderr}");
     assert!(!project.join(".gitconfig").exists(), "{}", outputs(&init));
 }
+
+/// A git project whose GITCONFIG_TEMPLATE carries the home placeholder and whose
+/// committed `.gitconfig` is that template rendered for this machine plus `extra`;
+/// returns the `.gitconfig:` status line after the first init.
+fn kept_gitconfig_status_after_init(extra: &str) -> String {
+    let temp = tempdir().unwrap();
+    let git = GitFixture::new();
+    let ude = sync_cli(temp.path());
+    let fake = fake_home(temp.path());
+    let project = project_with_local_templates(temp.path(), "project");
+    git.run(temp.path(), &["init", "-q", &project.to_string_lossy()]);
+    let template = append_to(&project.join(GITCONFIG_TEMPLATE), HOME_INCLUDE_PLACEHOLDER);
+    let rendered = template.replace("{{ user.home }}", &fake);
+    assert_ne!(
+        rendered, template,
+        "fixture precondition: placeholder present"
+    );
+    fs::write(project.join(".gitconfig"), format!("{rendered}{extra}")).unwrap();
+    git.run(&project, &["add", ".gitconfig"]);
+    commit_without_project_hooks(&git, &project, "chore: committed gitconfig");
+
+    let init = init_output(&ude, &project);
+    assert!(init.contains("Kept committed .gitconfig"), "{init}");
+    let status = outputs(&ude(&project, &["sync", "status"]));
+    line_with(&status, ".gitconfig:").to_string()
+}
+
+#[test]
+fn test_init_kept_committed_file_records_rendered_ancestor() {
+    let line = kept_gitconfig_status_after_init("[alias]\n\tco = checkout\n");
+    assert!(line.contains("Locally Modified"), "{line}");
+}
+
+#[test]
+fn test_init_kept_committed_file_equal_to_rendered_template_is_in_sync() {
+    let line = kept_gitconfig_status_after_init("");
+    assert!(line.contains("In Sync"), "{line}");
+}
+
+/// The recovery line init prints after `.gitconfig`, tracked by a first init, is
+/// deleted; `template_suffix` is appended to GITCONFIG_TEMPLATE before that init.
+fn missing_gitconfig_recovery_hint(template_suffix: &str) -> String {
+    let temp = tempdir().unwrap();
+    let ude = sync_cli(temp.path());
+    let project = project_with_local_templates(temp.path(), "project");
+    append_to(&project.join(GITCONFIG_TEMPLATE), template_suffix);
+    reinit_rust(&ude, &project);
+    fs::remove_file(project.join(".gitconfig")).unwrap();
+
+    let init = init_output(&ude, &project);
+    let hint = line_with(&init, "To keep it, restore it");
+    assert!(hint.contains("git restore .gitconfig"), "{init}");
+    hint.to_string()
+}
+
+#[test]
+fn test_missing_tracked_file_hint_for_rendered_static_template() {
+    let hint = missing_gitconfig_recovery_hint(HOME_INCLUDE_PLACEHOLDER);
+    assert!(
+        hint.contains("init does not re-render its template"),
+        "{hint}"
+    );
+    assert!(!hint.contains("or copy"), "{hint}");
+}
+
+#[test]
+fn test_missing_tracked_file_hint_offers_copy_for_plain_template() {
+    let hint = missing_gitconfig_recovery_hint("");
+    assert!(hint.contains("or copy"), "{hint}");
+    assert!(!hint.contains("re-render"), "{hint}");
+}

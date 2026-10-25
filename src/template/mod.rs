@@ -182,6 +182,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_should_render() {
+        use std::path::Path;
+        assert!(should_render(Path::new("x.jinja"), "plain text"));
+        assert!(should_render(
+            Path::new("gitconfig.repo"),
+            "path = {{ user.home }}/.gitconfig.local"
+        ));
+        assert!(!should_render(
+            Path::new("commit-msg"),
+            "if [ \"${#FIRST_LINE}\" -gt 72 ]; then"
+        ));
+        // Block tags alone do not trigger rendering, matching sync scan and pull.
+        assert!(!should_render(
+            Path::new("gitconfig.repo"),
+            "{% if true %}x{% endif %}"
+        ));
+    }
+
+    #[test]
     fn test_template_rendering_basic() {
         let renderer = TemplateRenderer::new();
         let ctx = TemplateContext {
