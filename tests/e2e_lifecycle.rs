@@ -4033,3 +4033,130 @@ fn test_reinit_missing_file_warning_follows_upstream() {
         outputs(&push)
     );
 }
+
+/// `ude init --path <project> --type rust` run from `cwd` (whose `templates/` it uses).
+fn init_from(ude: &impl Fn(&Path, &[&str]) -> Output, cwd: &Path, project: &Path) -> Output {
+    let path = project.to_string_lossy().to_string();
+    ude(cwd, &["init", "--path", &path, "--type", "rust"])
+}
+
+/// The `fake_home` that [`sync_cli`] on `root` exports as HOME.
+fn fake_home(root: &Path) -> String {
+    root.join("fake_home").to_string_lossy().to_string()
+}
+
+const HOME_INCLUDE_PLACEHOLDER: &str = "[include]\n\tpath = {{ user.home }}/.gitconfig.local\n";
+
+#[test]
+fn test_push_then_init_substitutes_home_on_new_project() {
+    let temp = tempdir().unwrap();
+    let ude = sync_cli(temp.path());
+    let fake = fake_home(temp.path());
+    let project_a = project_with_local_templates(temp.path(), "project_a");
+    reinit_rust(&ude, &project_a);
+    append_to(
+        &project_a.join(".gitconfig"),
+        &format!("[include]\n\tpath = {fake}/.gitconfig.local\n"),
+    );
+    let push = ude(&project_a, &["sync", "push"]);
+    assert_eq!(push.status.code(), Some(0), "{}", outputs(&push));
+    let template = fs::read_to_string(project_a.join(GITCONFIG_TEMPLATE)).unwrap();
+    assert!(
+        template.contains("{{ user.home }}/.gitconfig.local"),
+        "{template}"
+    );
+    assert!(!template.contains(&fake), "{template}");
+
+    // Init on another project materializes the parameterized template with this
+    // machine's home.
+    let project_b = temp.path().join("project_b");
+    let init = init_from(&ude, &project_a, &project_b);
+    assert_eq!(init.status.code(), Some(0), "{}", outputs(&init));
+    let gitconfig_b = fs::read_to_string(project_b.join(".gitconfig")).unwrap();
+    assert!(
+        gitconfig_b.contains(&format!("{fake}/.gitconfig.local")),
+        "{gitconfig_b}"
+    );
+    assert!(!gitconfig_b.contains("{{"), "{gitconfig_b}");
+
+    // Negative control: a machine with another home gets its own home, not the pusher's.
+    let temp2 = tempdir().unwrap();
+    let ude2 = sync_cli(temp2.path());
+    let fake2 = fake_home(temp2.path());
+    let project_c = temp2.path().join("project_c");
+    let init = init_from(&ude2, &project_a, &project_c);
+    assert_eq!(init.status.code(), Some(0), "{}", outputs(&init));
+    let gitconfig_c = fs::read_to_string(project_c.join(".gitconfig")).unwrap();
+    assert!(
+        gitconfig_c.contains(&format!("{fake2}/.gitconfig.local")),
+        "{gitconfig_c}"
+    );
+    assert!(!gitconfig_c.contains(&fake), "{gitconfig_c}");
+}
+
+#[test]
+fn test_init_renders_placeholders_in_static_templates_in_sync() {
+    let temp = tempdir().unwrap();
+    let ude = sync_cli(temp.path());
+    let fake = fake_home(temp.path());
+    let project = project_with_local_templates(temp.path(), "project");
+    append_to(&project.join(GITCONFIG_TEMPLATE), HOME_INCLUDE_PLACEHOLDER);
+
+    reinit_rust(&ude, &project);
+    let gitconfig = fs::read_to_string(project.join(".gitconfig")).unwrap();
+    assert!(
+        gitconfig.contains(&format!("{fake}/.gitconfig.local")),
+        "{gitconfig}"
+    );
+    assert!(!gitconfig.contains("{{"), "{gitconfig}");
+    let status = outputs(&ude(&project, &["sync", "status"]));
+    assert!(
+        line_with(&status, ".gitconfig:").contains("In Sync"),
+        "{status}"
+    );
+}
+
+#[test]
+fn test_init_copies_templates_without_placeholders_byte_identical() {
+    let temp = tempdir().unwrap();
+    let ude = sync_cli(temp.path());
+    let project = project_with_local_templates(temp.path(), "project");
+    // Not UTF-8, yet holding `{{` bytes: never rendered, as scan and pull never do.
+    let mut container = vec![0xFF, 0xFE];
+    container.extend_from_slice(b"{{ user.home }}\n");
+    fs::write(project.join(CONTAINER_TEMPLATE), &container).unwrap();
+    let hook_template = fs::read(project.join(COMMIT_MSG_TEMPLATE)).unwrap();
+    let hook_text = String::from_utf8(hook_template.clone()).unwrap();
+    assert!(
+        hook_text.contains("${#FIRST_LINE}") && !hook_text.contains("{{"),
+        "fixture precondition: the hook has shell syntax and no placeholder"
+    );
+
+    reinit_rust(&ude, &project);
+    assert_eq!(
+        fs::read(project.join("scripts/hooks/commit-msg")).unwrap(),
+        hook_template
+    );
+    assert_eq!(
+        fs::read(project.join("scripts/check-in-container.sh")).unwrap(),
+        container
+    );
+}
+
+#[test]
+fn test_init_refuses_unrenderable_template() {
+    let temp = tempdir().unwrap();
+    let ude = sync_cli(temp.path());
+    let project = project_with_local_templates(temp.path(), "project");
+    append_to(
+        &project.join(GITCONFIG_TEMPLATE),
+        "[ci]\n\ttoken = ${{ secrets.TOKEN }}\n",
+    );
+
+    let init = init_from(&ude, &project, &project);
+    assert_eq!(init.status.code(), Some(2), "{}", outputs(&init));
+    let stderr = String::from_utf8_lossy(&init.stderr);
+    assert!(stderr.contains("Failed to render template"), "{stderr}");
+    assert!(stderr.contains("gitconfig.repo"), "{stderr}");
+    assert!(!project.join(".gitconfig").exists(), "{}", outputs(&init));
+}
