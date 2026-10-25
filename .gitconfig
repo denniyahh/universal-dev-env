@@ -1,0 +1,38 @@
+# Tracked git policy for this repository.
+#
+# This file is DATA. Do not include it (`include.path ../.gitconfig`): an
+# include makes git read it live from whatever branch is checked out, so a
+# branch could set a key that runs a program (`core.fsmonitor`, `core.pager`,
+# `diff.external`). Copy the keys into `.git/config` instead, as README.md
+# section 6 shows. Automating that copy is backlog item 999.2.
+#
+# WHAT BELONGS HERE: settings that are true for every contributor and cannot
+# run a program. WHAT DOES NOT: anything naming a specific person, key file or
+# home directory. `user.signingkey` is per-contributor and stays in local
+# config, because this repository is public.
+
+[gpg]
+    format = ssh
+
+[commit]
+    gpgsign = true
+
+[tag]
+    gpgsign = true
+
+# git-flow branch model.
+#
+# `git flow init -d` must NOT be used here: its default production branch is
+# `master`, and this repository's is `main`. Initialising with the defaults
+# silently configures git-flow against a branch that does not exist, and the
+# error only surfaces later, at release or hotfix time.
+[gitflow "branch"]
+    master = main
+    develop = develop
+
+[gitflow "prefix"]
+    feature = feature/
+    release = release/
+    hotfix = hotfix/
+    support = support/
+    versiontag = v

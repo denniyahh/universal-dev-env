@@ -1,0 +1,23 @@
+# Dependabot version updates.
+#
+# Only the GitHub Actions the workflows use are kept current here, as one
+# grouped weekly PR against `develop` (git flow: nothing lands on `main`
+# except through a release). Cargo dependencies get no version-update PRs:
+# advisories are already caught by `cargo deny` (the pre-push hook and
+# .github/workflows/supply-chain.yml, which also runs weekly).
+#
+# Automatic security-fix PRs stay off: they always target the default
+# branch and ignore `target-branch`.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    target-branch: "develop"
+    schedule:
+      interval: "weekly"
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+    commit-message:
+      prefix: "ci"
