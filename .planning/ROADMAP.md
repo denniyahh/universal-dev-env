@@ -71,7 +71,7 @@ Plans:
   3. Path parameterization matches only full word and punctuation boundaries (`\b`, path delimiters), preventing corruption of partial substring tokens.
   4. Sanitizer round-tripping verifies that templated tokens substitute back cleanly to local machine environments on initialization.
 
-**Plans**: 2/8 plans executed
+**Plans**: 3/8 plans executed
 
 Plans:
 **Wave 1**
@@ -79,7 +79,7 @@ Plans:
 - [x] 02-02: `ude init` renders `{{`-bearing static templates with a shared `template::should_render`, byte-copies the rest, records rendered ancestors (SEC-04).
 
 **Wave 2** *(blocked on Wave 1 completion)*
-- [ ] 02-03: R11 entropy rule (D-05; `=` delimiter per amended D-04) with exact D-02 shape exemptions in `src/sanitizer/entropy.rs`, seeded rate floors incl. `NAME=value` lines, and templates corpus control (SEC-01).
+- [x] 02-03: R11 entropy rule (D-05; `=` delimiter per amended D-04) with exact D-02 shape exemptions in `src/sanitizer/entropy.rs`, seeded rate floors incl. `NAME=value` lines, and templates corpus control (SEC-01).
 
 **Wave 3** *(blocked on Wave 2 completion)*
 - [ ] 02-04: `ude:allow-entropy` per-line marker (D-02, D-03) and mutation gate over entropy.rs (SEC-01).
@@ -138,7 +138,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Sync Engine & State Hermeticity | 11/11 | Complete    | 2026-10-22 |
-| 2. Sanitizer, Boundaries & Security Hardening | 2/8 | In Progress | - |
+| 2. Sanitizer, Boundaries & Security Hardening | 3/8 | In Progress | - |
 | 3. Doctor & CLI Hardening | 0/4 | Not started | - |
 | 4. Templates, Archetypes & Manifest Decoupling | 0/3 | Not started | - |
 
