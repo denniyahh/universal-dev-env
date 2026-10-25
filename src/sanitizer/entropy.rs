@@ -13,6 +13,13 @@ use std::sync::LazyLock;
 /// Rule name reported for an entropy-only hit.
 pub const RULE_NAME: &str = "high-entropy";
 
+/// Per-line override for known non-secret values (D-02 item 2): a line that
+/// contains this exact, case-sensitive byte sequence anywhere is not scored by
+/// R11. It silences only the R11 check, and only on the line that contains it.
+/// The named rules (and the gitleaks rules) ignore it and still refuse the line
+/// (D-03), because `scan_view` runs them before R11.
+pub const ALLOW_MARKER: &str = "ude:allow-entropy";
+
 /// Minimum candidate length in bytes, padding included (D-04).
 const MIN_TOKEN_LEN: usize = 20;
 
@@ -86,12 +93,19 @@ static SSH_KEY_BODY: LazyLock<regex::bytes::Regex> = LazyLock::new(|| {
 });
 
 /// 1-based number of the first line (split on LF) holding a token that passes
-/// R11, if any. Never returns the token itself.
+/// R11, if any. Never returns the token itself. A line carrying
+/// [`ALLOW_MARKER`] is skipped.
 pub fn first_high_entropy_line(bytes: &[u8]) -> Option<usize> {
     bytes
         .split(|&b| b == b'\n')
-        .position(line_has_high_entropy_token)
+        .position(|line| !has_allow_marker(line) && line_has_high_entropy_token(line))
         .map(|index| index + 1)
+}
+
+/// True when `line` contains [`ALLOW_MARKER`] byte for byte (no normalization).
+fn has_allow_marker(line: &[u8]) -> bool {
+    line.windows(ALLOW_MARKER.len())
+        .any(|window| window == ALLOW_MARKER.as_bytes())
 }
 
 /// True when some candidate of `line` is not a D-02 shape and passes R11.
