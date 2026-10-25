@@ -6418,6 +6418,99 @@ mod tests {
         );
     }
 
+    /// Runs push_to_remote on a repo whose one template passes through a clean filter
+    /// running `filter_body` (a POSIX sh script body), and returns the push result
+    /// plus `git diff --cached --name-only` afterwards.
+    fn push_through_clean_filter(filter_body: &str) -> (Result<String, PushRemoteError>, String) {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let remote_repo = tempdir().unwrap();
+        git.run(remote_repo.path(), &["init", "-b", "main"]);
+        let templates_dir = remote_repo.path().join("templates/projects/generic");
+        fs::create_dir_all(&templates_dir).unwrap();
+        let valid_file = templates_dir.join("gitconfig.repo");
+        fs::write(&valid_file, "[core]\n  autocrlf = true\n").unwrap();
+        git.run(remote_repo.path(), &["add", "-A"]);
+        git.run(remote_repo.path(), &["commit", "-m", "base commit"]);
+        fs::write(&valid_file, "[core]\n  autocrlf = false\n").unwrap();
+
+        let script = remote_repo.path().join("inject_secret.sh");
+        fs::write(&script, format!("#!/bin/sh\n{filter_body}")).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let filter_cmd = format!("{}", script.display());
+        git.run(
+            remote_repo.path(),
+            &["config", "filter.injectsecret.clean", &filter_cmd],
+        );
+        let info_dir = remote_repo.path().join(".git/info");
+        fs::create_dir_all(&info_dir).unwrap();
+        fs::write(
+            info_dir.join("attributes"),
+            "templates/projects/generic/gitconfig.repo filter=injectsecret\n",
+        )
+        .unwrap();
+
+        let head = git.output(remote_repo.path(), &["rev-parse", "HEAD"]);
+        let res = engine.push_to_remote(remote_repo.path(), "main", false, &[valid_file], &head);
+        let diff_cached = git.output(remote_repo.path(), &["diff", "--cached", "--name-only"]);
+        (res, diff_cached)
+    }
+
+    #[test]
+    fn test_publication_gate_scans_raw_blob_bytes() {
+        let prefix = "ghp_";
+        let body = "999988887777666655554444333322221111";
+        // Invalid UTF-8, then a token directly after a non-ASCII letter.
+        let filter = format!("cat\nprintf '\\377\\376'\necho \"x=é{prefix}{body}\"\n");
+        let (res, diff_cached) = push_through_clean_filter(&filter);
+
+        let err_msg = push_failure(res);
+        assert!(
+            err_msg.contains("Publication gate violation: secret detected in staged index blob"),
+            "Error was: {err_msg}"
+        );
+        assert!(
+            err_msg.contains("GitHub Personal Access Token"),
+            "{err_msg}"
+        );
+        assert!(err_msg.contains("at line"), "{err_msg}");
+        assert!(!err_msg.contains(body), "gate error leaked the token body");
+        assert!(diff_cached.is_empty(), "index must be reset: {diff_cached}");
+    }
+
+    #[test]
+    fn test_publication_gate_scans_utf16_blob() {
+        let prefix = "ghp_";
+        let body = "999988887777666655554444333322221111";
+        // The UTF-16 payload lives outside the repository so `git status` is unaffected.
+        let side_dir = tempdir().unwrap();
+        let side_file = side_dir.path().join("utf16-payload");
+        let mut payload = vec![0xFF, 0xFE];
+        for unit in format!("secret = {prefix}{body}\n").encode_utf16() {
+            payload.extend_from_slice(&unit.to_le_bytes());
+        }
+        fs::write(&side_file, &payload).unwrap();
+
+        let filter = format!("cat\ncat '{}'\n", side_file.display());
+        let (res, diff_cached) = push_through_clean_filter(&filter);
+
+        let err_msg = push_failure(res);
+        assert!(
+            err_msg.contains("Publication gate violation: secret detected in staged index blob"),
+            "Error was: {err_msg}"
+        );
+        assert!(
+            err_msg.contains("GitHub Personal Access Token"),
+            "{err_msg}"
+        );
+        assert!(!err_msg.contains(body), "gate error leaked the token body");
+        assert!(diff_cached.is_empty(), "index must be reset: {diff_cached}");
+    }
+
     #[test]
     fn test_multi_pull_merge_idempotence() {
         let engine = SyncEngine::new();
@@ -7126,6 +7219,75 @@ mod tests {
         assert!(
             !head_content.contains("ghp_"),
             "HEAD must not contain secret after rollback: {head_content}"
+        );
+    }
+
+    /// Commits `bytes` as base.txt on top of an initial commit and returns the
+    /// validate_committed_tree verdict for that HEAD.
+    fn validate_committed_base_bytes(bytes: &[u8]) -> Result<(), String> {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let remote_repo = tempdir().unwrap();
+        git.run(remote_repo.path(), &["init", "-b", "main"]);
+        let base_file = remote_repo.path().join("base.txt");
+        fs::write(&base_file, "initial").unwrap();
+        git.run(remote_repo.path(), &["add", "-A"]);
+        git.run(remote_repo.path(), &["commit", "-m", "base commit"]);
+        fs::write(&base_file, bytes).unwrap();
+        git.run(remote_repo.path(), &["add", "base.txt"]);
+        git.run(remote_repo.path(), &["commit", "-m", "update"]);
+        let expected_set: std::collections::HashSet<PathBuf> =
+            [PathBuf::from("base.txt")].into_iter().collect();
+        engine.validate_committed_tree(remote_repo.path(), &expected_set)
+    }
+
+    #[test]
+    fn test_post_commit_gate_scans_raw_blob_bytes() {
+        let prefix = "ghp_";
+        let body = "111122223333444455556666777788889999";
+        let mut clean = vec![0xFF, 0xFE, b'\n'];
+        clean.extend_from_slice("x=é".as_bytes());
+        let mut dirty = clean.clone();
+        dirty.extend_from_slice(format!("{prefix}{body}\n").as_bytes());
+        clean.push(b'\n');
+
+        let err = validate_committed_base_bytes(&dirty).expect_err("committed token must fail");
+        assert!(
+            err.contains("secret detected in committed HEAD blob"),
+            "{err}"
+        );
+        assert!(err.contains("GitHub Personal Access Token"), "{err}");
+        assert!(!err.contains(body), "gate error leaked the token body");
+
+        // Negative control: the same bytes without the token validate.
+        assert_eq!(validate_committed_base_bytes(&clean), Ok(()));
+    }
+
+    #[test]
+    fn test_post_commit_gate_scans_utf16_blob() {
+        let utf16be_bom = |text: &str| {
+            let mut out = vec![0xFE, 0xFF];
+            for unit in text.encode_utf16() {
+                out.extend_from_slice(&unit.to_be_bytes());
+            }
+            out
+        };
+        let prefix = "ghp_";
+        let body = "111122223333444455556666777788889999";
+        let dirty = utf16be_bom(&format!("token = {prefix}{body}\n"));
+
+        let err = validate_committed_base_bytes(&dirty).expect_err("UTF-16 token must fail");
+        assert!(
+            err.contains("secret detected in committed HEAD blob"),
+            "{err}"
+        );
+        assert!(err.contains("GitHub Personal Access Token"), "{err}");
+        assert!(!err.contains(body), "gate error leaked the token body");
+
+        // Negative control: benign UTF-16BE validates.
+        assert_eq!(
+            validate_committed_base_bytes(&utf16be_bom("benign words\n")),
+            Ok(())
         );
     }
 

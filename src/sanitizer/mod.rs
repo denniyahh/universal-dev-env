@@ -449,6 +449,26 @@ mod tests {
         assert!(!sanitizer.is_local_only_path(Path::new("Cargo.toml"), false));
     }
 
+    #[test]
+    fn test_check_secrets_ascii_word_boundary() {
+        let sanitizer = Sanitizer::new();
+        let prefix = "ghp_";
+        let body = "111122223333444455556666777788889999";
+        // A non-ASCII letter before the token is a word boundary (Go/gitleaks semantics).
+        let after_non_ascii = format!("x=é{prefix}{body}");
+        match sanitizer.check_secrets(&after_non_ascii) {
+            SanitizationResult::SecretDetected { pattern, .. } => {
+                assert_eq!(pattern, "GitHub Personal Access Token");
+            }
+            SanitizationResult::Clean(_) => panic!("Expected detection after a non-ASCII letter"),
+        }
+
+        // Negative control, named-rule layer only: an ASCII letter glued to the token
+        // leaves no word boundary, so the named rule does not fire.
+        let glued = format!("a{prefix}{body}");
+        assert_eq!(first_named_rule(glued.as_bytes()), None);
+    }
+
     /// Encodes `text` as UTF-16, optionally preceded by `bom`, with each unit
     /// serialized by `unit_bytes` (little- or big-endian).
     fn utf16_bytes(text: &str, bom: &[u8], unit_bytes: fn(u16) -> [u8; 2]) -> Vec<u8> {
