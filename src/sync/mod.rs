@@ -1443,20 +1443,9 @@ impl SyncEngine {
                     }
                 };
 
-                let (parameterized_bytes, raw_local_str) =
+                let (published, raw_local_str) =
                     if let Ok(content) = std::str::from_utf8(&raw_bytes) {
-                        // Gate 3: Secret check (reject credentials)
-                        match self.sanitizer.check_secrets(content) {
-                            SanitizationResult::SecretDetected { reason, .. } => {
-                                return PushResult::SecretBlocked {
-                                    path: state.relative_path.clone(),
-                                    reason,
-                                };
-                            }
-                            SanitizationResult::Clean(_) => {}
-                        }
-
-                        // Gate 4: Path parameterization
+                        // Gate 3: path parameterization and line endings (UTF-8 only)
                         let parameterized = self
                             .sanitizer
                             .parameterize_paths(content, user_home, xdg_config);
@@ -1474,12 +1463,25 @@ impl SyncEngine {
                         (raw_bytes.clone(), None)
                     };
 
+                // Gate 4: secret scan of the exact bytes that will be published, for
+                // UTF-8 and non-UTF-8 files alike. A refusal returns before staging.
+                let publish_rel = upstream_target
+                    .as_deref()
+                    .and_then(|target| target.strip_prefix(upstream_root).ok())
+                    .map_or_else(|| state.relative_path.clone(), Path::to_path_buf);
+                if let Some(finding) = self.sanitizer.scan_bytes(&published, &publish_rel) {
+                    return PushResult::SecretBlocked {
+                        path: state.relative_path.clone(),
+                        reason: finding.reason(),
+                    };
+                }
+
                 // Stage into candidates list
                 if let Some(target_upstream) = upstream_target {
                     candidates_to_write.push((
                         state.relative_path.clone(),
                         target_upstream,
-                        parameterized_bytes,
+                        published,
                         raw_bytes,
                         raw_local_str,
                     ));

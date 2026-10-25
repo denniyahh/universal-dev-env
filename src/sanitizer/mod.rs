@@ -1,5 +1,6 @@
 use regex::Regex;
 use std::path::{Component, Path};
+use std::sync::LazyLock;
 
 /// Result of a sanitization check
 #[derive(Debug, PartialEq, Eq)]
@@ -11,14 +12,12 @@ pub enum SanitizationResult {
 /// One secret-scan hit: the rule that fired and the 1-based line it fired on.
 ///
 /// It never holds the matched value, so a refusal built from it cannot leak the secret.
-#[allow(dead_code)] // RED stub: wired into push staging by the GREEN commit
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Finding {
     pub rule: String,
     pub line: usize,
 }
 
-#[allow(dead_code)] // RED stub: wired into push staging by the GREEN commit
 impl Finding {
     /// Refusal text naming the rule and the line, never the matched value.
     pub fn reason(&self) -> String {
@@ -29,9 +28,66 @@ impl Finding {
     }
 }
 
-#[allow(dead_code)] // RED stub: wired into push staging by the GREEN commit
-fn first_named_rule(_bytes: &[u8]) -> Option<Finding> {
-    None
+/// The UDE named secret rules, in reporting order (first hit wins).
+///
+/// Compiled once per process as ASCII-mode byte regexes: `(?i)`, `\b` and every
+/// class are ASCII-only, matching Go's and gitleaks' semantics, so a non-ASCII byte
+/// next to a token is a word boundary rather than part of the word.
+static NAMED_RULES: LazyLock<Vec<(&'static str, regex::bytes::Regex)>> = LazyLock::new(|| {
+    [
+        // Private SSH, TLS, or PKCS keys (including PKCS8 headers)
+        (
+            "Private Key",
+            r"-----BEGIN (?:[A-Z0-9_-]+ )?PRIVATE KEY-----",
+        ),
+        // GitHub personal access tokens (classic ghp/gho/ghu/ghs/ghr and fine-grained github_pat)
+        (
+            "GitHub Personal Access Token",
+            r"\b(?:gh[pousr]_[A-Za-z0-9_]{36,255}|github_pat_[A-Za-z0-9_]{50,255})\b",
+        ),
+        // GitLab personal access tokens
+        (
+            "GitLab Personal Access Token",
+            r"\bglpat-[A-Za-z0-9_\-]{20,}\b",
+        ),
+        // HTTP Bearer tokens
+        ("Bearer Token", r"(?i)\bBearer\s+[A-Za-z0-9_\-\.]{20,}\b"),
+        // Generic high-entropy API keys / secrets (quoted and unquoted assignments, including JSON syntax)
+        (
+            "Generic API Key",
+            r#"(?i)["']?(?:api[_-]?key|secret[_-]?key|access[_-]?token|auth[_-]?token)["']?\s*[:=]\s*['"]?[A-Za-z0-9_\-\.]{20,}['"]?"#,
+        ),
+        // AWS Access Key ID
+        (
+            "AWS Access Key",
+            r"\b(A3T[A-Z0-9]|AKIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA|ASIA)[A-Z0-9]{16}\b",
+        ),
+    ]
+    .into_iter()
+    .map(|(name, pattern)| {
+        let regex = regex::bytes::RegexBuilder::new(pattern)
+            .unicode(false)
+            .build()
+            .expect("valid named secret pattern");
+        (name, regex)
+    })
+    .collect()
+});
+
+/// 1-based line of byte `offset`: one plus the LF bytes before it.
+fn line_at(bytes: &[u8], offset: usize) -> usize {
+    1 + bytes[..offset].iter().filter(|&&b| b == b'\n').count()
+}
+
+/// The named-rule pass: the first rule in [`NAMED_RULES`] that matches, with the
+/// line of its match start.
+fn first_named_rule(bytes: &[u8]) -> Option<Finding> {
+    NAMED_RULES.iter().find_map(|(name, regex)| {
+        regex.find(bytes).map(|m| Finding {
+            rule: (*name).to_string(),
+            line: line_at(bytes, m.start()),
+        })
+    })
 }
 
 pub struct Sanitizer {
@@ -96,9 +152,30 @@ impl Sanitizer {
         SanitizationResult::Clean(content.to_string())
     }
 
-    #[allow(dead_code)] // RED stub: wired into push staging by the GREEN commit
-    pub fn scan_bytes(&self, _bytes: &[u8], _path: &Path) -> Option<Finding> {
-        None
+    /// The single secret-scan entry point for every outbound check.
+    ///
+    /// `bytes` are scanned raw, with no decoding. The raw view is always scanned
+    /// first, unchanged. When it holds a NUL byte, a second view with every NUL byte
+    /// removed is scanned too: that view is the text of UTF-16LE, UTF-16BE (with or
+    /// without a BOM) and UTF-32 ASCII content, keeps every LF byte (so its line
+    /// numbers equal the raw view's) and can only add findings, never remove one.
+    /// Within a view the first hit wins, in detector order.
+    ///
+    /// `path` is the publish-relative path, used by path-scoped rules.
+    pub fn scan_bytes(&self, bytes: &[u8], path: &Path) -> Option<Finding> {
+        if let Some(finding) = self.scan_view(bytes, path) {
+            return Some(finding);
+        }
+        if !bytes.contains(&0) {
+            return None;
+        }
+        let stripped: Vec<u8> = bytes.iter().copied().filter(|&b| b != 0).collect();
+        self.scan_view(&stripped, path)
+    }
+
+    /// One detector pass over one view of the bytes. The named rules run first.
+    fn scan_view(&self, bytes: &[u8], _path: &Path) -> Option<Finding> {
+        first_named_rule(bytes)
     }
 
     /// Parameterizes hardcoded user home and config paths into portable tokens.
