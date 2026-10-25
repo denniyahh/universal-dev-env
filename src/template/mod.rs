@@ -139,6 +139,14 @@ impl TemplateContext {
     }
 }
 
+/// The single render rule (SEC-04) shared by init, sync scan, sync pull and push's
+/// render-back check: a template is rendered when its path has the `.jinja` extension
+/// or its text contains `{{`. Anything else, and any template that is not UTF-8, is
+/// used byte for byte.
+pub fn should_render(path: &std::path::Path, text: &str) -> bool {
+    path.extension().is_some_and(|ext| ext == "jinja") || text.contains("{{")
+}
+
 pub struct TemplateRenderer {
     env: Environment<'static>,
 }

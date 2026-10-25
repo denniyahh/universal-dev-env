@@ -320,10 +320,12 @@ fn main() {
             if let Some(ref tdir) = root_template_dir {
                 if !tracked(".gitconfig")
                     && !keep(".gitconfig")
-                    && let Err(e) = copy_template_file(
+                    && let Err(e) = materialize_template(
+                        &renderer,
                         tdir,
                         &tdir.join("projects/generic/gitconfig.repo"),
                         &project_path.join(".gitconfig"),
+                        &ctx,
                     )
                 {
                     eprintln!("  {} Initialization failed: {e}", "✗".red());
@@ -361,7 +363,13 @@ fn main() {
                         }
                     }
                 } else if src_gitignore.exists()
-                    && let Err(e) = copy_template_file(tdir, &src_gitignore, &target_gitignore)
+                    && let Err(e) = materialize_template(
+                        &renderer,
+                        tdir,
+                        &src_gitignore,
+                        &target_gitignore,
+                        &ctx,
+                    )
                 {
                     eprintln!("  {} Initialization failed: {e}", "✗".red());
                     std::process::exit(EXIT_HARD_FAILURE);
@@ -375,7 +383,9 @@ fn main() {
                     }
                     let src_hook = tdir.join(format!("projects/generic/hooks/{hook}"));
                     let dst_hook = hooks_dir.join(hook);
-                    if let Err(e) = copy_template_file(tdir, &src_hook, &dst_hook) {
+                    if let Err(e) =
+                        materialize_template(&renderer, tdir, &src_hook, &dst_hook, &ctx)
+                    {
                         eprintln!("  {} Initialization failed: {e}", "✗".red());
                         std::process::exit(EXIT_HARD_FAILURE);
                     }
@@ -388,7 +398,9 @@ fn main() {
                 {
                     let src_cont = tdir.join("projects/generic/container/check-in-container.sh");
                     let dst_cont = container_dir.join("check-in-container.sh");
-                    if let Err(e) = copy_template_file(tdir, &src_cont, &dst_cont) {
+                    if let Err(e) =
+                        materialize_template(&renderer, tdir, &src_cont, &dst_cont, &ctx)
+                    {
                         eprintln!("  {} Initialization failed: {e}", "✗".red());
                         std::process::exit(EXIT_HARD_FAILURE);
                     }
@@ -407,7 +419,7 @@ fn main() {
                     }
                     let src_s = tdir.join(format!("projects/agents/scratch/{s}"));
                     let dst_s = scratch_dir.join(s);
-                    if let Err(e) = copy_template_file(tdir, &src_s, &dst_s) {
+                    if let Err(e) = materialize_template(&renderer, tdir, &src_s, &dst_s, &ctx) {
                         eprintln!("  {} Initialization failed: {e}", "✗".red());
                         std::process::exit(EXIT_HARD_FAILURE);
                     }
@@ -1638,21 +1650,46 @@ fn first_ude_templates(candidates: impl IntoIterator<Item = PathBuf>) -> Option<
         .find(|candidate| is_ude_templates(candidate))
 }
 
-fn copy_template_file(root: &Path, src: &Path, dst: &Path) -> Result<(), String> {
+/// Materializes the template `src` (below `root`) at `dst`: rendered with `ctx` when
+/// it is UTF-8 and [`template::should_render`] holds, otherwise copied byte for byte.
+/// A missing `src` writes nothing.
+fn materialize_template(
+    renderer: &template::TemplateRenderer,
+    root: &Path,
+    src: &Path,
+    dst: &Path,
+    ctx: &template::TemplateContext,
+) -> Result<(), String> {
     sync::refuse_symlink_under(root, src)?;
-    if src.exists() {
-        if let Some(parent) = dst.parent() {
-            fs::create_dir_all(parent).map_err(|e| {
-                format!(
-                    "Failed to create parent directory {}: {e}",
-                    parent.display()
-                )
-            })?;
-        }
-        fs::copy(src, dst)
-            .map_err(|e| format!("Failed to copy {} to {}: {e}", src.display(), dst.display()))?;
+    if !src.exists() {
+        return Ok(());
     }
-    Ok(())
+    let bytes =
+        fs::read(src).map_err(|e| format!("Failed to read template {}: {e}", src.display()))?;
+    let rendered = match std::str::from_utf8(&bytes) {
+        Ok(text) if template::should_render(src, text) => Some(
+            renderer
+                .render_str(text, ctx)
+                .map_err(|e| format!("Failed to render template {}: {e}", src.display()))?,
+        ),
+        _ => None,
+    };
+    if let Some(parent) = dst.parent() {
+        fs::create_dir_all(parent).map_err(|e| {
+            format!(
+                "Failed to create parent directory {}: {e}",
+                parent.display()
+            )
+        })?;
+    }
+    match rendered {
+        Some(text) => {
+            fs::write(dst, text).map_err(|e| format!("Failed to write {}: {e}", dst.display()))
+        }
+        None => fs::copy(src, dst)
+            .map(|_| ())
+            .map_err(|e| format!("Failed to copy {} to {}: {e}", src.display(), dst.display())),
+    }
 }
 
 fn render_and_write(
