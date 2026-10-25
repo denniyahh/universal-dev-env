@@ -1475,6 +1475,18 @@ fn missing_tracked_files(
         .collect()
 }
 
+/// Whether init renders `template` (below `root`) by [`template::should_render`]. Its
+/// text counts as empty when it is not readable UTF-8 or is a symlink under `root`, so
+/// an unreadable `.jinja` template still counts as rendered.
+fn renders_template(root: Option<&Path>, template: &Path) -> bool {
+    let text = root
+        .and_then(|root| sync::refuse_symlink_under(root, template).ok())
+        .and_then(|()| fs::read(template).ok())
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+        .unwrap_or_default();
+    template::should_render(template, &text)
+}
+
 /// Warns that init left the tracked file `rel` missing, what `ude sync push` will do
 /// with its shared template, and how to restore the file.
 fn print_missing_tracked_warning(
@@ -1521,7 +1533,7 @@ fn print_missing_tracked_warning(
             format!("Restore it from {} to clear this", template.display())
         }
         (PushBoundary::Never, None) => "Restore it locally to clear this".to_string(),
-        (_, Some(template)) if template.extension().is_some_and(|ext| ext == "jinja") => {
+        (_, Some(template)) if renders_template(template_root, &template) => {
             format!(
                 "To keep it, restore it before pushing (git restore {} if it is committed; init does not re-render its template {} while it is tracked), then check ude sync status",
                 rel.display(),
@@ -1733,7 +1745,8 @@ fn rendered_template(
 }
 
 /// What init would have written for the managed file `rel` from its template under
-/// `template_root` (rendered for a `.jinja` template); `None` without a template.
+/// `template_root` (rendered whenever [`template::should_render`] holds, as
+/// [`materialize_template`] writes it); `None` without a template.
 fn kept_ancestor(
     renderer: &template::TemplateRenderer,
     template_root: Option<&Path>,
@@ -1746,14 +1759,18 @@ fn kept_ancestor(
     let Some(src) = sync::map_to_upstream(root, rel) else {
         return Ok(None);
     };
-    if src.extension().is_some_and(|ext| ext == "jinja") {
-        return Ok(rendered_template(renderer, root, &src, ctx)?.map(String::into_bytes));
-    }
     sync::refuse_symlink_under(root, &src)?;
-    match fs::read(&src) {
-        Ok(bytes) => Ok(Some(bytes)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(format!("Failed to read template {}: {e}", src.display())),
+    let bytes = match fs::read(&src) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("Failed to read template {}: {e}", src.display())),
+    };
+    match std::str::from_utf8(&bytes) {
+        Ok(text) if template::should_render(&src, text) => renderer
+            .render_str(text, ctx)
+            .map(|rendered| Some(rendered.into_bytes()))
+            .map_err(|e| format!("Failed to render template {}: {e}", src.display())),
+        _ => Ok(Some(bytes)),
     }
 }
 
