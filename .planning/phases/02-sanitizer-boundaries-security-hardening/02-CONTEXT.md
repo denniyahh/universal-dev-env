@@ -40,6 +40,9 @@ path parameterization (SEC-03), and verified reversibility between placeholders 
   delimiters, then score every ≥20-character run of the credential alphabet, including `+ / = - _ .`.
   It does not score assignment values only. Bare tokens in prose (AGENTS.md), scripts and comments
   are in scope. The built-in shapes (D-02) and the marker absorb the false positives.
+  *Amended (operator, 2026-10-25, after external plan review):* `=` is a delimiter, except one or
+  two trailing `=` at the end of a candidate (base64 padding). `NAME=<value>` is scored as
+  `<value>`; the glued form let `.env`-style secrets escape (see 02-REVIEWS.md, OD-1).
 
 ### Entropy rule (SEC-01) — calibrated and chosen 2026-10-23
 - **D-05:** The remediation plan's fixed "≥20 chars, entropy > 4.2" rule is **replaced** by rule "R11".
@@ -106,6 +109,9 @@ path parameterization (SEC-03), and verified reversibility between placeholders 
 - **Placeholder round-trip (SEC-03/04).** The operator did not select this area for discussion.
   Claude decides: whether reversibility is checked at push time or only by tests, the boundary set
   (remediation plan 2.2: `[/\\"'\s:,;()\[\]<>]|$`), and whether to add a `{{ xdg.config }}` alias.
+  *Decided (operator, 2026-10-25, after external plan review):* push refuses any file whose
+  published text does not render back to the local file (fail closed, file and line named, no file
+  text in the reason). Automatic escaping is deferred to a todo.
   Any choice must keep the existing round-trip test
   (`test_defect3_path_parameterization_roundtrip_static_template`) green.
 
