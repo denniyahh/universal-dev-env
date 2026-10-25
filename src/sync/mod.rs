@@ -5520,6 +5520,47 @@ mod tests {
         }
     }
 
+    /// Pushes a local `.gitconfig` whose second line is a comment holding `word`.
+    fn push_gitconfig_comment(word: &str) -> PushResult {
+        let engine = SyncEngine::new();
+        let local_dir = tempdir().unwrap();
+        let upstream_dir = tempdir().unwrap();
+        fs::write(
+            local_dir.path().join(".gitconfig"),
+            format!("[core]\n# build fingerprint {word}\n"),
+        )
+        .unwrap();
+        engine.push_updates(
+            local_dir.path(),
+            upstream_dir.path(),
+            "/home/denniyahh",
+            "/home/denniyahh/.config",
+            false,
+            true,
+        )
+    }
+
+    #[test]
+    fn test_push_blocks_prefixless_high_entropy_token() {
+        // No known prefix, no assignment, no credential keyword: only R11 can see it.
+        let tok = crate::sanitizer::entropy::class_cycling_token();
+        match push_gitconfig_comment(&tok) {
+            PushResult::SecretBlocked { path, reason } => {
+                assert_eq!(path, PathBuf::from(".gitconfig"));
+                assert!(reason.contains("high-entropy"), "{reason}");
+                assert!(reason.contains("at line 2"), "{reason}");
+                assert!(!reason.contains(&tok), "refusal leaked the token");
+            }
+            other => panic!("Expected SecretBlocked, got {other:?}"),
+        }
+
+        // Negative control: an ordinary long word in the same place pushes.
+        match push_gitconfig_comment("ThisIsAPerfectlyNormalSentenceWithWords") {
+            PushResult::Success { synced_files, .. } => assert_eq!(synced_files, 1),
+            other => panic!("Expected Success, got {other:?}"),
+        }
+    }
+
     /// Pushes a local `scripts/hooks/pre-push` holding `local_bytes` (no upstream file,
     /// no state) and returns the result plus the upstream root.
     fn push_local_hook(local_bytes: &[u8]) -> (PushResult, tempfile::TempDir) {

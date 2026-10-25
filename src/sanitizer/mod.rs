@@ -1,3 +1,5 @@
+pub mod entropy;
+
 use regex::Regex;
 use std::path::{Component, Path};
 use std::sync::LazyLock;
@@ -141,9 +143,20 @@ impl Sanitizer {
         self.scan_view(&stripped, path)
     }
 
-    /// One detector pass over one view of the bytes. The named rules run first.
+    /// One detector pass over one view of the bytes. The named rules run first, so
+    /// a token they match keeps their rule name; the R11 entropy screen runs last.
     fn scan_view(&self, bytes: &[u8], _path: &Path) -> Option<Finding> {
-        first_named_rule(bytes)
+        if let Some(finding) = first_named_rule(bytes) {
+            return Some(finding);
+        }
+        // Plan 02-05 inserts the gitleaks rules here, between the named rules and R11.
+        if let Some(line) = entropy::first_high_entropy_line(bytes) {
+            return Some(Finding {
+                rule: entropy::RULE_NAME.to_string(),
+                line,
+            });
+        }
+        None
     }
 
     /// Parameterizes hardcoded user home and config paths into portable tokens.
