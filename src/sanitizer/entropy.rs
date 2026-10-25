@@ -43,8 +43,29 @@ const DIGIT_CLASS_SIZE: u64 = 10;
 pub fn first_high_entropy_line(bytes: &[u8]) -> Option<usize> {
     bytes
         .split(|&b| b == b'\n')
-        .position(|line| candidate_tokens(line).any(|(_, token)| passes_r11(token)))
+        .position(line_has_high_entropy_token)
         .map(|index| index + 1)
+}
+
+/// True when some candidate of `line` is not a D-02 shape and passes R11.
+fn line_has_high_entropy_token(line: &[u8]) -> bool {
+    let ssh_bodies = ssh_key_body_spans(line);
+    candidate_tokens(line).any(|(start, token)| {
+        let inside_ssh_body = ssh_bodies
+            .iter()
+            .any(|body| body.start <= start && start + token.len() <= body.end);
+        !is_exempt_shape(token) && !inside_ssh_body && passes_r11(token)
+    })
+}
+
+/// D-02 whole-token shape exemptions.
+fn is_exempt_shape(_token: &[u8]) -> bool {
+    false
+}
+
+/// Byte ranges of ssh public-key bodies on one line (D-02, amended).
+fn ssh_key_body_spans(_line: &[u8]) -> Vec<std::ops::Range<usize>> {
+    Vec::new()
 }
 
 /// True for a candidate body byte: `A-Z a-z 0-9 + / _ - .` (D-04).
@@ -237,6 +258,23 @@ pub(crate) fn class_cycling_token() -> String {
             }
         })
         .collect()
+}
+
+/// Every file under the template corpus directories `templates/` and
+/// `template/`, sorted.
+#[cfg(test)]
+pub(crate) fn template_corpus_files() -> Vec<std::path::PathBuf> {
+    const CORPUS_DIRS: [&str; 2] = ["templates", "template"];
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut files: Vec<std::path::PathBuf> = CORPUS_DIRS
+        .iter()
+        .flat_map(|dir| walkdir::WalkDir::new(root.join(dir)))
+        .map(|entry| entry.expect("walk the template corpus"))
+        .filter(|entry| entry.file_type().is_file())
+        .map(walkdir::DirEntry::into_path)
+        .collect();
+    files.sort();
+    files
 }
 
 #[cfg(test)]
@@ -678,6 +716,304 @@ mod tests {
             tokens(&v30[..MIN_TOKEN_LEN]),
             vec![(0, v30[..MIN_TOKEN_LEN].to_string())],
             "20-byte run"
+        );
+    }
+    const HEX_UPPER: &str = "0123456789ABCDEF";
+
+    /// Fixed leading bytes of an ssh-ed25519 public-key body (`AAAA` + the
+    /// encoded key-type length and name).
+    const SSH_ED25519_BODY_HEAD: &str = "AAAAC3NzaC1lZDI1NTE5AAAAI";
+
+    /// Canonical lowercase UUID fixture.
+    const UUID_LOWER: &str = "123e4567-e89b-12d3-a456-426614174000";
+
+    /// Draws to try when selecting a seeded value by predicate.
+    const MAX_DRAWS: usize = 100;
+
+    /// The first of up to [`MAX_DRAWS`] draws of `len` chars over `alphabet` that
+    /// `accept` takes, so a fixture's outcome rests on the shape logic, not on a
+    /// lucky seed.
+    fn first_draw_where(
+        seeded: &mut SeededChars,
+        alphabet: &str,
+        len: usize,
+        accept: impl Fn(&str) -> bool,
+    ) -> String {
+        (0..MAX_DRAWS)
+            .map(|_| seeded.draw(alphabet, len))
+            .find(|draw| accept(draw))
+            .unwrap_or_else(|| panic!("no accepted {len}-char draw within {MAX_DRAWS} draws"))
+    }
+
+    /// A seeded 32-char Base64 token that passes R11 as one unexempted token.
+    fn positive_token() -> String {
+        first_draw_where(&mut SeededChars::new(), &b64(), 32, |d| {
+            passes_r11(d.as_bytes())
+        })
+    }
+
+    /// A seeded ssh-ed25519 key body that passes R11 as one unexempted token.
+    fn ssh_body() -> String {
+        let tail = first_draw_where(&mut SeededChars::new(), &b64(), 43, |d| {
+            passes_r11(format!("{SSH_ED25519_BODY_HEAD}{d}").as_bytes())
+        });
+        format!("{SSH_ED25519_BODY_HEAD}{tail}")
+    }
+
+    #[test]
+    fn test_r11_negative_fixtures() {
+        let body = ssh_body();
+        let token = positive_token();
+        let mut seeded = SeededChars::new();
+        let hex40 = seeded.draw(HEX_LOWER, 40);
+        let hex64 = seeded.draw(HEX_LOWER, 64);
+        let hex128 = seeded.draw(HEX_LOWER, 128);
+        let sri384 = first_draw_where(&mut seeded, &b64(), 64, |d| {
+            passes_r11(format!("sha384-{d}").as_bytes())
+        });
+        let lines: Vec<(&str, String)> =
+            vec![
+            ("CamelCase", "SanitizerBoundaryHardeningPhaseTwo".to_string()),
+            ("snake_case", "sanitizer_boundaries_security_hardening".to_string()),
+            (
+                "file path",
+                "/var/home/user/Github/universal-dev-env/src/sanitizer/mod.rs".to_string(),
+            ),
+            (
+                "URL",
+                "https://raw.githubusercontent.com/gitleaks/gitleaks/v8.30.1/config/gitleaks.toml"
+                    .to_string(),
+            ),
+            ("target triple", "x86_64-pc-windows-msvc".to_string()),
+            ("UUID", UUID_LOWER.to_string()),
+            ("hex-40", hex40),
+            ("hex-64", hex64),
+            ("hex-128", hex128),
+            ("SRI sha384", format!("sha384-{sri384}")),
+            ("ssh line", format!("ssh-ed25519 {body} user@host")),
+            (
+                "gitconfig literal key",
+                format!("\tsigningkey = key::ssh-ed25519 {body} user@host"),
+            ),
+            (
+                "unspaced gitconfig",
+                format!("signingkey=key::ssh-ed25519 {body}"),
+            ),
+            (
+                "JSON value",
+                format!("\"signingKey\": \"ssh-ed25519 {body} user@host\","),
+            ),
+            ("single-quoted", format!("'ssh-ed25519 {body}'")),
+            ("comma-led", format!("a,ssh-ed25519 {body}")),
+            (
+                "sentence",
+                "ThisIsAPerfectlyNormalSentenceWithWords".to_string(),
+            ),
+        ];
+        for (name, line) in &lines {
+            assert_eq!(
+                first_high_entropy_line(line.as_bytes()),
+                None,
+                "{name} must scan clean"
+            );
+            // Paired positive: a random token later on the same line still blocks
+            // (for the ssh lines: only the key body is exempt).
+            assert_eq!(
+                first_high_entropy_line(format!("{line} {token}").as_bytes()),
+                Some(1),
+                "{name} with a token appended must block"
+            );
+        }
+    }
+
+    #[test]
+    fn test_r11_shape_exemption_is_whole_token() {
+        let mut seeded = SeededChars::new();
+        let shared = first_draw_where(&mut seeded, &b64(), 43, |d| {
+            passes_r11(format!("xsha256-{d}=").as_bytes())
+                && passes_r11(format!("sha256-{d}=").as_bytes())
+        });
+        let exempt = format!("sha256-{shared}=");
+        assert!(
+            passes_r11(exempt.as_bytes()),
+            "the exempt SRI twin must pass R11 when scored"
+        );
+        assert_eq!(
+            first_high_entropy_line(exempt.as_bytes()),
+            None,
+            "exact SRI sha256"
+        );
+        assert_eq!(
+            first_high_entropy_line(format!("xsha256-{shared}=").as_bytes()),
+            Some(1),
+            "a glued SRI-like token is not a whole SRI token"
+        );
+
+        // Wrong-length SRI bodies are scored: (prefix, body chars, suffix).
+        let wrong_lengths = [
+            ("sha256-", 32, ""),
+            ("sha256-", 43, ""),
+            ("sha384-", 63, ""),
+            ("sha512-", 43, "="),
+        ];
+        for (prefix, len, suffix) in wrong_lengths {
+            let body = first_draw_where(&mut seeded, &b64(), len, |d| {
+                passes_r11(format!("{prefix}{d}{suffix}").as_bytes())
+            });
+            assert_eq!(
+                first_high_entropy_line(format!("{prefix}{body}{suffix}").as_bytes()),
+                Some(1),
+                "{prefix} + {len} chars + {suffix:?} must block"
+            );
+        }
+
+        let body = ssh_body();
+        assert_eq!(
+            first_high_entropy_line(format!("ssh-ed25519 {body}").as_bytes()),
+            None,
+            "key body after a key type is exempt"
+        );
+        for context in ["key ", "key::", "xssh-ed25519 "] {
+            assert_eq!(
+                first_high_entropy_line(format!("{context}{body}").as_bytes()),
+                Some(1),
+                "body after {context:?} must block"
+            );
+        }
+        assert_eq!(
+            first_high_entropy_line(format!("ssh-ed25519\n{body}").as_bytes()),
+            Some(2),
+            "a key type on the previous line exempts nothing"
+        );
+    }
+
+    #[test]
+    fn test_exempt_shape_predicate() {
+        let mut seeded = SeededChars::new();
+        let mixed_hex = seeded.draw("0123456789abcdefABCDEF", 40);
+        assert!(
+            mixed_hex.bytes().any(|b| b.is_ascii_lowercase())
+                && mixed_hex.bytes().any(|b| b.is_ascii_uppercase()),
+            "fixture self-check: mixed-case hex holds both cases"
+        );
+        let uuid_mixed = format!(
+            "{}{}",
+            &UUID_LOWER[..9],
+            UUID_LOWER[9..].to_ascii_uppercase()
+        );
+        let b64 = b64();
+        let exempt = vec![
+            ("lower hex 40", seeded.draw(HEX_LOWER, 40)),
+            ("lower hex 64", seeded.draw(HEX_LOWER, 64)),
+            ("lower hex 128", seeded.draw(HEX_LOWER, 128)),
+            ("upper hex 40", seeded.draw(HEX_UPPER, 40)),
+            ("lower UUID", UUID_LOWER.to_string()),
+            ("upper UUID", UUID_LOWER.to_ascii_uppercase()),
+            ("SRI sha256", format!("sha256-{}=", seeded.draw(&b64, 43))),
+            ("SRI sha384", format!("sha384-{}", seeded.draw(&b64, 64))),
+            ("SRI sha512", format!("sha512-{}==", seeded.draw(&b64, 86))),
+        ];
+        let mut not_exempt: Vec<(String, String)> = [39, 41, 63, 65, 127, 129]
+            .into_iter()
+            .map(|len| (format!("lower hex {len}"), seeded.draw(HEX_LOWER, len)))
+            .collect();
+        let shapes = [
+            ("mixed-case hex 40", mixed_hex),
+            ("mixed-case UUID", uuid_mixed),
+            (
+                "UUID with an 11-char last group",
+                UUID_LOWER[..UUID_LOWER.len() - 1].to_string(),
+            ),
+            ("sha256- + 32", format!("sha256-{}", seeded.draw(&b64, 32))),
+            (
+                "sha256- + 43 without =",
+                format!("sha256-{}", seeded.draw(&b64, 43)),
+            ),
+            (
+                "sha256- + 42 + ==",
+                format!("sha256-{}==", seeded.draw(&b64, 42)),
+            ),
+            ("sha384- + 63", format!("sha384-{}", seeded.draw(&b64, 63))),
+            (
+                "sha384- + 62 + ==",
+                format!("sha384-{}==", seeded.draw(&b64, 62)),
+            ),
+            (
+                "sha512- + 43 + =",
+                format!("sha512-{}=", seeded.draw(&b64, 43)),
+            ),
+            (
+                "sha512- + 86 without ==",
+                format!("sha512-{}", seeded.draw(&b64, 86)),
+            ),
+            ("sha1- + 27 + =", format!("sha1-{}=", seeded.draw(&b64, 27))),
+            (
+                "xsha256- + 43 + =",
+                format!("xsha256-{}=", seeded.draw(&b64, 43)),
+            ),
+            (
+                "sha256- + 42 + _ + =",
+                format!("sha256-{}_=", seeded.draw(&b64, 42)),
+            ),
+        ];
+        not_exempt.extend(shapes.into_iter().map(|(name, t)| (name.to_string(), t)));
+
+        for (name, token) in &exempt {
+            assert!(is_exempt_shape(token.as_bytes()), "{name} must be exempt");
+        }
+        for (name, token) in &not_exempt {
+            assert!(
+                !is_exempt_shape(token.as_bytes()),
+                "{name} must not be exempt"
+            );
+        }
+    }
+
+    #[test]
+    fn test_r11_templates_corpus_zero_hits() {
+        const MIN_FILES: usize = 33;
+        const MIN_TOKENS: usize = 200;
+        let files = template_corpus_files();
+        let mut token_count = 0;
+        let mut hits = Vec::new();
+        for file in &files {
+            let bytes = std::fs::read(file).expect("read a corpus file");
+            token_count += bytes
+                .split(|&b| b == b'\n')
+                .map(|line| candidate_tokens(line).count())
+                .sum::<usize>();
+            if let Some(line) = first_high_entropy_line(&bytes) {
+                hits.push(format!("{}:{line}", file.display()));
+            }
+        }
+        eprintln!(
+            "template corpus: {} files, {token_count} candidate tokens, {} hits",
+            files.len(),
+            hits.len()
+        );
+        assert!(
+            files.len() >= MIN_FILES,
+            "only {} corpus files read",
+            files.len()
+        );
+        assert!(
+            token_count >= MIN_TOKENS,
+            "only {token_count} candidate tokens"
+        );
+        assert!(hits.is_empty(), "R11 hits in the template corpus: {hits:?}");
+
+        // Negative control: a runtime token appended to a copy of a corpus file hits.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let source = &files[0];
+        let copy = dir.path().join(source.file_name().expect("file name"));
+        std::fs::copy(source, &copy).expect("copy a corpus file");
+        let mut bytes = std::fs::read(&copy).expect("read the copy");
+        bytes.extend_from_slice(format!("\n{}\n", class_cycling_token()).as_bytes());
+        std::fs::write(&copy, &bytes).expect("write the copy");
+        assert!(
+            first_high_entropy_line(&std::fs::read(&copy).expect("re-read the copy")).is_some(),
+            "{}: appended token not found",
+            copy.display()
         );
     }
 }
