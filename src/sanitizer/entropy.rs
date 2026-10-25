@@ -1,12 +1,20 @@
 //! R11 entropy screen for credential-shaped tokens (SEC-01, D-04, D-05).
+//!
+//! A pure byte-level scorer: no decoding, every non-candidate byte (non-ASCII
+//! included) is a delimiter. It is a backstop behind the named rules, not the
+//! primary guard. Measured limits (CONTEXT D-05, RESEARCH probe): hex-only and
+//! single-case secrets are never caught here, about 3-7% of random mixed-case and
+//! 18-23% of base36 keys at 20-40 chars pass by chance, and base36 tokens of
+//! exactly 64 chars are blocked only about 16-20% (risk T-02-07, accepted).
 
 /// Rule name reported for an entropy-only hit.
 pub const RULE_NAME: &str = "high-entropy";
 
 /// Minimum candidate length in bytes, padding included (D-04).
-// RED stub: candidate_tokens uses it once implemented.
-#[cfg_attr(not(test), allow(dead_code))]
 const MIN_TOKEN_LEN: usize = 20;
+
+/// Most base64 `=` padding bytes kept on a candidate (D-04 as amended, OD-1).
+const MAX_PADDING: usize = 2;
 
 /// Fraction of the length-capped maximum entropy a token must reach (D-05).
 const ENTROPY_FACTOR: f64 = 0.80;
@@ -15,7 +23,23 @@ const ENTROPY_FACTOR: f64 = 0.80;
 /// `ENTROPY_FACTOR × log2(min(len, ENTROPY_LEN_CAP))` (D-05).
 const ENTROPY_LEN_CAP: usize = 64;
 
-/// 1-based number of the first line holding a token that passes R11, if any.
+/// Numerator of the randomness factor 0.75 (D-05), kept as an exact ratio.
+const SWITCH_FACTOR_NUM: u64 = 3;
+
+/// Denominator of the randomness factor 0.75 (D-05).
+const SWITCH_FACTOR_DEN: u64 = 4;
+
+/// Size of the uppercase class `A-Z` in the randomness test (D-05).
+const UPPER_CLASS_SIZE: u64 = 26;
+
+/// Size of the lowercase class `a-z` in the randomness test (D-05).
+const LOWER_CLASS_SIZE: u64 = 26;
+
+/// Size of the digit class `0-9` in the randomness test (D-05).
+const DIGIT_CLASS_SIZE: u64 = 10;
+
+/// 1-based number of the first line (split on LF) holding a token that passes
+/// R11, if any. Never returns the token itself.
 pub fn first_high_entropy_line(bytes: &[u8]) -> Option<usize> {
     bytes
         .split(|&b| b == b'\n')
@@ -23,22 +47,133 @@ pub fn first_high_entropy_line(bytes: &[u8]) -> Option<usize> {
         .map(|index| index + 1)
 }
 
-/// Candidate tokens of one line with their start offsets.
-fn candidate_tokens(_line: &[u8]) -> impl Iterator<Item = (usize, &[u8])> {
-    std::iter::empty()
+/// True for a candidate body byte: `A-Z a-z 0-9 + / _ - .` (D-04).
+fn is_body_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'_' | b'-' | b'.')
 }
 
-/// Shannon entropy of the token's byte frequencies, in bits.
-fn shannon_entropy(_token: &[u8]) -> f64 {
-    0.0
+/// Splits `bytes` at every byte `keep` rejects, yielding each piece (empty ones
+/// included) with its start offset in `bytes`.
+fn pieces(bytes: &[u8], keep: impl Fn(u8) -> bool) -> impl Iterator<Item = (usize, &[u8])> {
+    bytes
+        .split(move |&b| !keep(b))
+        .scan(0, |next_start, piece| {
+            let start = *next_start;
+            *next_start += piece.len() + 1;
+            Some((start, piece))
+        })
 }
 
-/// The randomness test of D-05.
-fn passes_randomness_test(_token: &[u8]) -> bool {
-    false
+/// Candidate tokens of one line, each with its start offset (D-04 as amended
+/// 2026-10-25, REVIEWS OD-1).
+///
+/// A candidate is a maximal run of body bytes ([`is_body_byte`]), extended by the
+/// `=` bytes directly after it when there are 1 to [`MAX_PADDING`] of them and the
+/// next byte is absent (end of line) or neither a body byte nor `=`. Every other
+/// `=` and every other byte is a delimiter, so `NAME=value` scores `NAME` and
+/// `value` separately, while a padded base64 value (`...==`) stays one candidate.
+/// Only candidates of at least [`MIN_TOKEN_LEN`] bytes, padding included, are
+/// yielded.
+fn candidate_tokens(line: &[u8]) -> impl Iterator<Item = (usize, &[u8])> {
+    pieces(line, |b| is_body_byte(b) || b == b'=')
+        .flat_map(|(segment_start, segment)| {
+            let trailing = segment.iter().rev().take_while(|&&b| b == b'=').count();
+            let body_len = segment.len() - trailing;
+            let padding = if (1..=MAX_PADDING).contains(&trailing) {
+                trailing
+            } else {
+                0
+            };
+            pieces(&segment[..body_len], |b| b != b'=')
+                .filter(|(_, run)| !run.is_empty())
+                .map(move |(start, run)| {
+                    let end = start + run.len();
+                    let end = if end == body_len { end + padding } else { end };
+                    (segment_start + start, &segment[start..end])
+                })
+        })
+        .filter(|(_, token)| token.len() >= MIN_TOKEN_LEN)
 }
 
-/// R11: the entropy test and the randomness test both pass.
+/// Shannon entropy in bits over the token's byte frequencies:
+/// H = −Σ p_b·log2(p_b) over the distinct bytes b, with p_b = (count of b) /
+/// (token length). The candidates are ASCII, so bytes are characters.
+fn shannon_entropy(token: &[u8]) -> f64 {
+    let mut counts = [0usize; 256];
+    for &b in token {
+        counts[usize::from(b)] += 1;
+    }
+    let len = token.len() as f64;
+    counts
+        .iter()
+        .filter(|&&count| count > 0)
+        .map(|&count| {
+            let p = count as f64 / len;
+            -p * p.log2()
+        })
+        .sum()
+}
+
+/// Character class of an alphanumeric byte in the randomness test.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CharClass {
+    Upper,
+    Lower,
+    Digit,
+}
+
+impl CharClass {
+    const ALL: [CharClass; 3] = [CharClass::Upper, CharClass::Lower, CharClass::Digit];
+
+    /// The class of `b`, or `None` for a symbol (symbols are skipped).
+    fn of(b: u8) -> Option<Self> {
+        match b {
+            b'A'..=b'Z' => Some(Self::Upper),
+            b'a'..=b'z' => Some(Self::Lower),
+            b'0'..=b'9' => Some(Self::Digit),
+            _ => None,
+        }
+    }
+
+    fn size(self) -> u64 {
+        match self {
+            Self::Upper => UPPER_CLASS_SIZE,
+            Self::Lower => LOWER_CLASS_SIZE,
+            Self::Digit => DIGIT_CLASS_SIZE,
+        }
+    }
+}
+
+/// The D-05 randomness test, over the token's alphanumeric bytes only.
+///
+/// With n alphanumeric bytes, c adjacent class changes among them, T the sum of
+/// the present class sizes and S the sum of their squares, D-05 requires
+/// `c / (n − 1) >= 0.75 × E` with `E = 1 − S / T²` and `E > 0`. This evaluates the
+/// same comparison multiplied out, `c × 4 × T² >= 3 × (n − 1) × (T² − S)`, in exact
+/// integer arithmetic, so a tie is decided exactly. Fewer than two classes present
+/// (E = 0, which also covers fewer than two alphanumeric bytes) fails.
+fn passes_randomness_test(token: &[u8]) -> bool {
+    let classes: Vec<CharClass> = token.iter().filter_map(|&b| CharClass::of(b)).collect();
+    let (present, total, squares) = CharClass::ALL
+        .into_iter()
+        .filter(|class| classes.contains(class))
+        .fold((0u64, 0u64, 0u64), |(present, total, squares), class| {
+            (
+                present + 1,
+                total + class.size(),
+                squares + class.size() * class.size(),
+            )
+        });
+    if present < 2 {
+        return false;
+    }
+    let pairs = classes.len() as u64 - 1;
+    let changes = classes.windows(2).filter(|w| w[0] != w[1]).count() as u64;
+    changes * SWITCH_FACTOR_DEN * total * total
+        >= SWITCH_FACTOR_NUM * pairs * (total * total - squares)
+}
+
+/// R11 (D-05): the entropy test and the randomness test both pass.
 fn passes_r11(token: &[u8]) -> bool {
     shannon_entropy(token) >= ENTROPY_FACTOR * (token.len().min(ENTROPY_LEN_CAP) as f64).log2()
         && passes_randomness_test(token)
@@ -424,6 +559,7 @@ mod tests {
                 .filter(|s| shannon_entropy(s.as_bytes()) >= entropy_bar(LEN))
                 .count();
             let blocked = samples.iter().filter(|s| blocks(s)).count();
+            eprintln!("single-class draws clearing the entropy bar: {entropy_passes} of {SAMPLES}");
             assert_eq!(blocked, 0, "single-class draws must never block");
             assert!(
                 entropy_passes >= MIN_ENTROPY_PASSES,
