@@ -7,6 +7,9 @@
 //! 18-23% of base36 keys at 20-40 chars pass by chance, and base36 tokens of
 //! exactly 64 chars are blocked only about 16-20% (risk T-02-07, accepted).
 
+use std::ops::Range;
+use std::sync::LazyLock;
+
 /// Rule name reported for an entropy-only hit.
 pub const RULE_NAME: &str = "high-entropy";
 
@@ -38,6 +41,50 @@ const LOWER_CLASS_SIZE: u64 = 26;
 /// Size of the digit class `0-9` in the randomness test (D-05).
 const DIGIT_CLASS_SIZE: u64 = 10;
 
+/// Hex digest lengths D-02 exempts: SHA-1 and git object ids (40), SHA-256 (64)
+/// and SHA-512 (128).
+const HEX_DIGEST_LENGTHS: [usize; 3] = [40, 64, 128];
+
+/// UUID group lengths, 8-4-4-4-12 (D-02).
+const UUID_GROUP_LENGTHS: [usize; 5] = [8, 4, 4, 4, 12];
+
+/// SRI body length for sha256: base64 of a 32-byte digest, padding included.
+const SRI_SHA256_BODY_LEN: usize = 44;
+
+/// SRI body length for sha384: base64 of a 48-byte digest (no padding).
+const SRI_SHA384_BODY_LEN: usize = 64;
+
+/// SRI body length for sha512: base64 of a 64-byte digest, padding included.
+const SRI_SHA512_BODY_LEN: usize = 88;
+
+/// The SRI shapes D-02 exempts: algorithm prefix, exact body length, and the
+/// number of `=` padding bytes that end the body (1, 0 and 2 for 32-, 48- and
+/// 64-byte digests). Any other length or padding count is scored (review
+/// concern 2: a credential behind a digest name is not a digest).
+const SRI_SHAPES: [(&[u8], usize, usize); 3] = [
+    (b"sha256-", SRI_SHA256_BODY_LEN, 1),
+    (b"sha384-", SRI_SHA384_BODY_LEN, 0),
+    (b"sha512-", SRI_SHA512_BODY_LEN, 2),
+];
+
+/// An ssh public-key body after a key type and spaces or tabs on the same line
+/// (D-02 as amended 2026-10-23: key body only). The key type may start the line
+/// or follow whitespace or one of `"` `'` `=` `:` `,` (review concern 8), which
+/// covers JSON values, unspaced and quoted gitconfig values, and git's
+/// literal-key prefix `key::` (git-config `user.signingkey`). Capture 1 is the
+/// body; the rest of the line is still scored.
+static SSH_KEY_BODY: LazyLock<regex::bytes::Regex> = LazyLock::new(|| {
+    regex::bytes::RegexBuilder::new(concat!(
+        r#"(?:^|[ \t"'=:,])"#,
+        r"(?:ssh-ed25519|ssh-rsa|ssh-dss|ecdsa-sha2-nistp(?:256|384|521)",
+        r"|sk-ssh-ed25519@openssh\.com|sk-ecdsa-sha2-nistp256@openssh\.com)",
+        r"[ \t]+(AAAA[A-Za-z0-9+/]+={0,3})",
+    ))
+    .unicode(false)
+    .build()
+    .expect("valid ssh key-body pattern")
+});
+
 /// 1-based number of the first line (split on LF) holding a token that passes
 /// R11, if any. Never returns the token itself.
 pub fn first_high_entropy_line(bytes: &[u8]) -> Option<usize> {
@@ -58,14 +105,65 @@ fn line_has_high_entropy_token(line: &[u8]) -> bool {
     })
 }
 
-/// D-02 whole-token shape exemptions.
-fn is_exempt_shape(_token: &[u8]) -> bool {
-    false
+/// D-02 whole-token shape exemptions: a hex digest, a UUID or an SRI hash.
+///
+/// Whole tokens only, so a digest-shaped substring of a longer token is scored.
+/// The hex and UUID shapes are single-case only (a digest or UUID is printed in
+/// one case). Those two can never change an R11 outcome on their own: single-case
+/// hex of the exempt lengths carries at most log2(16) = 4.0 bits per byte against
+/// a bar of 4.26 or more, and a single-case UUID at most log2(17) = 4.09 against
+/// 4.14. They are kept because D-02 lists them; `test_exempt_shape_predicate`
+/// pins every branch.
+fn is_exempt_shape(token: &[u8]) -> bool {
+    is_hex_digest(token) || is_uuid(token) || is_sri_hash(token)
 }
 
-/// Byte ranges of ssh public-key bodies on one line (D-02, amended).
-fn ssh_key_body_spans(_line: &[u8]) -> Vec<std::ops::Range<usize>> {
-    Vec::new()
+/// All bytes are `0-9a-f`, or all are `0-9A-F`.
+fn is_single_case_hex(bytes: &[u8]) -> bool {
+    bytes.iter().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        || bytes.iter().all(|b| matches!(b, b'0'..=b'9' | b'A'..=b'F'))
+}
+
+/// A single-case hex digest of one of the [`HEX_DIGEST_LENGTHS`] (D-02).
+fn is_hex_digest(token: &[u8]) -> bool {
+    HEX_DIGEST_LENGTHS.contains(&token.len()) && is_single_case_hex(token)
+}
+
+/// A single-case 8-4-4-4-12 UUID (D-02).
+fn is_uuid(token: &[u8]) -> bool {
+    let groups: Vec<&[u8]> = token.split(|&b| b == b'-').collect();
+    groups
+        .iter()
+        .map(|group| group.len())
+        .eq(UUID_GROUP_LENGTHS)
+        && is_single_case_hex(&groups.concat())
+}
+
+/// A standard base64 digit `A-Z a-z 0-9 + /`.
+fn is_base64_digit(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/')
+}
+
+/// An SRI hash of exactly one of the [`SRI_SHAPES`] (D-02).
+fn is_sri_hash(token: &[u8]) -> bool {
+    SRI_SHAPES.iter().any(|&(prefix, body_len, padding)| {
+        token.strip_prefix(prefix).is_some_and(|body| {
+            body.len() == body_len && {
+                let (digits, pad) = body.split_at(body_len - padding);
+                digits.iter().all(|&b| is_base64_digit(b)) && pad.iter().all(|&b| b == b'=')
+            }
+        })
+    })
+}
+
+/// Byte ranges of the ssh public-key bodies on one line ([`SSH_KEY_BODY`]).
+/// A candidate lying wholly inside one of them is not scored.
+fn ssh_key_body_spans(line: &[u8]) -> Vec<Range<usize>> {
+    SSH_KEY_BODY
+        .captures_iter(line)
+        .filter_map(|captures| captures.get(1))
+        .map(|body| body.range())
+        .collect()
 }
 
 /// True for a candidate body byte: `A-Z a-z 0-9 + / _ - .` (D-04).
