@@ -11,7 +11,7 @@
     {
       "number": "2",
       "name": "Sanitizer, Boundaries & Security Hardening",
-      "status": "pending"
+      "status": "in_progress"
     },
     {
       "number": "3",
@@ -29,5 +29,5 @@
     "label": "Advance to the next step",
     "reason": "Phase 2 of 4 · executing"
   },
-  "updated_at": "2026-10-25T17:56:18.626Z"
+  "updated_at": "2026-10-25T18:59:15.169Z"
 }

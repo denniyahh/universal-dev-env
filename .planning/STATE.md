@@ -1,6 +1,5 @@
 ---
 gsd_state_version: "1.0"
-milestone: v8.30.1
 current_phase: 02
 current_phase_name: Sanitizer, Boundaries & Security Hardening
 status: executing
