@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 02
 current_phase_name: Sanitizer, Boundaries & Security Hardening
 status: executing
-stopped_at: Completed 02-03-PLAN.md
-last_updated: "2026-10-26T23:51:47.589Z"
+stopped_at: Completed 02-04-PLAN.md
+last_updated: "2026-10-27T00:09:14.781Z"
 last_activity: 2026-10-26
 last_activity_desc: Phase 02 execution started
-state_head: 35daaf76185c7c598928b3199f3815e7dcaa1257
+state_head: 2b9ba93c270f4aa15527b553f9648010e8150e6c
 progress:
   total_phases: 4
   completed_phases: 1
   total_plans: 19
-  completed_plans: 14
+  completed_plans: 15
 ---
 
 # Project State
@@ -27,8 +27,8 @@ See: `.planning/PROJECT.md` (updated 2026-10-22)
 ## Current Position
 
 Phase: 02 (Sanitizer, Boundaries & Security Hardening) — EXECUTING
-Plan: 4 of 8
-Status: Executing Phase 02
+Plan: 5 of 8
+Status: Ready to execute
 Last activity: 2026-10-26 — Phase 02 execution started
 
 Progress: [███░░░░░░░] 25%
@@ -72,6 +72,7 @@ Progress: [███░░░░░░░] 25%
 | Phase 02 P01 | 8 min | 2 tasks | 2 files |
 | Phase 02 P02 | 7 min | 2 tasks | 3 files |
 | Phase 02 P03 | 15 min | 2 tasks | 3 files |
+| Phase 02 P04 | 14 min | 2 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -119,6 +120,8 @@ Recent decisions affecting current work:
 - [Phase 02]: A non-UTF-8 template is never rendered by init; a non-UTF-8 .jinja kept ancestor is recorded raw instead of failing
 - [Phase 02]: R11 runs last in scan_view (after the named rules) and reports rule high-entropy with the line only; OD-1 tokenizer and exact D-02 shapes as planned
 - [Phase 02]: class_cycling_token() is a shared cfg(test) helper in entropy.rs (push tracer and corpus control); SeededChars and template_corpus_files are the reusable fixture helpers for 02-04..02-06
+- [Phase 02]: 02-04: ude:allow-entropy is an exact, case-sensitive substring anywhere on a line; it silences only R11 on that line, named rules still refuse it (D-03)
+- [Phase 02]: 02-04: entropy.rs mutation gate clean (149 mutants, 129 caught, 20 unviable, 0 missed, 0 timeouts), no exclusions and no shared .cargo/mutants.toml
 
 ### Pending Todos
 
@@ -158,6 +161,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-25T18:59:25.077Z
-Stopped at: Completed 02-03-PLAN.md
+Last session: 2026-10-27T00:09:14.461Z
+Stopped at: Completed 02-04-PLAN.md
 Resume file: None

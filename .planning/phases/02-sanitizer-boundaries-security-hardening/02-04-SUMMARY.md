@@ -170,9 +170,19 @@ The `commits: 4` measured from the ledger (`4ea418e..0629653`) includes two orch
 - **Verification:** exit 2, mutant listed in missed.txt
 - **Committed in:** n/a (scratch only, removed)
 
+**3. [Rule 1 - Bug, known GSD defect] Scraped milestone removed from state files**
+- **Found during:** close-out state updates
+- **Issue:** the GSD state verbs run at close-out wrote `milestone: v8.30.1` (the gitleaks version from ROADMAP plan text) into .planning/STATE.md frontmatter and `"milestone": "v8.30.1"` into .planning/state.json. The project has no milestone.
+- **Fix:** deleted the STATE.md line and set state.json `"milestone": null`; logged in the operator's GSD manual-fix incident log (fifth occurrence).
+- **Files modified:** .planning/STATE.md, .planning/state.json
+- **Verification:** `rg -c v8.30.1 .planning/STATE.md .planning/state.json` exit 1 (no match)
+- **Committed in:** the docs(02-04) state and roadmap commit
+
 ---
 
-**Total deviations:** 2 auto-handled (1 blocking, 1 verification). **Impact on plan:** none on code; both strengthen the evidence for the gate result.
+**Total deviations:** 3 auto-handled (1 blocking, 1 verification, 1 known GSD defect). **Impact on plan:** none on code; the first two strengthen the evidence for the gate result, the third keeps the state files correct.
+
+**Requirement SEC-01:** not marked complete. `requirements.ready-ids` reports it blocked because sibling plans in this phase also declare it and have no SUMMARY yet.
 
 ## Issues Encountered
 
@@ -209,3 +219,9 @@ None - no external service configuration required.
 ---
 *Phase: 02-sanitizer-boundaries-security-hardening*
 *Completed: 2026-10-27*
+
+## Self-Check: PASSED
+
+- Commits 137c4a7, 9a3781e and 2b9ba93 are ancestors of HEAD; src/sanitizer/entropy.rs exists.
+- `check evaluation-scope --plan 02-04 --commits-only` resolved the test, feat and docs commits for this plan.
+- All Task 1 and Task 2 acceptance criteria re-run in this session and passed (see Verification Run).
