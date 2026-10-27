@@ -5561,6 +5561,59 @@ mod tests {
         }
     }
 
+    /// A Slack bot token shape (`xoxb-` + 12 digits + `-` + 13 digits + `-` + 24
+    /// lowercase letters), drawn at runtime so no token literal sits in this file.
+    fn seeded_slack_bot_token() -> String {
+        let mut chars = crate::sanitizer::entropy::SeededChars::new();
+        let digits = "0123456789";
+        let first = chars.draw(digits, 12);
+        let second = chars.draw(digits, 13);
+        let tail = chars.draw("abcdefghijklmnopqrstuvwxyz", 24);
+        format!("xoxb-{first}-{second}-{tail}")
+    }
+
+    /// Pushes a local `.gitconfig` whose content is `content`.
+    fn push_gitconfig_content(content: &str) -> PushResult {
+        let engine = SyncEngine::new();
+        let local_dir = tempdir().unwrap();
+        let upstream_dir = tempdir().unwrap();
+        fs::write(local_dir.path().join(".gitconfig"), content).unwrap();
+        engine.push_updates(
+            local_dir.path(),
+            upstream_dir.path(),
+            "/home/denniyahh",
+            "/home/denniyahh/.config",
+            false,
+            true,
+        )
+    }
+
+    #[test]
+    fn test_push_blocks_gitleaks_only_category() {
+        let tok = seeded_slack_bot_token();
+        let content = format!("[core]\n# slack {tok}\n");
+        // Neither the named rules nor R11 see this token: only a gitleaks rule can.
+        assert_eq!(
+            crate::sanitizer::entropy::first_high_entropy_line(content.as_bytes()),
+            None
+        );
+        match push_gitconfig_content(&content) {
+            PushResult::SecretBlocked { path, reason } => {
+                assert_eq!(path, PathBuf::from(".gitconfig"));
+                assert!(reason.contains("slack-bot-token"), "{reason}");
+                assert!(reason.contains("at line 2"), "{reason}");
+                assert!(!reason.contains(&tok), "refusal leaked the token");
+            }
+            other => panic!("Expected SecretBlocked, got {other:?}"),
+        }
+
+        // Negative control: the same file without the token line pushes.
+        match push_gitconfig_content("[core]\n") {
+            PushResult::Success { synced_files, .. } => assert_eq!(synced_files, 1),
+            other => panic!("Expected Success, got {other:?}"),
+        }
+    }
+
     /// Pushes a local `scripts/hooks/pre-push` holding `local_bytes` (no upstream file,
     /// no state) and returns the result plus the upstream root.
     fn push_local_hook(local_bytes: &[u8]) -> (PushResult, tempfile::TempDir) {
@@ -6549,6 +6602,22 @@ mod tests {
     }
 
     #[test]
+    fn test_publication_gate_blocks_gitleaks_only_category() {
+        let tok = seeded_slack_bot_token();
+        let filter = format!("cat\necho \"# slack {tok}\"\n");
+        let (res, diff_cached) = push_through_clean_filter(&filter);
+
+        let err_msg = push_failure(res);
+        assert!(
+            err_msg.contains("Publication gate violation: secret detected in staged index blob"),
+            "Error was: {err_msg}"
+        );
+        assert!(err_msg.contains("slack-bot-token"), "{err_msg}");
+        assert!(!err_msg.contains(&tok), "gate error leaked the token");
+        assert!(diff_cached.is_empty(), "index must be reset: {diff_cached}");
+    }
+
+    #[test]
     fn test_multi_pull_merge_idempotence() {
         let engine = SyncEngine::new();
         let local_dir = tempdir().unwrap();
@@ -7325,6 +7394,50 @@ mod tests {
         assert_eq!(
             validate_committed_base_bytes(&utf16be_bom("benign words\n")),
             Ok(())
+        );
+    }
+
+    #[test]
+    fn test_post_commit_gate_blocks_gitleaks_only_category() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let remote_repo = tempdir().unwrap();
+        git.run(remote_repo.path(), &["init", "-b", "main"]);
+        let base_file = remote_repo.path().join("base.txt");
+        fs::write(&base_file, "initial").unwrap();
+        git.run(remote_repo.path(), &["add", "-A"]);
+        git.run(remote_repo.path(), &["commit", "-m", "base commit"]);
+        let expected_set: std::collections::HashSet<PathBuf> =
+            [PathBuf::from("base.txt")].into_iter().collect();
+
+        // Negative control: a clean commit validates.
+        fs::write(&base_file, "updated benign content\n").unwrap();
+        git.run(remote_repo.path(), &["add", "base.txt"]);
+        git.run(remote_repo.path(), &["commit", "-m", "benign update"]);
+        assert_eq!(
+            engine.validate_committed_tree(remote_repo.path(), &expected_set),
+            Ok(())
+        );
+
+        let tok = seeded_slack_bot_token();
+        fs::write(&base_file, format!("notify = {tok}\n")).unwrap();
+        git.run(remote_repo.path(), &["add", "base.txt"]);
+        git.run(remote_repo.path(), &["commit", "-m", "injected token"]);
+        let err = engine
+            .validate_committed_tree(remote_repo.path(), &expected_set)
+            .expect_err("a committed Slack bot token must fail the gate");
+        assert!(
+            err.contains("secret detected in committed HEAD blob"),
+            "{err}"
+        );
+        assert!(err.contains("slack-bot-token"), "{err}");
+        assert!(!err.contains(&tok), "gate error leaked the token");
+
+        engine.rollback_commit(remote_repo.path());
+        let head_content = git.output(remote_repo.path(), &["show", "HEAD:base.txt"]);
+        assert!(
+            !head_content.contains("xoxb-"),
+            "HEAD must not hold the token after rollback: {head_content}"
         );
     }
 

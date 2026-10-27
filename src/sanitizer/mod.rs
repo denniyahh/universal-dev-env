@@ -1,4 +1,5 @@
 pub mod entropy;
+pub mod gitleaks;
 
 use regex::Regex;
 use std::path::{Component, Path};
