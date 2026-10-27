@@ -5493,6 +5493,68 @@ mod tests {
     }
 
     #[test]
+    fn test_push_parameterizes_punctuation_delimited_home_paths() {
+        let engine = SyncEngine::new();
+        let local_dir = tempdir().unwrap();
+        let upstream_dir = tempdir().unwrap();
+        let home = "/home/alice";
+        let xdg = "/home/alice/.config";
+        let neighbours = "/home/alice2/data /home/alice.bak /home/alice-old /backup/home/alice /backup-/home/alice/x";
+        let local = format!(
+            "[core]\n\ta = (/home/alice/x)\n\tb = ${{W:-/home/alice/Github/x}}\n\tc = /home/alice,\n\td = \"${{H:-/home/alice}}\"\n\te = see /home/alice.\n\tf = {neighbours}\n\tg = /home/alice/.config/app\n"
+        );
+        fs::write(local_dir.path().join(".gitconfig"), &local).unwrap();
+
+        let res = engine.push_updates(
+            local_dir.path(),
+            upstream_dir.path(),
+            home,
+            xdg,
+            false,
+            true,
+        );
+        match res {
+            PushResult::Success { synced_files, .. } => assert_eq!(synced_files, 1),
+            other => panic!("Expected Success on push, got {other:?}"),
+        }
+
+        let published =
+            fs::read_to_string(upstream_dir.path().join("projects/generic/gitconfig.repo"))
+                .unwrap();
+        let expected = format!(
+            "[core]\n\ta = ({{{{ user.home }}}}/x)\n\tb = ${{W:-{{{{ user.home }}}}/Github/x}}\n\tc = {{{{ user.home }}}},\n\td = \"${{H:-{{{{ user.home }}}}}}\"\n\te = see {{{{ user.home }}}}.\n\tf = {neighbours}\n\tg = {{{{ user.xdg_config }}}}/app\n"
+        );
+        assert_eq!(published, expected);
+
+        // Rendering the published template on the same machine gives the local file back.
+        let ctx = crate::template::TemplateContext {
+            user: crate::template::UserContext {
+                home: home.to_string(),
+                xdg_config: xdg.to_string(),
+                xdg_data: format!("{home}/.local/share"),
+            },
+            user_home: home.to_string(),
+            xdg_config: xdg.to_string(),
+            xdg_data: format!("{home}/.local/share"),
+            git_user_name: "Alice".to_string(),
+            git_email: "alice@example.com".to_string(),
+            project_name: "test-proj".to_string(),
+            project_type: "generic".to_string(),
+            maintainer_ssh_pubkey: None,
+            agent_ssh_pubkey: None,
+            extra: std::collections::HashMap::new(),
+        };
+        let states = engine
+            .scan_project(local_dir.path(), upstream_dir.path(), Some(&ctx))
+            .unwrap();
+        let gitconfig = states
+            .iter()
+            .find(|s| s.relative_path == Path::new(".gitconfig"))
+            .unwrap();
+        assert_eq!(gitconfig.status, SyncStatus::InSync);
+    }
+
+    #[test]
     fn test_push_updates_blocked_on_secret() {
         let engine = SyncEngine::new();
         let local_dir = tempdir().unwrap();

@@ -420,6 +420,58 @@ mod tests {
         assert_eq!(param_colon, "{{ user.home }}:{{ user.home }}");
     }
 
+    /// The SEC-03 boundary table for home `/home/alice` (XDG `/home/alice/.config`):
+    /// every row is checked and every failing row is named in the one report.
+    #[test]
+    fn test_path_boundary_table() {
+        let sanitizer = Sanitizer::new();
+        let home = "/home/alice";
+        let xdg = "/home/alice/.config";
+        let rows: &[(&str, &str)] = &[
+            // Replaced: both boundaries hold.
+            ("cd /home/alice now", "cd {{ user.home }} now"),
+            ("(/home/alice)", "({{ user.home }})"),
+            ("${H:-/home/alice}", "${H:-{{ user.home }}}"),
+            (
+                "${W:-/home/alice/Github/x}",
+                "${W:-{{ user.home }}/Github/x}",
+            ),
+            ("see /home/alice.", "see {{ user.home }}."),
+            ("/home/alice,", "{{ user.home }},"),
+            ("a;/home/alice;b", "a;{{ user.home }};b"),
+            ("/home/alice}", "{{ user.home }}}"),
+            ("file:///home/alice/x", "file://{{ user.home }}/x"),
+            ("\"/home/alice\"", "\"{{ user.home }}\""),
+            ("/home/alice:/home/alice", "{{ user.home }}:{{ user.home }}"),
+            // Untouched: a word char, `.word` or `-` neighbour blocks the match.
+            ("/home/alice2", "/home/alice2"),
+            ("/home/alice.bak", "/home/alice.bak"),
+            ("/home/alice-old", "/home/alice-old"),
+            ("/home/alice_x", "/home/alice_x"),
+            ("/backup/home/alice", "/backup/home/alice"),
+            ("./home/alice", "./home/alice"),
+            ("/backup-/home/alice/x", "/backup-/home/alice/x"),
+            ("x-/home/alice", "x-/home/alice"),
+            // The first occurrence is bounded; the second follows a word char.
+            ("/home/alice/home/alice", "{{ user.home }}/home/alice"),
+        ];
+        let failures: Vec<String> = rows
+            .iter()
+            .filter_map(|(input, expected)| {
+                let actual = sanitizer.parameterize_paths(input, home, xdg);
+                (actual != *expected)
+                    .then(|| format!("row {input:?}: expected {expected:?}, got {actual:?}"))
+            })
+            .collect();
+        assert!(
+            failures.is_empty(),
+            "{} of {} boundary rows failed:\n{}",
+            failures.len(),
+            rows.len(),
+            failures.join("\n")
+        );
+    }
+
     #[test]
     fn test_local_only_boundary() {
         let sanitizer = Sanitizer::new();
