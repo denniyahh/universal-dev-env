@@ -273,10 +273,16 @@ impl Sanitizer {
     /// is one left-to-right scan (`replace_bounded`) with no regex built from the
     /// path.
     ///
+    /// Both roots are first normalized with [`normalize_root`], so `/home/alice/`
+    /// parameterizes exactly like `/home/alice`, and a root of only separators
+    /// stays rejected.
+    ///
     /// Matching is exact substring equality on the UTF-8 text, with no Unicode
     /// normalization: an NFD spelling of an NFC home path is not matched. The
     /// boundary table is `tests::test_path_boundary_table`.
     pub fn parameterize_paths(&self, content: &str, user_home: &str, xdg_config: &str) -> String {
+        let user_home = normalize_root(user_home);
+        let xdg_config = normalize_root(xdg_config);
         let mut result = content.to_string();
         if !xdg_config.is_empty() && xdg_config != user_home && is_parameterizable_root(xdg_config)
         {
