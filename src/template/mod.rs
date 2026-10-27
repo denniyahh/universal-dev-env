@@ -161,7 +161,10 @@ pub struct RenderFailure {
 impl RenderFailure {
     /// `{category} at line {n}`, or `{category} at an unknown line`.
     pub fn describe(&self) -> String {
-        String::new()
+        match self.line {
+            Some(line) => format!("{} at line {line}", self.category),
+            None => format!("{} at an unknown line", self.category),
+        }
     }
 }
 
@@ -199,13 +202,19 @@ impl TemplateRenderer {
     /// identifiers and tokens from the template.
     pub fn render_str_checked(
         &self,
-        _template_str: &str,
-        _ctx: &TemplateContext,
+        template_str: &str,
+        ctx: &TemplateContext,
     ) -> Result<String, RenderFailure> {
-        Err(RenderFailure {
-            category: String::new(),
-            line: None,
-        })
+        // Only the error kind (a fixed description) and the line leave this function;
+        // the error's own Display and detail quote template text.
+        let reduce = |e: minijinja::Error| RenderFailure {
+            category: e.kind().to_string(),
+            line: e.line(),
+        };
+        let mut env = self.env.clone();
+        env.add_template("template", template_str).map_err(reduce)?;
+        let tmpl = env.get_template("template").map_err(reduce)?;
+        tmpl.render(ctx).map_err(reduce)
     }
 }
 

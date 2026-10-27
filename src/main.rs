@@ -1338,12 +1338,8 @@ fn main() {
                             std::process::exit(1);
                         }
                         sync::PushResult::ReversibilityBlocked { path, reason } => {
-                            eprintln!(
-                                "  {} Push rejected on {}: {}",
-                                "✗".red(),
-                                path.display(),
-                                reason
-                            );
+                            let path = path.display();
+                            eprintln!("  {} Push rejected on {path}: {reason}", "✗".red());
                             std::process::exit(EXIT_DRIFT);
                         }
                         sync::PushResult::ScanFailed { reason } => {

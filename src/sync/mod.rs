@@ -484,6 +484,48 @@ impl SyncEngine {
         text.replace("\r\n", "\n")
     }
 
+    /// Push gate 5 (SEC-04): the text push would publish to `target` must render back,
+    /// through the renderer and render rule init, scan and pull use, to exactly the
+    /// local text (`local_lf`, LF-normalized). Text the rule does not render passes
+    /// unrendered. The error reason holds fixed text, the engine's error category and
+    /// line numbers only, never file text or the engine's detail.
+    fn check_render_back(
+        renderer: &crate::template::TemplateRenderer,
+        ctx: &crate::template::TemplateContext,
+        target: &Path,
+        published: &str,
+        local_lf: &str,
+    ) -> Result<(), String> {
+        if !crate::template::should_render(target, published) {
+            return Ok(());
+        }
+        let rendered = match renderer.render_str_checked(published, ctx) {
+            Ok(rendered) => rendered,
+            Err(failure) => {
+                return Err(format!(
+                    "published text does not render back to the local file: {}",
+                    failure.describe()
+                ));
+            }
+        };
+        let rendered_lf = Self::normalize_eol(&rendered);
+        if rendered_lf == local_lf {
+            return Ok(());
+        }
+        // Split on LF so a trailing-newline difference shows as an extra last line.
+        let rendered_lines: Vec<&str> = rendered_lf.split('\n').collect();
+        let local_lines: Vec<&str> = local_lf.split('\n').collect();
+        let first_difference = rendered_lines
+            .iter()
+            .zip(&local_lines)
+            .position(|(rendered_line, local_line)| rendered_line != local_line)
+            .unwrap_or_else(|| rendered_lines.len().min(local_lines.len()));
+        Err(format!(
+            "published text renders back differently from the local file at line {}",
+            first_difference + 1
+        ))
+    }
+
     /// Detects 3-way sync status from the fingerprints of the ancestor record, the local
     /// file and the upstream template (`None` = absent; an empty file is present).
     ///
@@ -1339,6 +1381,14 @@ impl SyncEngine {
             Ok(states) => states,
             Err(reason) => return PushResult::ScanFailed { reason },
         };
+        // Gate 5 renders with the push's own home and XDG config, the values Gate 3
+        // parameterized with, not the host-derived context above.
+        let mut render_ctx = dummy_ctx.clone();
+        render_ctx.user.home = user_home.to_string();
+        render_ctx.user_home = user_home.to_string();
+        render_ctx.user.xdg_config = xdg_config.to_string();
+        render_ctx.xdg_config = xdg_config.to_string();
+        let renderer = crate::template::TemplateRenderer::new();
         let mut candidates_to_write = Vec::new();
         let mut deletions = Vec::new();
         let mut skipped_conflicts = Vec::new();
@@ -1480,6 +1530,27 @@ impl SyncEngine {
                         path: state.relative_path.clone(),
                         reason: finding.reason(),
                     };
+                }
+
+                // Gate 5: reversibility, the published text must render back to the
+                // local file through the same renderer and rule init, scan and pull
+                // use. It runs inside pass 1, so a refusal stages nothing.
+                if let (Some(local_lf), Some(target)) =
+                    (raw_local_str.as_deref(), upstream_target.as_deref())
+                {
+                    let published_text = String::from_utf8_lossy(&published);
+                    if let Err(reason) = Self::check_render_back(
+                        &renderer,
+                        &render_ctx,
+                        target,
+                        &published_text,
+                        local_lf,
+                    ) {
+                        return PushResult::ReversibilityBlocked {
+                            path: state.relative_path.clone(),
+                            reason,
+                        };
+                    }
                 }
 
                 // Stage into candidates list
