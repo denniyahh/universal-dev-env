@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 02
 current_phase_name: Sanitizer, Boundaries & Security Hardening
 status: executing
-stopped_at: Completed 02-04-PLAN.md
-last_updated: "2026-10-27T00:09:14.781Z"
+stopped_at: Completed 02-05-PLAN.md
+last_updated: "2026-10-27T00:28:01.139Z"
 last_activity: 2026-10-26
 last_activity_desc: Phase 02 execution started
-state_head: 2b9ba93c270f4aa15527b553f9648010e8150e6c
+state_head: c5c0f926e7ced6eba6128a84c65e8a1cd3c853bd
 progress:
   total_phases: 4
   completed_phases: 1
   total_plans: 19
-  completed_plans: 15
+  completed_plans: 16
 ---
 
 # Project State
@@ -27,7 +27,7 @@ See: `.planning/PROJECT.md` (updated 2026-10-22)
 ## Current Position
 
 Phase: 02 (Sanitizer, Boundaries & Security Hardening) — EXECUTING
-Plan: 5 of 8
+Plan: 6 of 8
 Status: Ready to execute
 Last activity: 2026-10-26 — Phase 02 execution started
 
@@ -73,6 +73,7 @@ Progress: [███░░░░░░░] 25%
 | Phase 02 P02 | 7 min | 2 tasks | 3 files |
 | Phase 02 P03 | 15 min | 2 tasks | 3 files |
 | Phase 02 P04 | 14 min | 2 tasks | 1 files |
+| Phase 02 P05 | 15 min | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -122,6 +123,9 @@ Recent decisions affecting current work:
 - [Phase 02]: class_cycling_token() is a shared cfg(test) helper in entropy.rs (push tracer and corpus control); SeededChars and template_corpus_files are the reusable fixture helpers for 02-04..02-06
 - [Phase 02]: 02-04: ude:allow-entropy is an exact, case-sensitive substring anywhere on a line; it silences only R11 on that line, named rules still refuse it (D-03)
 - [Phase 02]: 02-04: entropy.rs mutation gate clean (149 mutants, 129 caught, 20 unviable, 0 missed, 0 timeouts), no exclusions and no shared .cargo/mutants.toml
+- [Phase 02]: 02-05: the vendored gitleaks default rules (SHA-256 pinned) run in scan_view between the named rules and R11, on both views, with the publish-relative path
+- [Phase 02]: 02-05: the gitleaks loader refuses an empty allowlist, a rule with neither regex nor path, and a secretGroup beyond the regex groups (fail closed)
+- [Phase 02]: 02-05: global allowlist paths never skip a file (A4); rule allowlist paths and the AND pre-check are honoured
 
 ### Pending Todos
 
@@ -161,6 +165,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-27T00:09:14.461Z
-Stopped at: Completed 02-04-PLAN.md
+Last session: 2026-10-27T00:28:00.761Z
+Stopped at: Completed 02-05-PLAN.md
 Resume file: None

@@ -71,7 +71,7 @@ Plans:
   3. Path parameterization matches only full word and punctuation boundaries (`\b`, path delimiters), preventing corruption of partial substring tokens.
   4. Sanitizer round-tripping verifies that templated tokens substitute back cleanly to local machine environments on initialization.
 
-**Plans**: 4/8 plans executed
+**Plans**: 5/8 plans executed
 
 Plans:
 **Wave 1**
@@ -83,7 +83,7 @@ Plans:
 
 **Wave 3** *(blocked on Wave 2 completion)*
 - [x] 02-04: `ude:allow-entropy` per-line marker (D-02, D-03) and mutation gate over entropy.rs (SEC-01).
-- [ ] 02-05: Vendored, SHA-256-pinned gitleaks v8.30.1 rules matched with gitleaks semantics in `src/sanitizer/gitleaks.rs`, wired between named rules and R11 (SEC-02).
+- [x] 02-05: Vendored, SHA-256-pinned gitleaks v8.30.1 rules matched with gitleaks semantics in `src/sanitizer/gitleaks.rs`, wired between named rules and R11 (SEC-02).
 
 **Wave 4** *(blocked on Wave 3 completion)*
 - [ ] 02-06: Gitleaks category coverage: CLI refusal e2e, category table, D-03 for gitleaks rules, full-scanner corpus control, mutation gate, parity with the gitleaks binary (SEC-02).
@@ -138,7 +138,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Sync Engine & State Hermeticity | 11/11 | Complete    | 2026-10-22 |
-| 2. Sanitizer, Boundaries & Security Hardening | 4/8 | In Progress | - |
+| 2. Sanitizer, Boundaries & Security Hardening | 5/8 | In Progress | - |
 | 3. Doctor & CLI Hardening | 0/4 | Not started | - |
 | 4. Templates, Archetypes & Manifest Decoupling | 0/3 | Not started | - |
 
