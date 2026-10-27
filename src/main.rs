@@ -1337,6 +1337,15 @@ fn main() {
                             );
                             std::process::exit(1);
                         }
+                        sync::PushResult::ReversibilityBlocked { path, reason } => {
+                            eprintln!(
+                                "  {} Push rejected on {}: {}",
+                                "✗".red(),
+                                path.display(),
+                                reason
+                            );
+                            std::process::exit(EXIT_DRIFT);
+                        }
                         sync::PushResult::ScanFailed { reason } => {
                             eprintln!(
                                 "  {} Push failed: could not compare the project with upstream: {reason}",

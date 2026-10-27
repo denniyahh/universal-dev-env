@@ -4095,6 +4095,52 @@ fn test_push_then_init_substitutes_home_on_new_project() {
 }
 
 #[test]
+fn test_push_refuses_unrenderable_parameterized_hook() {
+    let temp = tempdir().unwrap();
+    let ude = sync_cli(temp.path());
+    let fake = fake_home(temp.path());
+    let project = project_with_local_templates(temp.path(), "project");
+    reinit_rust(&ude, &project);
+    let template_before = fs::read(project.join(COMMIT_MSG_TEMPLATE)).unwrap();
+
+    // `${#FIRST_LINE}` opens a Jinja comment once push inserts `{{ user.home }}`.
+    append_to(
+        &project.join("scripts/hooks/commit-msg"),
+        &format!("# notes: {fake}/notes\n"),
+    );
+    let push = ude(&project, &["sync", "push"]);
+    assert_eq!(push.status.code(), Some(1), "{}", outputs(&push));
+    let stderr = String::from_utf8_lossy(&push.stderr);
+    assert!(
+        stderr.contains("scripts/hooks/commit-msg"),
+        "{}",
+        outputs(&push)
+    );
+    assert!(stderr.contains("Push rejected"), "{}", outputs(&push));
+    assert!(stderr.contains("syntax error"), "{}", outputs(&push));
+    assert_eq!(
+        fs::read(project.join(COMMIT_MSG_TEMPLATE)).unwrap(),
+        template_before,
+        "{}",
+        outputs(&push)
+    );
+
+    // Control: a line without a home path is not rendered and is published.
+    let temp = tempdir().unwrap();
+    let ude = sync_cli(temp.path());
+    let project = project_with_local_templates(temp.path(), "project");
+    reinit_rust(&ude, &project);
+    append_to(
+        &project.join("scripts/hooks/commit-msg"),
+        "# notes: shared\n",
+    );
+    let push = ude(&project, &["sync", "push"]);
+    assert_eq!(push.status.code(), Some(0), "{}", outputs(&push));
+    let template = fs::read_to_string(project.join(COMMIT_MSG_TEMPLATE)).unwrap();
+    assert!(template.ends_with("# notes: shared\n"), "{template}");
+}
+
+#[test]
 fn test_init_renders_placeholders_in_static_templates_in_sync() {
     let temp = tempdir().unwrap();
     let ude = sync_cli(temp.path());

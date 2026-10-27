@@ -139,6 +139,12 @@ pub enum PushResult {
         path: PathBuf,
         reason: String,
     },
+    /// The published text does not render back to the local file (SEC-04); nothing
+    /// was changed. `reason` holds fixed text, an error category and line numbers only.
+    ReversibilityBlocked {
+        path: PathBuf,
+        reason: String,
+    },
     IoFailed {
         path: PathBuf,
         reason: String,
@@ -5580,6 +5586,85 @@ mod tests {
             }
             _ => panic!("Expected SecretBlocked, got {:?}", res),
         }
+    }
+
+    /// The shipped commit-msg hook, whose `${#FIRST_LINE}` opens a Jinja comment once
+    /// the text is rendered.
+    fn repo_commit_msg_hook() -> Vec<u8> {
+        fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("templates/projects/generic/hooks/commit-msg"),
+        )
+        .expect("read the repository commit-msg hook")
+    }
+
+    /// Pushes `local_bytes` as `scripts/hooks/commit-msg` with home `/home/alice`.
+    fn push_commit_msg_as_alice(local_bytes: &[u8]) -> (PushResult, tempfile::TempDir) {
+        let engine = SyncEngine::new();
+        let local_dir = tempdir().unwrap();
+        let upstream_dir = tempdir().unwrap();
+        let hook = local_dir.path().join("scripts/hooks/commit-msg");
+        fs::create_dir_all(hook.parent().unwrap()).unwrap();
+        fs::write(&hook, local_bytes).unwrap();
+        let res = engine.push_updates(
+            local_dir.path(),
+            upstream_dir.path(),
+            "/home/alice",
+            "/home/alice/.config",
+            false,
+            true,
+        );
+        (res, upstream_dir)
+    }
+
+    #[test]
+    fn test_push_refuses_unrenderable_parameterized_file() {
+        let hook = repo_commit_msg_hook();
+        let hook_text = String::from_utf8(hook.clone()).unwrap();
+        assert!(hook_text.contains("${#FIRST_LINE}"), "fixture shape");
+        assert!(
+            !hook_text.contains("{{"),
+            "fixture must hold no placeholder"
+        );
+
+        let mut local = hook.clone();
+        local.extend_from_slice(b"# notes: /home/alice/notes\n");
+        let (res, upstream) = push_commit_msg_as_alice(&local);
+        match &res {
+            PushResult::ReversibilityBlocked { path, reason } => {
+                assert_eq!(path, &PathBuf::from("scripts/hooks/commit-msg"));
+                assert!(reason.contains("does not render back"), "{reason}");
+                assert!(reason.contains("syntax error"), "{reason}");
+                assert!(reason.contains("line"), "{reason}");
+                assert!(!reason.contains("/home/alice/notes"), "{reason}");
+                assert!(!reason.contains("end of comment"), "{reason}");
+            }
+            other => panic!("Expected ReversibilityBlocked, got {other:?}"),
+        }
+        assert!(
+            !upstream
+                .path()
+                .join("projects/generic/hooks/commit-msg")
+                .exists()
+        );
+
+        // Control: the same hook without a home path is not rendered and is published
+        // byte for byte.
+        let (res, upstream) = push_commit_msg_as_alice(&hook);
+        assert!(
+            matches!(
+                res,
+                PushResult::Success {
+                    synced_files: 1,
+                    ..
+                }
+            ),
+            "Expected Success, got {res:?}"
+        );
+        assert_eq!(
+            fs::read(upstream.path().join("projects/generic/hooks/commit-msg")).unwrap(),
+            hook
+        );
     }
 
     /// Pushes a local `.gitconfig` whose second line is a comment holding `word`.
