@@ -4,10 +4,10 @@ current_phase: 02
 current_phase_name: Sanitizer, Boundaries & Security Hardening
 status: verifying
 stopped_at: Completed 02-08-PLAN.md
-last_updated: "2026-10-27T08:44:21.742Z"
+last_updated: "2026-10-27T16:14:29.079Z"
 last_activity: 2026-10-26
 last_activity_desc: Phase 02 execution started
-state_head: 72d6118a83166f8713970854f8c1a790c54caa3d
+state_head: ca2be873df6217e40bcea9c24bd601570179c5da
 progress:
   total_phases: 4
   completed_phases: 1
@@ -137,6 +137,7 @@ Recent decisions affecting current work:
 - [Phase 02]: 02-08: push refuses (exit 1) any UTF-8 file whose published text does not render back to the local text; the reason is fixed text plus the engine's error category and a line number
 - [Phase 02]: 02-08: gate 5 renders with a context built from push_updates' user_home and xdg_config arguments; scan_project keeps the host-derived context (separate todo)
 - [Phase 02]: 02-08: publication gates bind each non-deleted staged or committed blob to the fingerprint push_updates recorded; a missing record or a differing blob exits 2
+- [Phase 02]: Gap closure fixes the non-.jinja placeholder push (verification gap 2 / review CR-02): push gate 2 uses template::should_render, not the .jinja extension; no SC4 override — Operator chose option A on 2026-10-27: init renders any template with {{ since 02-02, so push must protect the same set
 
 ### Pending Todos
 
