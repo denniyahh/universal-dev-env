@@ -124,6 +124,21 @@ fn is_trailing_boundary(rest: &str) -> bool {
     }
 }
 
+/// Whether `path` names a real directory to parameterize: absolute, with at least
+/// one normal component.
+///
+/// This rejects the empty string, `.` (the fallback `src/main.rs` and
+/// `TemplateContext::detect_for_project` use when no home is found), a relative
+/// path, and `/` or `//` (`HOME=/` in a container), any of which would rewrite
+/// text that is not the pusher's home.
+fn is_parameterizable_root(path: &str) -> bool {
+    let path = Path::new(path);
+    path.is_absolute()
+        && path
+            .components()
+            .any(|component| matches!(component, Component::Normal(_)))
+}
+
 /// Replaces each occurrence of `needle` in `content` whose leading and trailing
 /// boundaries both hold with `placeholder`, in one left-to-right pass over
 /// `str::match_indices`. Everything else is copied through unchanged.
@@ -222,8 +237,10 @@ impl Sanitizer {
     /// Replaces the pusher's XDG config path with `{{ user.xdg_config }}` and home
     /// path with `{{ user.home }}`, the two placeholders push publishes (SEC-03).
     ///
-    /// The XDG path goes first, and only when it is non-empty and differs from the
-    /// home path; then the home path. An occurrence is replaced only when both
+    /// The XDG path goes first, and only when it is non-empty, differs from the
+    /// home path and is a parameterizable root; then the home path, when it is one
+    /// (`is_parameterizable_root`: an empty, `.`, relative, `/` or `//` path is
+    /// never parameterized). An occurrence is replaced only when both
     /// boundaries hold (`is_leading_boundary`, `is_trailing_boundary`), so
     /// `(`, `)`, `,`, `;`, `}`, quotes, whitespace, `/`, `:`, `:-` and a
     /// sentence-final `.` delimit a path, while a word char, `.word` or a `-` that
@@ -236,10 +253,11 @@ impl Sanitizer {
     /// boundary table is `tests::test_path_boundary_table`.
     pub fn parameterize_paths(&self, content: &str, user_home: &str, xdg_config: &str) -> String {
         let mut result = content.to_string();
-        if !xdg_config.is_empty() && xdg_config != user_home {
+        if !xdg_config.is_empty() && xdg_config != user_home && is_parameterizable_root(xdg_config)
+        {
             result = replace_bounded(&result, xdg_config, "{{ user.xdg_config }}");
         }
-        if !user_home.is_empty() {
+        if is_parameterizable_root(user_home) {
             result = replace_bounded(&result, user_home, "{{ user.home }}");
         }
         result

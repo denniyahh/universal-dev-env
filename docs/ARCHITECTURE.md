@@ -75,11 +75,10 @@ To guarantee that local changes can be synchronized back to the central reposito
 1. **Secret & Credential Scrubbing:**
    - Pre-flight scan rejecting any files containing high-entropy strings, private SSH keys, personal access tokens (`ghp_`, `glpat-`, bearer tokens), or API keys.
 2. **Path Parameterization:**
-   - Machine-specific absolute paths (`/var/home/denniyahh`, `C:\Users\username`, `/Users/username`) are automatically parameterized into portable variables:
+   - The pusher's own home and XDG config paths (for example `/home/alice`, `C:\Users\alice`, `/Users/alice`) are parameterized into portable variables:
      - `{{ user.home }}`
-     - `{{ xdg.config }}`
-     - `{{ xdg.data }}`
-     - `{{ git.email }}`
+     - `{{ user.xdg_config }}`
+   - These are the only placeholders `ude sync push` writes; other machine values (data directories, git identity, other users' paths) are not parameterized.
 3. **Publish Boundary Guard:**
    - Projects targeting open-source upstreams enforce contribution boundaries: personal workflow files (`.agents/`, `.planning/`, `scratch/`, `mise.local.toml`) cannot leak into upstream commits or PRs.
 
