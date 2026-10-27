@@ -1,6 +1,5 @@
 ---
 gsd_state_version: "1.0"
-milestone: v8.30.1
 current_phase: 02
 current_phase_name: Sanitizer, Boundaries & Security Hardening
 status: executing
@@ -28,7 +27,7 @@ See: `.planning/PROJECT.md` (updated 2026-10-22)
 ## Current Position
 
 Phase: 02 (Sanitizer, Boundaries & Security Hardening) — READY TO EXECUTE
-Plan: 8 of 8
+Plan: 8 of 10
 Status: Ready to execute
 Last activity: 2026-10-26 — Phase 02 execution started
 
