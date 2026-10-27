@@ -5016,6 +5016,13 @@ mod tests {
         );
         assert!(!check("absent.jinja", None));
         assert!(!check("absent.repo", None), "absent static template");
+        // A template that exists but cannot be read is an error, never "no logic".
+        let unreadable = dir.path().join("unreadable.repo");
+        fs::create_dir(&unreadable).unwrap();
+        assert!(
+            template_has_logic(&unreadable).is_err(),
+            "template path that is a directory"
+        );
         // Not rendered (no `{{`), so a push of the local text erases nothing.
         assert!(!check("gitconfig.repo", Some(b"{% if x %}a{% endif %}")));
         assert!(
