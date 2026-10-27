@@ -4158,6 +4158,32 @@ fn test_push_skips_edit_over_static_template_with_logic() {
     assert!(!gitconfig_c.contains("tester@example.com"), "{gitconfig_c}");
 }
 
+#[test]
+fn test_push_publishes_edit_over_placeholder_only_static_template() {
+    let temp = tempdir().unwrap();
+    let ude = sync_cli(temp.path());
+    let project = project_with_local_templates(temp.path(), "project");
+    let template = project.join(GITCONFIG_TEMPLATE);
+    append_to(&template, HOME_INCLUDE_PLACEHOLDER);
+    reinit_rust(&ude, &project);
+    append_to(&project.join(".gitconfig"), "[ude]\n\tx = 1\n");
+
+    let status = outputs(&ude(&project, &["sync", "status"]));
+    assert!(
+        line_with(&status, ".gitconfig:").contains("ready to push"),
+        "{status}"
+    );
+    let push = ude(&project, &["sync", "push"]);
+    assert_eq!(push.status.code(), Some(0), "{}", outputs(&push));
+    let published = fs::read_to_string(&template).unwrap();
+    assert!(
+        published.contains("path = {{ user.home }}/.gitconfig.local"),
+        "{published}"
+    );
+    assert!(published.ends_with("[ude]\n\tx = 1\n"), "{published}");
+    assert!(!published.contains(&fake_home(temp.path())), "{published}");
+}
+
 /// A [`sync_cli`] runner on `root` whose HOME and XDG_CONFIG_HOME end in `/`.
 fn trailing_separator_cli(root: &Path) -> impl Fn(&Path, &[&str]) -> Output {
     let fake = fake_home(root);

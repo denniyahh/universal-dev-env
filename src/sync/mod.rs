@@ -4945,29 +4945,91 @@ mod tests {
     #[test]
     fn test_template_has_logic() {
         let dir = tempdir().unwrap();
-        let check = |name: &str, text: Option<&str>| {
+        let check = |name: &str, bytes: Option<&[u8]>| {
             let path = dir.path().join(name);
-            if let Some(text) = text {
-                fs::write(&path, text).unwrap();
+            if let Some(bytes) = bytes {
+                fs::write(&path, bytes).unwrap();
             }
             template_has_logic(&path).unwrap()
         };
+        // Text after a byte that makes the template invalid UTF-8.
+        let non_utf8 = |text: &str| [&[0xFF][..], text.as_bytes()].concat();
         for logic in [
             "{% if x %}a{% endif %}",
             "a = {{ project_name }}",
             "{# note #}",
         ] {
-            assert!(check("logic.jinja", Some(logic)), "{logic}");
+            assert!(check("logic.jinja", Some(logic.as_bytes())), "{logic}");
         }
+        // A static template the render rule renders (it holds `{{`): its other
+        // constructs are logic a push of rendered text would erase.
+        assert!(
+            check(
+                "gitconfig.repo",
+                Some(b"[user]\n\temail = {{ git_email }}\n")
+            ),
+            "static template with a git_email placeholder"
+        );
+        assert!(
+            check(
+                "gitconfig.repo",
+                Some(b"{{ user.home }}/x\n{% if x %}y{% endif %}\n")
+            ),
+            "static template rendered for its path placeholder, holding an if block"
+        );
+        assert!(
+            check("pre-push", Some(b"name = {{ project_name }}\n")),
+            "hook without extension with a project_name placeholder"
+        );
+        // Not UTF-8, so never rendered; a `.jinja` template with logic stays protected
+        // (Phase 01 D-14).
+        assert!(
+            check("logic.jinja", Some(&non_utf8("{{ x }}"))),
+            "non-UTF-8 .jinja template with a placeholder"
+        );
         // Only the placeholders push writes back: a rendered push loses nothing.
         assert!(!check(
             "params.jinja",
-            Some("home = \"{{ user.home }}\"\ncfg = \"{{ user.xdg_config }}\"\n")
+            Some(b"home = \"{{ user.home }}\"\ncfg = \"{{ user.xdg_config }}\"\n")
         ));
-        assert!(!check("plain.jinja", Some("[tools]\nrust = \"latest\"\n")));
+        assert!(
+            !check(
+                "gitconfig.repo",
+                Some(b"path = {{ user.home }}/a\ncfg = {{ user.xdg_config }}/b\n")
+            ),
+            "static template with only the path placeholders"
+        );
+        assert!(
+            !check(
+                "params.jinja",
+                Some(&non_utf8("home = \"{{ user.home }}\"\n"))
+            ),
+            "non-UTF-8 .jinja template with only a path placeholder"
+        );
+        assert!(!check("plain.jinja", Some(b"[tools]\nrust = \"latest\"\n")));
+        assert!(
+            !check(
+                "plain.jinja",
+                Some(&non_utf8("[tools]\nrust = \"latest\"\n"))
+            ),
+            "non-UTF-8 .jinja template without a construct"
+        );
         assert!(!check("absent.jinja", None));
-        // Not a .jinja template: never treated as template logic.
-        assert!(!check("gitconfig.repo", Some("{% if x %}a{% endif %}")));
+        assert!(!check("absent.repo", None), "absent static template");
+        // Not rendered (no `{{`), so a push of the local text erases nothing.
+        assert!(!check("gitconfig.repo", Some(b"{% if x %}a{% endif %}")));
+        assert!(
+            !check(
+                "commit-msg",
+                Some(b"if [ \"${#FIRST_LINE}\" -gt 72 ]; then\n")
+            ),
+            "shell length expansion in an unrendered hook"
+        );
+        // Neither UTF-8 nor `.jinja`: never rendered, so no logic.
+        assert!(
+            !check("gitconfig.repo", Some(&non_utf8("{{ x }}"))),
+            "non-UTF-8 static template with a placeholder"
+        );
     }
 
     #[test]
@@ -5102,6 +5164,155 @@ mod tests {
             !String::from_utf8_lossy(&published).contains(&ctx.git_email),
             "push must not publish the rendered email over its placeholder"
         );
+    }
+
+    #[test]
+    fn test_push_never_deletes_static_template_with_logic() {
+        let engine = SyncEngine::new();
+        let local = tempdir().unwrap();
+        let upstream = tempdir().unwrap();
+        let template_text = "[user]\n\temail = {{ git_email }}\n";
+        let (ctx, _) = record_rendered_gitconfig(local.path(), upstream.path(), template_text);
+        let status = engine
+            .scan_project(local.path(), upstream.path(), Some(&ctx))
+            .unwrap()
+            .into_iter()
+            .find(|s| s.relative_path == Path::new(".gitconfig"))
+            .unwrap()
+            .status;
+        assert_eq!(status, SyncStatus::LocalDeleted, "precondition");
+
+        let result = push_dirs(&engine, local.path(), upstream.path());
+
+        let PushResult::Success {
+            deleted,
+            skipped_templates,
+            ..
+        } = &result
+        else {
+            panic!("push did not return Success");
+        };
+        assert_eq!(skipped_templates, &vec![PathBuf::from(".gitconfig")]);
+        assert!(deleted.is_empty(), "deleted: {deleted:?}");
+        let template = upstream.path().join("projects/generic/gitconfig.repo");
+        assert!(
+            fs::read(&template).unwrap() == template_text.as_bytes(),
+            "push must keep the template and its bytes"
+        );
+    }
+
+    /// Writes `template` (bytes that are not UTF-8) as the `mise.toml` template and
+    /// records `mise.toml` as an unedited copy of it that was then deleted locally.
+    /// Returns the template path.
+    fn record_deleted_non_utf8_mise(local: &Path, upstream: &Path, template: &[u8]) -> PathBuf {
+        assert!(
+            std::str::from_utf8(template).is_err(),
+            "fixture is not UTF-8"
+        );
+        let path = upstream.join("projects/agents/mise.toml.jinja");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, template).unwrap();
+        let mut state = ProjectState::default();
+        state.record_file(
+            Path::new("mise.toml"),
+            SyncEngine::fingerprint(template),
+            None,
+        );
+        state.save_to_dir(local).unwrap();
+        let ctx = crate::template::TemplateContext::detect_for_project(local, "project", "generic");
+        let status = SyncEngine::new()
+            .scan_project(local, upstream, Some(&ctx))
+            .unwrap()
+            .into_iter()
+            .find(|s| s.relative_path == Path::new("mise.toml"))
+            .unwrap()
+            .status;
+        assert_eq!(status, SyncStatus::LocalDeleted, "precondition");
+        path
+    }
+
+    #[test]
+    fn test_push_never_deletes_non_utf8_jinja_template_with_logic() {
+        let engine = SyncEngine::new();
+        let local = tempdir().unwrap();
+        let upstream = tempdir().unwrap();
+        let bytes = [&[0xFF, 0xFE][..], b"[tools]\nrust = \"{{ x }}\"\n"].concat();
+        let template = record_deleted_non_utf8_mise(local.path(), upstream.path(), &bytes);
+
+        let result = push_dirs(&engine, local.path(), upstream.path());
+
+        let PushResult::Success {
+            deleted,
+            skipped_templates,
+            ..
+        } = &result
+        else {
+            panic!("push: {result:?}");
+        };
+        assert_eq!(skipped_templates, &vec![PathBuf::from("mise.toml")]);
+        assert!(deleted.is_empty(), "deleted: {deleted:?}");
+        assert_eq!(fs::read(&template).unwrap(), bytes);
+    }
+
+    #[test]
+    fn test_push_deletes_non_utf8_jinja_template_without_logic() {
+        let engine = SyncEngine::new();
+        let local = tempdir().unwrap();
+        let upstream = tempdir().unwrap();
+        let bytes = [&[0xFF, 0xFE][..], b"[tools]\nrust = \"latest\"\n"].concat();
+        let template = record_deleted_non_utf8_mise(local.path(), upstream.path(), &bytes);
+
+        let result = push_dirs(&engine, local.path(), upstream.path());
+
+        let PushResult::Success {
+            deleted,
+            skipped_templates,
+            ..
+        } = &result
+        else {
+            panic!("push: {result:?}");
+        };
+        assert_eq!(deleted, &vec![PathBuf::from("mise.toml")]);
+        assert!(
+            skipped_templates.is_empty(),
+            "skipped: {skipped_templates:?}"
+        );
+        assert!(!template.exists(), "the upstream template must be deleted");
+    }
+
+    #[test]
+    fn test_push_publishes_over_placeholder_only_static_template() {
+        let engine = SyncEngine::new();
+        let local = tempdir().unwrap();
+        let upstream = tempdir().unwrap();
+        let template_text = "[include]\n\tpath = {{ user.home }}/.gitconfig.local\n";
+        let (_, rendered) = record_rendered_gitconfig(local.path(), upstream.path(), template_text);
+        fs::write(
+            local.path().join(".gitconfig"),
+            format!("{rendered}[ude]\n\tx = 1\n"),
+        )
+        .unwrap();
+
+        let result = push_dirs(&engine, local.path(), upstream.path());
+
+        // Gate 2's decision only: the placeholder line depends on the host home that
+        // push's own scan renders with (the e2e control asserts that it survives).
+        let PushResult::Success {
+            synced_files,
+            skipped_templates,
+            ..
+        } = &result
+        else {
+            panic!("push: {result:?}");
+        };
+        assert!(
+            skipped_templates.is_empty(),
+            "skipped: {skipped_templates:?}"
+        );
+        assert_eq!(*synced_files, 1);
+        let published =
+            fs::read_to_string(upstream.path().join("projects/generic/gitconfig.repo")).unwrap();
+        assert!(published.ends_with("[ude]\n\tx = 1\n"), "{published}");
     }
 
     #[test]
