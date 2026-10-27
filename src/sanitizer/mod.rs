@@ -110,8 +110,9 @@ fn is_leading_boundary(prev: Option<char>, before_prev: Option<char>) -> bool {
 /// Whether a path match may end here; `rest` is the text after the match.
 ///
 /// The end of the text is a boundary. A `.` is one only when the text ends after
-/// it or the next char is not alphanumeric, `_` or `-` (a sentence-final `.`,
-/// not `.bak`). Any other char is a boundary unless it is alphanumeric
+/// it or the next char is not alphanumeric, `_`, `-`, `.` or `/` (a
+/// sentence-final `.`, not `.bak`, `..bak` or `./x`, which name other
+/// directories). Any other char is a boundary unless it is alphanumeric
 /// (Unicode), `_` or `-`.
 fn is_trailing_boundary(rest: &str) -> bool {
     let mut chars = rest.chars();
@@ -119,7 +120,7 @@ fn is_trailing_boundary(rest: &str) -> bool {
         None => true,
         Some('.') => chars
             .next()
-            .is_none_or(|c| !(c.is_alphanumeric() || c == '_' || c == '-')),
+            .is_none_or(|c| !(c.is_alphanumeric() || c == '_' || c == '-' || c == '.' || c == '/')),
         Some(c) => !(c.is_alphanumeric() || c == '_' || c == '-'),
     }
 }
@@ -243,10 +244,11 @@ impl Sanitizer {
     /// never parameterized). An occurrence is replaced only when both
     /// boundaries hold (`is_leading_boundary`, `is_trailing_boundary`), so
     /// `(`, `)`, `,`, `;`, `}`, quotes, whitespace, `/`, `:`, `:-` and a
-    /// sentence-final `.` delimit a path, while a word char, `.word` or a `-` that
-    /// is not part of `:-` blocks it: `/home/alice2`, `/home/alice.bak` and
-    /// `/backup-/home/alice` are never rewritten. Each pass is one left-to-right
-    /// scan (`replace_bounded`) with no regex built from the path.
+    /// sentence-final `.` delimit a path, while a word char, `.word`, `..`, `./` or
+    /// a `-` that is not part of `:-` blocks it: `/home/alice2`, `/home/alice.bak`,
+    /// `/home/alice./x` and `/backup-/home/alice` are never rewritten. Each pass
+    /// is one left-to-right scan (`replace_bounded`) with no regex built from the
+    /// path.
     ///
     /// Matching is exact substring equality on the UTF-8 text, with no Unicode
     /// normalization: an NFD spelling of an NFC home path is not matched. The
