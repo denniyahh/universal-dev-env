@@ -1,6 +1,13 @@
 //! Embedded gitleaks v8.30.1 default rules (SEC-02), matched with gitleaks' plain-text semantics.
+//!
+//! The rule file is vendored verbatim and compiled once per process. Matching
+//! follows gitleaks v8.30.1 `detect/detect.go` (`detectRule`) for plain text: no
+//! encoded-segment decoding, no `gitleaks:allow` (D-03), and no global `paths`
+//! allowlist, so no file is ever skipped whole.
 
-use super::Finding;
+use super::{Finding, line_at};
+use regex::bytes::{Regex, RegexBuilder, RegexSet, RegexSetBuilder};
+use serde::Deserialize;
 use std::path::Path;
 use std::sync::LazyLock;
 
@@ -12,31 +19,343 @@ pub const VENDORED_RULES: &str = include_str!("rules/gitleaks.toml");
 pub const VENDORED_RULES_SHA256: &str =
     "e163e53b9e7e8a8511e77271e2b323ed057759542a6d988258afe3a1fa329caf";
 
-/// A loaded gitleaks rule set.
-pub struct RuleSet;
+/// The rule file as written. Every key the vendored file uses is listed, and any
+/// other key is an error, so a silently changed schema cannot load.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawConfig {
+    #[serde(rename = "title")]
+    _title: Option<String>,
+    #[serde(rename = "minVersion")]
+    _min_version: Option<String>,
+    allowlist: Option<RawAllowlist>,
+    #[serde(default)]
+    rules: Vec<RawRule>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawRule {
+    id: String,
+    #[serde(rename = "description")]
+    _description: Option<String>,
+    regex: Option<String>,
+    entropy: Option<f64>,
+    #[serde(default)]
+    keywords: Vec<String>,
+    path: Option<String>,
+    #[serde(rename = "secretGroup")]
+    secret_group: Option<usize>,
+    #[serde(default)]
+    allowlists: Vec<RawAllowlist>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawAllowlist {
+    #[serde(rename = "description")]
+    _description: Option<String>,
+    condition: Option<String>,
+    #[serde(rename = "regexTarget")]
+    regex_target: Option<String>,
+    #[serde(default)]
+    regexes: Vec<String>,
+    #[serde(default)]
+    paths: Vec<String>,
+    #[serde(default)]
+    stopwords: Vec<String>,
+}
+
+/// How an allowlist combines its checks (gitleaks `MatchCondition`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Condition {
+    /// Any regex on the target, or any stopword in the secret.
+    Or,
+    /// Every defined check among paths, regexes and stopwords.
+    And,
+}
+
+/// What an allowlist's regexes run on (gitleaks `RegexTarget`).
+#[derive(Clone, Copy)]
+enum Target {
+    Secret,
+    Match,
+    Line,
+}
+
+#[expect(
+    dead_code,
+    reason = "read by the allowlist and path semantics of plan 02-05 Task 2"
+)]
+struct Allowlist {
+    condition: Condition,
+    target: Target,
+    regexes: Vec<Regex>,
+    paths: Vec<Regex>,
+    /// Lower-cased.
+    stopwords: Vec<Vec<u8>>,
+}
+
+#[expect(
+    dead_code,
+    reason = "read by the allowlist and path semantics of plan 02-05 Task 2"
+)]
+struct Rule {
+    id: String,
+    regex: Option<Regex>,
+    path: Option<Regex>,
+    /// Indices into [`RuleSet::keywords`]; empty means the rule always runs.
+    keywords: Vec<usize>,
+    /// Shannon-entropy floor; a secret at or below it is skipped. `None` = off.
+    entropy: Option<f64>,
+    /// Capture group holding the secret; `None` = first non-empty group.
+    secret_group: Option<usize>,
+    allowlists: Vec<Allowlist>,
+}
+
+/// A loaded gitleaks rule set: rules in file order plus the global allowlist.
+pub struct RuleSet {
+    rules: Vec<Rule>,
+    global: Option<Allowlist>,
+    /// Every distinct lower-cased keyword, one literal pattern each.
+    keywords: RegexSet,
+}
 
 impl RuleSet {
     /// Parses and compiles a gitleaks TOML rule file.
-    pub fn from_toml(_text: &str) -> Result<RuleSet, String> {
-        Ok(RuleSet)
+    ///
+    /// A parse error, an unknown key, an unknown `condition` or `regexTarget`, an
+    /// empty allowlist or any pattern that fails to compile is an `Err` naming the
+    /// rule (or `global allowlist`). Nothing is filtered away: a partial rule set
+    /// never loads.
+    pub fn from_toml(text: &str) -> Result<RuleSet, String> {
+        let raw: RawConfig =
+            toml::from_str(text).map_err(|e| format!("gitleaks rule file: {e}"))?;
+        let global = raw
+            .allowlist
+            .as_ref()
+            .map(|a| compile_allowlist(a, "global allowlist"))
+            .transpose()?;
+
+        let mut keyword_list: Vec<String> = Vec::new();
+        let mut rules = Vec::with_capacity(raw.rules.len());
+        for raw_rule in &raw.rules {
+            rules.push(compile_rule(raw_rule, &mut keyword_list)?);
+        }
+        let keywords = RegexSetBuilder::new(keyword_list.iter().map(|k| regex::escape(k)))
+            .unicode(false)
+            .build()
+            .map_err(|e| format!("gitleaks keywords: {e}"))?;
+        Ok(RuleSet {
+            rules,
+            global,
+            keywords,
+        })
     }
 
     /// Number of rules loaded.
     #[cfg(test)]
     pub fn rule_count(&self) -> usize {
-        0
+        self.rules.len()
     }
 
     /// Number of rules that carry a content regex.
     #[cfg(test)]
     pub fn regex_rule_count(&self) -> usize {
-        0
+        self.rules.iter().filter(|r| r.regex.is_some()).count()
     }
 
-    /// The first finding of any rule, in file order.
-    pub fn first_finding(&self, _bytes: &[u8], _path: &Path) -> Option<Finding> {
-        None
+    /// The first finding of any rule, in file order, with the 1-based line of the
+    /// match start. `path` is the publish-relative path for path-scoped rules.
+    pub fn first_finding(&self, bytes: &[u8], path: &Path) -> Option<Finding> {
+        // detect.go: keywords are matched against the lower-cased fragment.
+        let lowered = bytes.to_ascii_lowercase();
+        let present = self.keywords.matches(&lowered);
+        let path = path.as_os_str().as_encoded_bytes();
+        self.rules.iter().find_map(|rule| {
+            let runs =
+                rule.keywords.is_empty() || rule.keywords.iter().any(|&k| present.matched(k));
+            if !runs {
+                return None;
+            }
+            rule.first_line(bytes, path, self.global.as_ref())
+                .map(|line| Finding {
+                    rule: rule.id.clone(),
+                    line,
+                })
+        })
     }
+}
+
+impl Rule {
+    /// The line of this rule's first reported match in `bytes`, if any.
+    fn first_line(&self, bytes: &[u8], _path: &[u8], _global: Option<&Allowlist>) -> Option<usize> {
+        let regex = self.regex.as_ref()?;
+        regex.find_iter(bytes).find_map(|m| {
+            // detect.go: `secret := strings.Trim(raw[m0:m1], "\n")`.
+            let (start, end) = trim_lf(bytes, m.start(), m.end());
+            let matched = &bytes[start..end];
+            let secret = self.secret(regex, matched);
+            // detect.go: `if r.Entropy != 0 && shannonEntropy(secret) <= r.Entropy`.
+            if self
+                .entropy
+                .is_some_and(|floor| shannon_entropy(secret) <= floor)
+            {
+                return None;
+            }
+            Some(line_at(bytes, start))
+        })
+    }
+
+    /// detect.go: the regex re-run on the trimmed match; `secretGroup` when set,
+    /// else the first non-empty capture group, else the trimmed match itself.
+    fn secret<'a>(&self, regex: &Regex, matched: &'a [u8]) -> &'a [u8] {
+        let Some(groups) = regex.captures(matched) else {
+            return matched;
+        };
+        if groups.len() < 2 {
+            return matched;
+        }
+        match self.secret_group {
+            // A group that did not take part is Go's empty string.
+            Some(group) => groups.get(group).map_or(&[][..], |g| g.as_bytes()),
+            None => groups
+                .iter()
+                .skip(1)
+                .flatten()
+                .map(|g| g.as_bytes())
+                .find(|g| !g.is_empty())
+                .unwrap_or(matched),
+        }
+    }
+}
+
+/// Narrows `start..end` past LF bytes at both ends (Go `strings.Trim(s, "\n")`).
+fn trim_lf(bytes: &[u8], mut start: usize, mut end: usize) -> (usize, usize) {
+    while start < end && bytes[start] == b'\n' {
+        start += 1;
+    }
+    while end > start && bytes[end - 1] == b'\n' {
+        end -= 1;
+    }
+    (start, end)
+}
+
+/// Shannon entropy in bits, H = −Σ p_b·log2(p_b) over the distinct bytes b of
+/// `secret`, p_b = count(b) / byte length: gitleaks' `shannonEntropy`
+/// (detect/utils.go), which counts runes over the byte length and so equals this
+/// for ASCII secrets.
+fn shannon_entropy(secret: &[u8]) -> f64 {
+    if secret.is_empty() {
+        return 0.0;
+    }
+    let mut counts = [0usize; 256];
+    for &byte in secret {
+        counts[usize::from(byte)] += 1;
+    }
+    let len = secret.len() as f64;
+    counts
+        .iter()
+        .filter(|&&count| count > 0)
+        .map(|&count| {
+            let p = count as f64 / len;
+            -p * p.log2()
+        })
+        .sum()
+}
+
+fn compile_rule(raw: &RawRule, keyword_list: &mut Vec<String>) -> Result<Rule, String> {
+    let id = &raw.id;
+    let compile_field = |pattern: &Option<String>, kind: &str| {
+        pattern
+            .as_deref()
+            .filter(|p| !p.is_empty())
+            .map(|p| compile(p).map_err(|e| format!("gitleaks rule {id}: {kind}: {e}")))
+            .transpose()
+    };
+    let regex = compile_field(&raw.regex, "regex")?;
+    let path = compile_field(&raw.path, "path")?;
+    if regex.is_none() && path.is_none() {
+        return Err(format!("gitleaks rule {id}: neither regex nor path is set"));
+    }
+    let secret_group = raw.secret_group.filter(|&g| g > 0);
+    if let (Some(group), Some(regex)) = (secret_group, &regex)
+        && group >= regex.captures_len()
+    {
+        return Err(format!(
+            "gitleaks rule {id}: secretGroup {group} exceeds the regex's capture groups"
+        ));
+    }
+    let keywords = raw
+        .keywords
+        .iter()
+        .map(|k| {
+            let k = k.to_ascii_lowercase();
+            match keyword_list.iter().position(|known| *known == k) {
+                Some(index) => index,
+                None => {
+                    keyword_list.push(k);
+                    keyword_list.len() - 1
+                }
+            }
+        })
+        .collect();
+    let allowlists = raw
+        .allowlists
+        .iter()
+        .map(|a| compile_allowlist(a, &format!("rule {id} allowlist")))
+        .collect::<Result<_, _>>()?;
+    Ok(Rule {
+        id: id.clone(),
+        regex,
+        path,
+        keywords,
+        entropy: raw.entropy.filter(|&e| e != 0.0),
+        secret_group,
+        allowlists,
+    })
+}
+
+/// gitleaks `parseAllowlist` + `Validate`: `condition` is AND / && or OR / || /
+/// unset (any case), `regexTarget` is secret / match / line / unset, and at least
+/// one check must be present.
+fn compile_allowlist(raw: &RawAllowlist, owner: &str) -> Result<Allowlist, String> {
+    let condition = match raw
+        .condition
+        .as_deref()
+        .map(str::to_ascii_uppercase)
+        .as_deref()
+    {
+        None | Some("") | Some("OR") | Some("||") => Condition::Or,
+        Some("AND") | Some("&&") => Condition::And,
+        Some(other) => return Err(format!("gitleaks {owner}: unknown condition {other:?}")),
+    };
+    let target = match raw.regex_target.as_deref() {
+        None | Some("") | Some("secret") => Target::Secret,
+        Some("match") => Target::Match,
+        Some("line") => Target::Line,
+        Some(other) => return Err(format!("gitleaks {owner}: unknown regexTarget {other:?}")),
+    };
+    if raw.regexes.is_empty() && raw.paths.is_empty() && raw.stopwords.is_empty() {
+        return Err(format!("gitleaks {owner}: no regexes, paths or stopwords"));
+    }
+    let compile_all = |patterns: &[String], kind: &str| {
+        patterns
+            .iter()
+            .map(|p| compile(p).map_err(|e| format!("gitleaks {owner}: {kind}: {e}")))
+            .collect::<Result<Vec<_>, _>>()
+    };
+    Ok(Allowlist {
+        condition,
+        target,
+        regexes: compile_all(&raw.regexes, "regex")?,
+        paths: compile_all(&raw.paths, "path")?,
+        stopwords: raw
+            .stopwords
+            .iter()
+            .map(|w| w.as_bytes().to_ascii_lowercase())
+            .collect(),
+    })
 }
 
 static RULES: LazyLock<RuleSet> = LazyLock::new(|| {
@@ -49,14 +368,46 @@ pub fn vendored() -> &'static RuleSet {
     &RULES
 }
 
-/// Escapes every `{` that cannot start a repetition, as Go's regexp parser reads it.
+/// Escapes every `{` that cannot start a repetition (`{n}`, `{n,}`, `{n,m}`), as
+/// Go's regexp parser reads it: "If the repeat cannot be parsed, { is a literal."
+/// Rust rejects such a brace, so it is rewritten to `\{`. Escapes are copied as is.
 pub(crate) fn go_compat_braces(pattern: &str) -> String {
-    pattern.to_string()
+    let mut out = String::with_capacity(pattern.len());
+    let mut chars = pattern.char_indices();
+    while let Some((index, ch)) = chars.next() {
+        match ch {
+            '\\' => {
+                out.push(ch);
+                if let Some((_, escaped)) = chars.next() {
+                    out.push(escaped);
+                }
+            }
+            '{' if !starts_valid_repeat(&pattern[index + 1..]) => out.push_str("\\{"),
+            _ => out.push(ch),
+        }
+    }
+    out
 }
 
-/// Compiles one gitleaks pattern as an ASCII-mode byte regex.
-fn compile(pattern: &str) -> Result<regex::bytes::Regex, regex::Error> {
-    regex::bytes::RegexBuilder::new(&go_compat_braces(pattern))
+/// True when `rest` (the text after a `{`) begins with `\d+}` or `\d+,\d*}`.
+fn starts_valid_repeat(rest: &str) -> bool {
+    let digit_run = |s: &str| s.bytes().take_while(u8::is_ascii_digit).count();
+    let min_len = digit_run(rest);
+    if min_len == 0 {
+        return false;
+    }
+    let after_min = &rest[min_len..];
+    match after_min.strip_prefix(',') {
+        Some(after_comma) => after_comma[digit_run(after_comma)..].starts_with('}'),
+        None => after_min.starts_with('}'),
+    }
+}
+
+/// Compiles one gitleaks pattern as an ASCII-mode byte regex: Go's `\w`, `\d`,
+/// `\b` and `(?i)` are ASCII-only, and Unicode classes would also push three
+/// vendored patterns past the regex size limit.
+fn compile(pattern: &str) -> Result<Regex, regex::Error> {
+    RegexBuilder::new(&go_compat_braces(pattern))
         .unicode(false)
         .build()
 }

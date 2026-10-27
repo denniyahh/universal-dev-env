@@ -130,9 +130,10 @@ impl Sanitizer {
     /// removed is scanned too: that view is the text of UTF-16LE, UTF-16BE (with or
     /// without a BOM) and UTF-32 ASCII content, keeps every LF byte (so its line
     /// numbers equal the raw view's) and can only add findings, never remove one.
-    /// Within a view the first hit wins, in detector order.
+    /// Within a view the first hit wins, in detector order: the named rules, the
+    /// vendored gitleaks rules, then R11.
     ///
-    /// `path` is the publish-relative path, used by path-scoped rules.
+    /// `path` is the publish-relative path, used by the gitleaks path-scoped rules.
     pub fn scan_bytes(&self, bytes: &[u8], path: &Path) -> Option<Finding> {
         if let Some(finding) = self.scan_view(bytes, path) {
             return Some(finding);
@@ -144,13 +145,16 @@ impl Sanitizer {
         self.scan_view(&stripped, path)
     }
 
-    /// One detector pass over one view of the bytes. The named rules run first, so
-    /// a token they match keeps their rule name; the R11 entropy screen runs last.
-    fn scan_view(&self, bytes: &[u8], _path: &Path) -> Option<Finding> {
+    /// One detector pass over one view of the bytes, in order: the named rules (so
+    /// a token they match keeps their rule name), then the vendored gitleaks rules
+    /// (with `path` for their path-scoped rules), then the R11 entropy screen.
+    fn scan_view(&self, bytes: &[u8], path: &Path) -> Option<Finding> {
         if let Some(finding) = first_named_rule(bytes) {
             return Some(finding);
         }
-        // Plan 02-05 inserts the gitleaks rules here, between the named rules and R11.
+        if let Some(finding) = gitleaks::vendored().first_finding(bytes, path) {
+            return Some(finding);
+        }
         if let Some(line) = entropy::first_high_entropy_line(bytes) {
             return Some(Finding {
                 rule: entropy::RULE_NAME.to_string(),
