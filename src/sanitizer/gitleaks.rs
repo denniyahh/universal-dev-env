@@ -157,6 +157,12 @@ impl RuleSet {
         self.rules.iter().filter(|r| r.regex.is_some()).count()
     }
 
+    /// Every rule id, in file order.
+    #[cfg(test)]
+    pub(crate) fn rule_ids(&self) -> Vec<&str> {
+        self.rules.iter().map(|r| r.id.as_str()).collect()
+    }
+
     /// The first finding of any rule, in file order, with the 1-based line of the
     /// match start. `path` is the publish-relative path for path-scoped rules.
     pub fn first_finding(&self, bytes: &[u8], path: &Path) -> Option<Finding> {
@@ -504,9 +510,35 @@ fn compile(pattern: &str) -> Result<Regex, regex::Error> {
         .build()
 }
 
+/// The vendored rule ids the category table (`test_category_positives`) covers with
+/// one positive and one benign twin each, in table order. Shared with the
+/// uncovered-rule report so the two cannot drift apart.
+#[cfg(test)]
+const CATEGORY_RULE_IDS: [&str; 15] = [
+    "private-key",
+    "aws-access-token",
+    "gcp-api-key",
+    "github-pat",
+    "gitlab-pat",
+    "npm-access-token",
+    "pypi-upload-token",
+    "slack-bot-token",
+    "stripe-access-token",
+    "anthropic-api-key",
+    "jwt",
+    "generic-api-key",
+    "datadog-access-token",
+    "vault-batch-token",
+    "curl-auth-user",
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sanitizer::Sanitizer;
+    use crate::sanitizer::entropy::{
+        ALLOW_MARKER, SeededChars, class_cycling_token, template_corpus_files,
+    };
     use sha2::{Digest, Sha256};
 
     fn sha256_hex(bytes: &[u8]) -> String {
@@ -773,5 +805,272 @@ mod tests {
             })
         );
         assert_eq!(line_of(&path_only, "any\ncontent", "certs/a.repo"), None);
+    }
+
+    const LOWER: &str = "abcdefghijklmnopqrstuvwxyz";
+    const UPPER: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    const DIGITS: &str = "0123456789";
+
+    fn alnum() -> String {
+        format!("{LOWER}{UPPER}{DIGITS}")
+    }
+
+    /// `[\w-]`: letters, digits, `_` and `-`.
+    fn word() -> String {
+        format!("{}_-", alnum())
+    }
+
+    fn lower_digits() -> String {
+        format!("{LOWER}{DIGITS}")
+    }
+
+    /// A seeded Slack bot token (`xoxb-` + 12 and 13 digits + 24 letters/digits).
+    fn seeded_slack(chars: &mut SeededChars) -> String {
+        format!(
+            "{}-{}-{}-{}",
+            "xoxb",
+            chars.draw(DIGITS, 12),
+            chars.draw(DIGITS, 13),
+            chars.draw(&alnum(), 24)
+        )
+    }
+
+    /// One category row: the expected rule id, a positive and its benign twin.
+    struct CategoryRow {
+        rule: &'static str,
+        positive: String,
+        twin: String,
+    }
+
+    /// One row per [`CATEGORY_RULE_IDS`] entry, in that order. Every positive is
+    /// assembled at runtime from separate parts and seeded characters; each twin
+    /// keeps the prefix with a value the rule's regex or entropy floor rejects.
+    fn category_rows() -> Vec<CategoryRow> {
+        let mut chars = SeededChars::new();
+        let b64 = format!("{}+/", alnum());
+        let bare = |rule, positive: String, twin: String| CategoryRow {
+            rule,
+            positive: format!("# ref {positive}\n"),
+            twin: format!("# ref {twin}\n"),
+        };
+        let pem = |body: &str| {
+            format!(
+                "{}{}\n{body}\n{}{}\n",
+                "-----BEGIN ", "PRIVATE KEY-----", "-----END ", "PRIVATE KEY-----"
+            )
+        };
+        let aws = ["AK", "IA"].concat();
+        let aws_alphabet = format!("{UPPER}234567");
+        let gcp = ["AI", "za"].concat();
+        let github = ["ghp", "_"].concat();
+        let gitlab = ["glpat", "-"].concat();
+        let npm = ["npm", "_"].concat();
+        let pypi = ["pypi-", "AgEIcHlwaS5vcmc"].concat();
+        let stripe = ["sk", "_live_"].concat();
+        let anthropic = ["sk-ant-", "api03-"].concat();
+        let vault = ["hvb", "."].concat();
+        let generic = ["auth", "_secret = "].concat();
+        let datadog = ["data", "dog = "].concat();
+        let curl = ["cu", "rl -u deploy"].concat();
+        let jwt = |header_len: usize, chars: &mut SeededChars| {
+            let header = chars.draw(&alnum(), header_len);
+            let payload = chars.draw(&alnum(), 30);
+            format!("ey{header}.ey{payload}.{}", chars.draw(&word(), 32))
+        };
+        vec![
+            CategoryRow {
+                rule: "private-key",
+                positive: pem(&chars.draw(&b64, 64)),
+                twin: pem(&chars.draw(&b64, 8)),
+            },
+            bare(
+                "aws-access-token",
+                format!("{aws}{}", chars.draw(&aws_alphabet, 16)),
+                format!("{aws}{}", "A".repeat(16)),
+            ),
+            bare(
+                "gcp-api-key",
+                format!("{gcp}{}", chars.draw(&word(), 35)),
+                format!("{gcp}{}", chars.draw(&word(), 34)),
+            ),
+            bare(
+                "github-pat",
+                format!("{github}{}", chars.draw(&alnum(), 36)),
+                format!("{github}{}", "a".repeat(36)),
+            ),
+            bare(
+                "gitlab-pat",
+                format!("{gitlab}{}", chars.draw(&word(), 20)),
+                format!("{gitlab}{}", chars.draw(&word(), 19)),
+            ),
+            bare(
+                "npm-access-token",
+                format!("{npm}{}", chars.draw(&lower_digits(), 36)),
+                format!("{npm}{}", chars.draw(&lower_digits(), 35)),
+            ),
+            bare(
+                "pypi-upload-token",
+                format!("{pypi}{}", chars.draw(&word(), 60)),
+                format!("{pypi}{}", chars.draw(&word(), 49)),
+            ),
+            bare(
+                "slack-bot-token",
+                seeded_slack(&mut chars),
+                format!("{}-{}", "xoxb", chars.draw(DIGITS, 3)),
+            ),
+            bare(
+                "stripe-access-token",
+                format!("{stripe}{}", chars.draw(&alnum(), 24)),
+                format!("{stripe}{}", chars.draw(&alnum(), 9)),
+            ),
+            bare(
+                "anthropic-api-key",
+                format!("{anthropic}{}AA", chars.draw(&word(), 93)),
+                format!("{anthropic}{}AA", chars.draw(&word(), 92)),
+            ),
+            bare("jwt", jwt(20, &mut chars), jwt(16, &mut chars)),
+            CategoryRow {
+                rule: "generic-api-key",
+                positive: format!("{generic}{}\n", chars.draw(&alnum(), 24)),
+                twin: format!("{generic}{{{{ user.home }}}}\n"),
+            },
+            CategoryRow {
+                rule: "datadog-access-token",
+                positive: format!("{datadog}{}\n", chars.draw(&lower_digits(), 40)),
+                twin: format!("{datadog}{}\n", chars.draw(&lower_digits(), 39)),
+            },
+            bare(
+                "vault-batch-token",
+                format!("{vault}{}", chars.draw(&word(), 140)),
+                format!("{vault}{}", chars.draw(&word(), 137)),
+            ),
+            CategoryRow {
+                rule: "curl-auth-user",
+                positive: format!("# {curl}:Q{} example.invalid\n", chars.draw(&alnum(), 16)),
+                twin: format!("# {curl} example.invalid\n"),
+            },
+        ]
+    }
+
+    #[test]
+    fn test_category_positives() {
+        let rows = category_rows();
+        let table: Vec<&str> = rows.iter().map(|row| row.rule).collect();
+        assert_eq!(table, CATEGORY_RULE_IDS);
+        let path = Path::new(ANY_PATH);
+        for row in &rows {
+            let found = vendored()
+                .first_finding(row.positive.as_bytes(), path)
+                .map(|f| f.rule);
+            assert_eq!(
+                found.as_deref(),
+                Some(row.rule),
+                "positive for {}",
+                row.rule
+            );
+            let twin = vendored().first_finding(row.twin.as_bytes(), path);
+            assert_eq!(twin, None, "benign twin for {}", row.rule);
+        }
+    }
+
+    /// The number of `ids` that `table` does not name.
+    fn uncovered(ids: &[&str], table: &[&str]) -> usize {
+        ids.iter().filter(|id| !table.contains(id)).count()
+    }
+
+    #[test]
+    fn test_report_rules_without_positive_fixture() {
+        let ids = vendored().rule_ids();
+        let total = ids.len();
+        let distinct: std::collections::HashSet<&str> = CATEGORY_RULE_IDS.into_iter().collect();
+        assert_eq!(distinct.len(), CATEGORY_RULE_IDS.len(), "table ids repeat");
+        for id in CATEGORY_RULE_IDS {
+            assert!(ids.contains(&id), "{id} is not a vendored rule id");
+        }
+        // Control: a misspelled id is not a vendored rule id.
+        assert!(!ids.contains(&"slack-bot-tokens"));
+
+        let n = uncovered(&ids, &CATEGORY_RULE_IDS);
+        println!("vendored rules without a positive fixture: {n} of {total}");
+        assert_eq!(total, 222);
+        assert_eq!(n, total - CATEGORY_RULE_IDS.len());
+        // Opposite direction: one row fewer leaves one more rule uncovered.
+        assert_eq!(uncovered(&ids, &CATEGORY_RULE_IDS[1..]), n + 1);
+    }
+
+    fn slack_finding(line: usize) -> Option<Finding> {
+        Some(Finding {
+            rule: "slack-bot-token".to_string(),
+            line,
+        })
+    }
+
+    #[test]
+    fn test_marker_does_not_silence_gitleaks_rules() {
+        let sanitizer = Sanitizer::new();
+        let path = Path::new(ANY_PATH);
+        let token = seeded_slack(&mut SeededChars::new());
+        let marked = format!("# chat {token} {ALLOW_MARKER}\n");
+        assert_eq!(
+            sanitizer.scan_bytes(marked.as_bytes(), path),
+            slack_finding(1)
+        );
+
+        // Control: the marker does silence the R11 tracer token on its line.
+        let tracer = class_cycling_token();
+        let unmarked_tracer = format!("# build fingerprint {tracer}\n");
+        assert!(
+            sanitizer
+                .scan_bytes(unmarked_tracer.as_bytes(), path)
+                .is_some()
+        );
+        let marked_tracer = format!("# build fingerprint {tracer} {ALLOW_MARKER}\n");
+        assert_eq!(sanitizer.scan_bytes(marked_tracer.as_bytes(), path), None);
+    }
+
+    #[test]
+    fn test_inline_gitleaks_allow_not_honoured() {
+        let sanitizer = Sanitizer::new();
+        let path = Path::new(ANY_PATH);
+        let token = seeded_slack(&mut SeededChars::new());
+        let allow_comment = ["gitleaks", ":allow"].concat();
+        let line = format!("# chat {token} # {allow_comment}\n");
+        assert_eq!(
+            sanitizer.scan_bytes(line.as_bytes(), path),
+            slack_finding(1)
+        );
+        // Control: the comment alone is clean, so the token is what is refused.
+        let comment_only = format!("# chat # {allow_comment}\n");
+        assert_eq!(sanitizer.scan_bytes(comment_only.as_bytes(), path), None);
+    }
+
+    #[test]
+    fn test_full_scanner_templates_corpus_zero_hits() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let sanitizer = Sanitizer::new();
+        let files = template_corpus_files();
+        assert!(files.len() >= 33, "corpus has only {} files", files.len());
+        for file in &files {
+            let relative = file
+                .strip_prefix(root)
+                .expect("corpus file under the crate");
+            let bytes = std::fs::read(file).expect("read corpus file");
+            if let Some(f) = sanitizer.scan_bytes(&bytes, relative) {
+                panic!("{}: {} at line {}", relative.display(), f.rule, f.line);
+            }
+        }
+
+        // Negative control: a copy of one corpus file with a Slack token appended.
+        let relative = Path::new("templates/projects/generic/gitconfig.repo");
+        let original = std::fs::read(root.join(relative)).expect("read gitconfig template");
+        let scratch = tempfile::tempdir().expect("temp dir");
+        let copy = scratch.path().join("gitconfig.repo");
+        let token = seeded_slack(&mut SeededChars::new());
+        let mut leaked = original.clone();
+        leaked.extend_from_slice(format!("# chat {token}\n").as_bytes());
+        std::fs::write(&copy, &leaked).expect("write the copy");
+        let bytes = std::fs::read(&copy).expect("read the copy");
+        let line = 1 + original.iter().filter(|&&b| b == b'\n').count();
+        assert_eq!(sanitizer.scan_bytes(&bytes, relative), slack_finding(line));
     }
 }
