@@ -140,9 +140,27 @@ fn is_parameterizable_root(path: &str) -> bool {
             .any(|component| matches!(component, Component::Normal(_)))
 }
 
-/// Stub: returns `path` unchanged.
+/// Removes trailing path separators (`std::path::is_separator`) from a home or
+/// XDG config root; returns `path` unchanged when nothing would remain.
+///
+/// dirs-sys 0.5.0 returns `$HOME` as given and directories 6.0.0 takes
+/// `XDG_CONFIG_HOME` as given, so a trailing separator reaches every consumer.
+/// A needle ending in `/` never meets `replace_bounded`'s trailing boundary
+/// (`/home/alice/x` has a word char after it, `(/home/alice)` lacks the `/`), so
+/// an untrimmed root parameterizes nothing (review CR-01).
+///
+/// A root made only of separators (`/`, `//`) is returned as is, so
+/// `is_parameterizable_root` still rejects it instead of seeing the empty string.
+/// `push_updates`, `Sanitizer::parameterize_paths` and
+/// `TemplateContext::detect_for_project` share this helper, so rendering and
+/// parameterization use one spelling of each root. Only trailing separators are
+/// normalized: no `.` components, no repeated inner separators, no symlink
+/// resolution.
 pub fn normalize_root(path: &str) -> &str {
-    path
+    match path.trim_end_matches(std::path::is_separator) {
+        "" => path,
+        trimmed => trimmed,
+    }
 }
 
 /// Replaces each occurrence of `needle` in `content` whose leading and trailing

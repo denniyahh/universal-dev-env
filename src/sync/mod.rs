@@ -1416,6 +1416,10 @@ impl SyncEngine {
         allow_agent_rules: bool,
         persist_ancestor_immediately: bool,
     ) -> PushResult {
+        // Gate 3 and gate 5's render context must use one spelling of each root,
+        // and callers pass BaseDirs values that may end in a separator (CR-01).
+        let user_home = crate::sanitizer::normalize_root(user_home);
+        let xdg_config = crate::sanitizer::normalize_root(xdg_config);
         let dummy_ctx =
             crate::template::TemplateContext::detect_for_project(local_root, "project", "generic");
         let states = match self.scan_project(local_root, upstream_root, Some(&dummy_ctx)) {
@@ -5780,7 +5784,9 @@ mod tests {
             let (res, published) =
                 push_gitconfig_with_roots(&engine, HOME_LINES_GITCONFIG, home, xdg);
             match res {
-                PushResult::Success { synced_files, .. } if synced_files == 1 => {}
+                PushResult::Success {
+                    synced_files: 1, ..
+                } => {}
                 other => failures.push(format!(
                     "home {home:?}, xdg {xdg:?}: expected Success with 1 file, got {other:?}"
                 )),
