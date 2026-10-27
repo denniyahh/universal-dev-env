@@ -5753,6 +5753,51 @@ mod tests {
         assert_hook_published(&res, upstream.path(), &clean);
     }
 
+    /// Pushes a local `.gitconfig` holding `local_bytes` as home `/home/alice` and
+    /// returns the bytes published to the upstream template.
+    fn push_gitconfig_as_alice(local_bytes: &[u8]) -> Vec<u8> {
+        let engine = SyncEngine::new();
+        let local_dir = tempdir().unwrap();
+        let upstream_dir = tempdir().unwrap();
+        fs::write(local_dir.path().join(".gitconfig"), local_bytes).unwrap();
+        let res = engine.push_updates(
+            local_dir.path(),
+            upstream_dir.path(),
+            "/home/alice",
+            "/home/alice/.config",
+            false,
+            true,
+        );
+        assert!(
+            matches!(
+                res,
+                PushResult::Success {
+                    synced_files: 1,
+                    ..
+                }
+            ),
+            "Expected Success, got {res:?}"
+        );
+        fs::read(upstream_dir.path().join("projects/generic/gitconfig.repo")).unwrap()
+    }
+
+    #[test]
+    fn test_push_never_parameterizes_non_utf8_file() {
+        // Latin-1 e-acute (0xE9) makes the file non-UTF-8; the home path is published as is.
+        let latin1 = b"[core]\n\tp = /home/alice/x caf\xe9\n".to_vec();
+        assert!(
+            std::str::from_utf8(&latin1).is_err(),
+            "fixture must be non-UTF-8"
+        );
+        assert_eq!(push_gitconfig_as_alice(&latin1), latin1);
+
+        // Control: the same text in UTF-8 is parameterized.
+        assert_eq!(
+            push_gitconfig_as_alice("[core]\n\tp = /home/alice/x caf\u{e9}\n".as_bytes()),
+            "[core]\n\tp = {{ user.home }}/x caf\u{e9}\n".as_bytes()
+        );
+    }
+
     /// UTF-16LE with the BOM bytes 0xFF 0xFE.
     fn utf16le_bom(text: &str) -> Vec<u8> {
         let mut out = vec![0xFF, 0xFE];
