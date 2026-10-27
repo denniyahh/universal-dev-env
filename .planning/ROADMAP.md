@@ -71,7 +71,7 @@ Plans:
   3. Path parameterization matches only full word and punctuation boundaries (`\b`, path delimiters), preventing corruption of partial substring tokens.
   4. Sanitizer round-tripping verifies that templated tokens substitute back cleanly to local machine environments on initialization.
 
-**Plans**: 7/8 plans executed
+**Plans**: 8/8 plans executed
 
 Plans:
 **Wave 1**
@@ -90,7 +90,7 @@ Plans:
 - [x] 02-07: Word/punctuation boundary predicate for path parameterization, degenerate-home guard, round-trip properties, mutation gate, placeholder doc fix (SEC-03, SEC-04).
 
 **Wave 5** *(blocked on Wave 4 completion)*
-- [ ] 02-08: Push render-back reversibility gate (`PushResult::ReversibilityBlocked`, exit 1, no template text in the reason), one render rule for scan/pull, staged and committed blobs bound to the fingerprints of the validated bytes, hermeticity gate (SEC-04).
+- [x] 02-08: Push render-back reversibility gate (`PushResult::ReversibilityBlocked`, exit 1, no template text in the reason), one render rule for scan/pull, staged and committed blobs bound to the fingerprints of the validated bytes, hermeticity gate (SEC-04).
 
 ### Phase 3: Doctor & CLI Hardening
 
@@ -138,7 +138,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Sync Engine & State Hermeticity | 11/11 | Complete    | 2026-10-22 |
-| 2. Sanitizer, Boundaries & Security Hardening | 7/8 | In Progress | - |
+| 2. Sanitizer, Boundaries & Security Hardening | 8/8 | In Progress | - |
 | 3. Doctor & CLI Hardening | 0/4 | Not started | - |
 | 4. Templates, Archetypes & Manifest Decoupling | 0/3 | Not started | - |
 
