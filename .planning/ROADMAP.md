@@ -71,7 +71,7 @@ Plans:
   3. Path parameterization matches only full word and punctuation boundaries (`\b`, path delimiters), preventing corruption of partial substring tokens.
   4. Sanitizer round-tripping verifies that templated tokens substitute back cleanly to local machine environments on initialization.
 
-**Plans**: 8/8 plans executed
+**Plans**: 8/10 plans executed
 
 Plans:
 **Wave 1**
@@ -91,6 +91,12 @@ Plans:
 
 **Wave 5** *(blocked on Wave 4 completion)*
 - [x] 02-08: Push render-back reversibility gate (`PushResult::ReversibilityBlocked`, exit 1, no template text in the reason), one render rule for scan/pull, staged and committed blobs bound to the fingerprints of the validated bytes, hermeticity gate (SEC-04).
+
+**Wave 6** *(gap closure; blocked on Wave 5 completion)*
+- [ ] 02-09: Trailing-separator HOME / XDG roots normalized (`sanitizer::normalize_root`) in push_updates, parameterize_paths and `TemplateContext::detect_for_project`; a root of only separators stays rejected (verification gap 1, CR-01) (SEC-03, SEC-04).
+
+**Wave 7** *(gap closure; blocked on Wave 6 completion)*
+- [ ] 02-10: Push gate 2 (`template_has_logic`) decides with `template::should_render`, so an edit over a static template with `{{ git_email }}` is skipped and a consumer's init gets its own value (verification gap 2, CR-02, ROADMAP SC4); phase final gates (SEC-04).
 
 ### Phase 3: Doctor & CLI Hardening
 
@@ -138,7 +144,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Sync Engine & State Hermeticity | 11/11 | Complete    | 2026-10-22 |
-| 2. Sanitizer, Boundaries & Security Hardening | 8/8 | In Progress | - |
+| 2. Sanitizer, Boundaries & Security Hardening | 8/10 | In Progress | - |
 | 3. Doctor & CLI Hardening | 0/4 | Not started | - |
 | 4. Templates, Archetypes & Manifest Decoupling | 0/3 | Not started | - |
 
