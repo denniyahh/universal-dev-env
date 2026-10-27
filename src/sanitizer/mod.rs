@@ -1,7 +1,6 @@
 pub mod entropy;
 pub mod gitleaks;
 
-use regex::Regex;
 use std::path::{Component, Path};
 use std::sync::LazyLock;
 
@@ -93,6 +92,62 @@ fn first_named_rule(bytes: &[u8]) -> Option<Finding> {
     })
 }
 
+/// Whether a path match may start here. `prev` is the char directly before the
+/// match and `before_prev` the one before that (`None` at the start of the text).
+///
+/// The start of the text is a boundary. A `-` is one only directly after `:`, the
+/// shell default `${VAR:-...}`, so `/backup-/home/alice` and `x-/home/alice` are
+/// not. Any other char is a boundary unless it is alphanumeric (Unicode), `_`
+/// or `.`.
+fn is_leading_boundary(prev: Option<char>, before_prev: Option<char>) -> bool {
+    match prev {
+        None => true,
+        Some('-') => before_prev == Some(':'),
+        Some(c) => !(c.is_alphanumeric() || c == '_' || c == '.'),
+    }
+}
+
+/// Whether a path match may end here; `rest` is the text after the match.
+///
+/// The end of the text is a boundary. A `.` is one only when the text ends after
+/// it or the next char is not alphanumeric, `_` or `-` (a sentence-final `.`,
+/// not `.bak`). Any other char is a boundary unless it is alphanumeric
+/// (Unicode), `_` or `-`.
+fn is_trailing_boundary(rest: &str) -> bool {
+    let mut chars = rest.chars();
+    match chars.next() {
+        None => true,
+        Some('.') => chars
+            .next()
+            .is_none_or(|c| !(c.is_alphanumeric() || c == '_' || c == '-')),
+        Some(c) => !(c.is_alphanumeric() || c == '_' || c == '-'),
+    }
+}
+
+/// Replaces each occurrence of `needle` in `content` whose leading and trailing
+/// boundaries both hold with `placeholder`, in one left-to-right pass over
+/// `str::match_indices`. Everything else is copied through unchanged.
+///
+/// Boundaries are read from `content`, never from the output, so a replacement
+/// cannot create a boundary for the next occurrence.
+fn replace_bounded(content: &str, needle: &str, placeholder: &str) -> String {
+    let mut out = String::with_capacity(content.len());
+    let mut copied = 0;
+    for (start, _) in content.match_indices(needle) {
+        let end = start + needle.len();
+        let mut before = content[..start].chars().rev();
+        let prev = before.next();
+        let before_prev = before.next();
+        if is_leading_boundary(prev, before_prev) && is_trailing_boundary(&content[end..]) {
+            out.push_str(&content[copied..start]);
+            out.push_str(placeholder);
+            copied = end;
+        }
+    }
+    out.push_str(&content[copied..]);
+    out
+}
+
 /// Secret scanning, home-path parameterization and the local-only path boundary.
 ///
 /// Holds no state: the secret rules are process-wide statics compiled once.
@@ -164,43 +219,28 @@ impl Sanitizer {
         None
     }
 
-    /// Parameterizes hardcoded user home and config paths into portable tokens.
-    /// Strictly asserts on leading and trailing path boundaries so neighboring paths
-    /// (e.g. /home/user2 or /backup/home/user) are never corrupted.
+    /// Replaces the pusher's XDG config path with `{{ user.xdg_config }}` and home
+    /// path with `{{ user.home }}`, the two placeholders push publishes (SEC-03).
+    ///
+    /// The XDG path goes first, and only when it is non-empty and differs from the
+    /// home path; then the home path. An occurrence is replaced only when both
+    /// boundaries hold (`is_leading_boundary`, `is_trailing_boundary`), so
+    /// `(`, `)`, `,`, `;`, `}`, quotes, whitespace, `/`, `:`, `:-` and a
+    /// sentence-final `.` delimit a path, while a word char, `.word` or a `-` that
+    /// is not part of `:-` blocks it: `/home/alice2`, `/home/alice.bak` and
+    /// `/backup-/home/alice` are never rewritten. Each pass is one left-to-right
+    /// scan (`replace_bounded`) with no regex built from the path.
+    ///
+    /// Matching is exact substring equality on the UTF-8 text, with no Unicode
+    /// normalization: an NFD spelling of an NFC home path is not matched. The
+    /// boundary table is `tests::test_path_boundary_table`.
     pub fn parameterize_paths(&self, content: &str, user_home: &str, xdg_config: &str) -> String {
         let mut result = content.to_string();
-
         if !xdg_config.is_empty() && xdg_config != user_home {
-            let pattern = format!(
-                r#"(^|[^A-Za-z0-9_.\-]){}([/\\"'\s:]|$)"#,
-                regex::escape(xdg_config)
-            );
-            if let Ok(re) = Regex::new(&pattern) {
-                loop {
-                    let next = re
-                        .replace_all(&result, "${1}{{ user.xdg_config }}$2")
-                        .to_string();
-                    if next == result {
-                        break;
-                    }
-                    result = next;
-                }
-            }
+            result = replace_bounded(&result, xdg_config, "{{ user.xdg_config }}");
         }
         if !user_home.is_empty() {
-            let pattern = format!(
-                r#"(^|[^A-Za-z0-9_.\-]){}([/\\"'\s:]|$)"#,
-                regex::escape(user_home)
-            );
-            if let Ok(re) = Regex::new(&pattern) {
-                loop {
-                    let next = re.replace_all(&result, "${1}{{ user.home }}$2").to_string();
-                    if next == result {
-                        break;
-                    }
-                    result = next;
-                }
-            }
+            result = replace_bounded(&result, user_home, "{{ user.home }}");
         }
         result
     }
