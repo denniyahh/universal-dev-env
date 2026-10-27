@@ -223,7 +223,7 @@ run the pin test as a separate required job.
 **Fix:** State the limits. Point to `entropy.rs` for the R11 detection rates and to the
 `test_path_boundary_table` rows for which spellings are rewritten.
 
-### IN-05 (pre-existing, outside the phase diff): the TypeSafe drift check sends unparameterized AGENTS.md text to an external API
+### IN-05: The TypeSafe drift check sends unparameterized AGENTS.md text to an external API (pre-existing, outside the phase diff)
 
 **File:** `src/main.rs:1079-1100`
 **Issue:** Before `evaluate_drift`, the local `.agents/AGENTS.md` is only secret-scanned
