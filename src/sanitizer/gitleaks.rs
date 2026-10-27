@@ -83,10 +83,6 @@ enum Target {
     Line,
 }
 
-#[expect(
-    dead_code,
-    reason = "read by the allowlist and path semantics of plan 02-05 Task 2"
-)]
 struct Allowlist {
     condition: Condition,
     target: Target,
@@ -96,10 +92,6 @@ struct Allowlist {
     stopwords: Vec<Vec<u8>>,
 }
 
-#[expect(
-    dead_code,
-    reason = "read by the allowlist and path semantics of plan 02-05 Task 2"
-)]
 struct Rule {
     id: String,
     regex: Option<Regex>,
@@ -188,22 +180,45 @@ impl RuleSet {
 }
 
 impl Rule {
-    /// The line of this rule's first reported match in `bytes`, if any.
-    fn first_line(&self, bytes: &[u8], _path: &[u8], _global: Option<&Allowlist>) -> Option<usize> {
+    /// The line of this rule's first reported match in `bytes`, if any, following
+    /// detect.go `detectRule` step by step.
+    fn first_line(&self, bytes: &[u8], path: &[u8], global: Option<&Allowlist>) -> Option<usize> {
+        // detect.go `checkCommitOrPathAllowed(fragment, r.Allowlists)`: a rule
+        // allowlist can skip this rule for the whole file by its path.
+        if self.allowlists.iter().any(|a| a.skips_file(path)) {
+            return None;
+        }
+        // detect.go `if r.Path != nil`: a path-only rule reports the file itself;
+        // a rule with both a path and a regex runs only on a matching path.
+        if let Some(path_regex) = &self.path {
+            let path_matches = path_regex.is_match(path);
+            if self.regex.is_none() {
+                return path_matches.then_some(1);
+            }
+            if !path_matches {
+                return None;
+            }
+        }
         let regex = self.regex.as_ref()?;
         regex.find_iter(bytes).find_map(|m| {
             // detect.go: `secret := strings.Trim(raw[m0:m1], "\n")`.
             let (start, end) = trim_lf(bytes, m.start(), m.end());
-            let matched = &bytes[start..end];
-            let secret = self.secret(regex, matched);
+            let candidate = Candidate {
+                secret: self.secret(regex, &bytes[start..end]),
+                matched: &bytes[start..end],
+                line: line_span(bytes, start, end),
+            };
             // detect.go: `if r.Entropy != 0 && shannonEntropy(secret) <= r.Entropy`.
             if self
                 .entropy
-                .is_some_and(|floor| shannon_entropy(secret) <= floor)
+                .is_some_and(|floor| shannon_entropy(candidate.secret) <= floor)
             {
                 return None;
             }
-            Some(line_at(bytes, start))
+            // detect.go `checkFindingAllowed`: the global allowlist, then the rule's.
+            let allowed = global.is_some_and(|a| a.allows(&candidate, path))
+                || self.allowlists.iter().any(|a| a.allows(&candidate, path));
+            (!allowed).then(|| line_at(bytes, start))
         })
     }
 
@@ -228,6 +243,83 @@ impl Rule {
                 .unwrap_or(matched),
         }
     }
+}
+
+/// One match as the allowlists see it (gitleaks `finding.Secret`, `.Match` and
+/// `.Line`).
+struct Candidate<'a> {
+    secret: &'a [u8],
+    /// The LF-trimmed match.
+    matched: &'a [u8],
+    /// The whole line(s) holding the match.
+    line: &'a [u8],
+}
+
+impl Allowlist {
+    /// detect.go `checkCommitOrPathAllowed`, path half: OR skips the file when a
+    /// path regex matches; AND skips it only when it has no regexes and no
+    /// stopwords (those are checked per finding) and its paths match. An empty
+    /// path (the check_secrets wrapper) never skips. Only rule allowlists call
+    /// this: the global `paths` never skip a whole file (assumption A4).
+    fn skips_file(&self, path: &[u8]) -> bool {
+        if self.condition == Condition::And
+            && (!self.regexes.is_empty() || !self.stopwords.is_empty())
+        {
+            return false;
+        }
+        self.path_allowed(path)
+    }
+
+    /// detect.go `checkFindingAllowed` for one allowlist. OR: a regex matches the
+    /// target or a stopword occurs in the lower-cased secret. AND: every defined
+    /// check among paths, regexes and stopwords holds.
+    fn allows(&self, candidate: &Candidate<'_>, path: &[u8]) -> bool {
+        let target = match self.target {
+            Target::Secret => candidate.secret,
+            Target::Match => candidate.matched,
+            Target::Line => candidate.line,
+        };
+        // gitleaks `RegexAllowed` and `ContainsStopWord` are false on empty input.
+        let regex_allowed = !target.is_empty() && self.regexes.iter().any(|r| r.is_match(target));
+        let lowered = candidate.secret.to_ascii_lowercase();
+        let stopword = self.stopwords.iter().any(|word| contains(&lowered, word));
+        match self.condition {
+            Condition::Or => regex_allowed || stopword,
+            Condition::And => {
+                (self.paths.is_empty() || self.path_allowed(path))
+                    && (self.regexes.is_empty() || regex_allowed)
+                    && (self.stopwords.is_empty() || stopword)
+            }
+        }
+    }
+
+    /// gitleaks `PathAllowed`: false for an empty path or when no path regex matches.
+    fn path_allowed(&self, path: &[u8]) -> bool {
+        !path.is_empty() && self.paths.iter().any(|r| r.is_match(path))
+    }
+}
+
+/// True when `needle` is a non-empty run inside `haystack` (an empty stopword
+/// never allows anything).
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    !needle.is_empty()
+        && haystack
+            .windows(needle.len())
+            .any(|window| window == needle)
+}
+
+/// The bytes from the start of the line holding `start` to the end of the line
+/// holding `end` (gitleaks `finding.Line`), without the line terminators.
+fn line_span(bytes: &[u8], start: usize, end: usize) -> &[u8] {
+    let line_start = bytes[..start]
+        .iter()
+        .rposition(|&b| b == b'\n')
+        .map_or(0, |i| i + 1);
+    let line_end = bytes[end..]
+        .iter()
+        .position(|&b| b == b'\n')
+        .map_or(bytes.len(), |i| end + i);
+    &bytes[line_start..line_end]
 }
 
 /// Narrows `start..end` past LF bytes at both ends (Go `strings.Trim(s, "\n")`).
