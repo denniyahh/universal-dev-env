@@ -283,6 +283,55 @@ None. No external service configuration is required.
 - TDD gates: a `test(02-07)` RED commit precedes each `feat(02-07)` GREEN commit (95cfe96 -> da5d005, 3e71f66 -> cb588c1).
 - No `.unwrap()` in non-test code of src/sanitizer/mod.rs. Comments were stripped, the first `#[cfg(test)]` is at line 311 of 862, and a planted `.unwrap()` trips the check.
 
+## Post-plan amendment (2026-10-27): trailing-dot rule
+
+**Defect.** `is_trailing_boundary` treated a `.` right after the home path as a boundary whenever the next char was not alphanumeric, `_` or `-`. So `/home/alice..bak` became `{{ user.home }}..bak` and `/home/alice./x` became `{{ user.home }}./x`. Those name other directories (`alice..bak`, `alice.`), which broke the rule that only the pusher's own home is rewritten. This was the open choice under Issues Encountered above.
+
+**Operator decision.** Tighten the rule. A `.` is a trailing boundary only at the end of the text, or when the next char is not alphanumeric, `_`, `-`, `.` or `/`.
+- Accepted cost: these rare shapes are published raw, with the username in them. One example is a sentence ending in an ellipsis right after the path (`/home/alice...`).
+
+**Commits.**
+- `2a2a78b` test(02-07): pin that a dot before a dot or slash is not a boundary (RED).
+  - Adds 7 boundary-table rows (29 rows total).
+  - Must stay byte-identical: `/home/alice..bak`, `/home/alice./x`, `/home/alice.../y`.
+  - Must still be rewritten (sentence-final): `/home/alice. next`, `/home/alice.)`, `/home/alice.\n`. The `see /home/alice.` and `see /home/alice. Then` rows already existed.
+- `3c99371` fix(02-07): treat a dot before a dot or slash as part of the path (GREEN).
+  - Adds `.` and `/` to the `.` arm of `is_trailing_boundary`.
+  - Updates its doc comment and the `parameterize_paths` doc.
+  - No file under docs/ describes the dot rule, so no doc file changed. `rg` over docs/, README.md and AGENTS.md found no such text.
+
+**RED evidence.** `cargo nextest run --no-fail-fast --bin ude test_path_boundary_table` exited 100 (JUnit: 1 run, 1 failed).
+- The message reads "3 of 29 boundary rows failed" and names exactly the three new dot-dot / dot-slash rows. The four sentence-final rows passed, as intended.
+- Classifier: `RED_EVIDENCE_OK` / `target_test_failed`. The record is `target/gsd-red-amend/02-07-amend-table.json` (gitignored).
+- Negative control: the same report with the target `sanitizer::tests::test_path_encoding_rows`, which did not run, gives `INVALID_RED` / `no_target_test_failure`.
+- Semantic assessment: valid RED. The target ran and failed on its planned assertion, not on setup or compilation.
+
+**Mutation gate (Task 3 re-run, same `-boundaries` paths and commands).**
+- Listed: 38 mutants (34 before). The 4 new ones are the two new `||` and two new `==` operators in the `.` arm.
+- Run: exit 0. `Found 38 mutants to test`: 38 caught, 0 missed, 0 timeouts, 0 unviable. Wall time about 4 min (08:20:23Z to 08:24:33Z). All four new mutants (123:75, 123:87, 123:80, 123:92) are in caught.txt.
+- No survivors, so no new killing tests were needed.
+- Reproduction command: a Claude Code safety check blocked the verbatim command, because it contains `rm`. Its run-exit-not-3 branch was run by hand: it printed "no timeouts to reproduce (gate run exit 0)" and recorded 0. That branch removes nothing, since neither the hangs file nor the solo directory existed.
+- Check command: run verbatim, exit 0. The baseline ran 19 tests, all in `sanitizer::tests::`. caught.txt and outcomes.json both say 38.
+- Exclusions: none. There is no `.cargo/mutants.toml`.
+- Scratch paths removed: `target/mutants-boundaries`, `-tmp`, `-run.log`, `-run.exit`, `-repro.exit`. `ls target/mutants-boundaries*` finds nothing.
+- After the run, `git status --porcelain` was clean and `git config --local --list` matched the copy taken before.
+
+**Full gate after `3c99371`.** All of these exit 0:
+- `cargo fmt --check`
+- `cargo clippy --workspace --all-targets -- -D warnings`
+- `cargo test` (199 unit with 1 ignored, and 82 e2e)
+- `cargo deny check`: advisories, bans, licenses and sources all ok
+- `cargo machete`
+
+`git diff --exit-code -- Cargo.toml Cargo.lock` also exits 0.
+
+**What this does not establish.**
+- The rows pin three dot-dot / dot-slash shapes and four sentence-final shapes. No property asserts that a `.` followed by `.` or `/` stays raw.
+  - `prop_no_partial_substring_corruption`'s delimiter suffix has no `.`.
+  - `prop_parameterize_render_roundtrip` can generate such text, but it passes under either rule.
+  - Only the table rows and the mutation gate cover the new arm.
+- A clean mutation run shows each operator in the five functions is pinned by some test. It does not show the rule is the right one for every text shape.
+
 ---
 *Phase: 02-sanitizer-boundaries-security-hardening*
 *Completed: 2026-10-27*
