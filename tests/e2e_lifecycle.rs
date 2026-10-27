@@ -4231,3 +4231,184 @@ fn test_missing_tracked_file_hint_offers_copy_for_plain_template() {
     assert!(hint.contains("or copy"), "{hint}");
     assert!(!hint.contains("re-render"), "{hint}");
 }
+
+const FIXTURE_LOWER: &str = "abcdefghijklmnopqrstuvwxyz";
+const FIXTURE_UPPER: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+const FIXTURE_DIGITS: &str = "0123456789";
+
+/// Seeded fixture characters for secret-shaped values: each character is one
+/// uniform `proptest::sample::select` draw over an explicit alphabet, on proptest's
+/// fixed deterministic seed. The binary's `SeededChars` is `#[cfg(test)]` inside a
+/// binary-only crate, so this crate keeps its own copy of the same draw.
+struct FixtureChars {
+    runner: proptest::test_runner::TestRunner,
+}
+
+impl FixtureChars {
+    fn new() -> Self {
+        Self {
+            runner: proptest::test_runner::TestRunner::deterministic(),
+        }
+    }
+
+    /// `len` characters, each drawn uniformly from the characters of `alphabet`.
+    fn draw(&mut self, alphabet: &str, len: usize) -> String {
+        use proptest::strategy::{Strategy, ValueTree};
+        let strategy = proptest::sample::select(alphabet.chars().collect::<Vec<char>>());
+        (0..len)
+            .map(|_| {
+                strategy
+                    .new_tree(&mut self.runner)
+                    .expect("select over a non-empty alphabet never rejects")
+                    .current()
+            })
+            .collect()
+    }
+}
+
+/// One gitleaks-only fixture: the expected rule id, the line appended to
+/// `.gitconfig`, and the secret text that must never be printed.
+struct GitleaksFixture {
+    rule: &'static str,
+    line: String,
+    secret: String,
+}
+
+/// One runtime-built positive for each gitleaks category that none of the UDE named
+/// rules covers, so a refusal naming the rule id can only come from the gitleaks
+/// rules. Every value is assembled from separate parts plus seeded characters.
+fn gitleaks_only_fixtures(chars: &mut FixtureChars) -> Vec<GitleaksFixture> {
+    let alnum = format!("{FIXTURE_LOWER}{FIXTURE_UPPER}{FIXTURE_DIGITS}");
+    let word = format!("{alnum}_-");
+    let lower_digits = format!("{FIXTURE_LOWER}{FIXTURE_DIGITS}");
+    let bare = |rule, secret: String| GitleaksFixture {
+        rule,
+        line: format!("# ref {secret}\n"),
+        secret,
+    };
+    let slack = format!(
+        "{}-{}-{}-{}",
+        "xoxb",
+        chars.draw(FIXTURE_DIGITS, 12),
+        chars.draw(FIXTURE_DIGITS, 13),
+        chars.draw(&alnum, 24)
+    );
+    let stripe = format!("{}{}{}", "sk", "_live_", chars.draw(&alnum, 24));
+    let gcp = format!("{}{}{}", "AI", "za", chars.draw(&word, 35));
+    let npm = format!("{}{}{}", "npm", "_", chars.draw(&lower_digits, 36));
+    let pypi = format!("{}{}{}", "pypi-", "AgEIcHlwaS5vcmc", chars.draw(&word, 60));
+    let anthropic = format!("{}{}{}{}", "sk-ant-", "api03-", chars.draw(&word, 93), "AA");
+    let vault = format!("{}{}{}", "hvb", ".", chars.draw(&word, 140));
+    let jwt_header = chars.draw(&alnum, 20);
+    let jwt_payload = chars.draw(&alnum, 30);
+    let jwt = format!("ey{jwt_header}.ey{jwt_payload}.{}", chars.draw(&word, 32));
+    let datadog = chars.draw(&lower_digits, 40);
+    let curl_password = format!("Q{}", chars.draw(&alnum, 16));
+    let curl_credential = format!("{}:{curl_password}", "deploy");
+    vec![
+        bare("slack-bot-token", slack),
+        bare("stripe-access-token", stripe),
+        bare("gcp-api-key", gcp),
+        bare("npm-access-token", npm),
+        bare("pypi-upload-token", pypi),
+        bare("anthropic-api-key", anthropic),
+        bare("vault-batch-token", vault),
+        GitleaksFixture {
+            rule: "datadog-access-token",
+            line: format!("{} = {datadog}\n", "datadog"),
+            secret: datadog,
+        },
+        GitleaksFixture {
+            rule: "curl-auth-user",
+            line: format!("# {} -u {curl_credential} example.invalid\n", "curl"),
+            secret: curl_password,
+        },
+        bare("jwt", jwt),
+    ]
+}
+
+#[test]
+fn test_push_refuses_gitleaks_categories_without_printing_value() {
+    let temp = tempdir().unwrap();
+    let ude = sync_cli(temp.path());
+    let project = project_with_local_templates(temp.path(), "project");
+    reinit_rust(&ude, &project);
+    let template = project.join(GITCONFIG_TEMPLATE);
+    let local = project.join(".gitconfig");
+    let template_before = fs::read(&template).unwrap();
+    let local_before = fs::read(&local).unwrap();
+    assert_eq!(
+        local_before.last(),
+        Some(&b'\n'),
+        "the fixture appends a line"
+    );
+    let appended_line = 1 + local_before.iter().filter(|&&b| b == b'\n').count();
+
+    let mut chars = FixtureChars::new();
+    let fixtures = gitleaks_only_fixtures(&mut chars);
+    assert_eq!(fixtures.len(), 10);
+    let with_line = |line: &str| [local_before.as_slice(), line.as_bytes()].concat();
+
+    for fixture in &fixtures {
+        fs::write(&local, with_line(&fixture.line)).unwrap();
+        let push = ude(&project, &["sync", "push"]);
+        let stdout = String::from_utf8_lossy(&push.stdout);
+        let stderr = String::from_utf8_lossy(&push.stderr);
+        let rule = fixture.rule;
+        // Failure messages carry the rule id and the streams with the value redacted.
+        let redacted = || {
+            format!(
+                "exit {:?}\nOut: {}\nErr: {}",
+                push.status.code(),
+                stdout.replace(&fixture.secret, "<redacted>"),
+                stderr.replace(&fixture.secret, "<redacted>")
+            )
+        };
+        assert_eq!(push.status.code(), Some(1), "{rule}: {}", redacted());
+        assert!(stderr.contains(".gitconfig"), "{rule}: {}", redacted());
+        assert!(
+            stderr.contains(&format!("{rule} at line {appended_line}")),
+            "{rule}: {}",
+            redacted()
+        );
+        assert!(
+            !stdout.contains(&fixture.secret) && !stderr.contains(&fixture.secret),
+            "{rule}: the refusal printed the value"
+        );
+        assert_eq!(
+            fs::read(&template).unwrap(),
+            template_before,
+            "{rule}: push changed the shared template"
+        );
+        fs::write(&local, &local_before).unwrap();
+    }
+
+    // No flag bypasses the scan.
+    let slack = &fixtures[0];
+    assert_eq!(slack.rule, "slack-bot-token");
+    fs::write(&local, with_line(&slack.line)).unwrap();
+    let forced = ude(&project, &["sync", "push", "--force"]);
+    let forced_streams = [&forced.stdout, &forced.stderr]
+        .map(|stream| String::from_utf8_lossy(stream).replace(&slack.secret, "<redacted>"));
+    assert_eq!(forced.status.code(), Some(1), "{forced_streams:?}");
+    assert!(
+        forced_streams[1].contains("slack-bot-token"),
+        "{forced_streams:?}"
+    );
+    assert_eq!(
+        fs::read(&template).unwrap(),
+        template_before,
+        "push --force published a gitleaks-only token"
+    );
+
+    // Negative control: the same prefix with too few digits fails the rule and pushes.
+    let benign = format!("# ref {}-{}\n", "xoxb", chars.draw(FIXTURE_DIGITS, 3));
+    fs::write(&local, with_line(&benign)).unwrap();
+    let push = ude(&project, &["sync", "push"]);
+    assert_eq!(push.status.code(), Some(0), "{}", outputs(&push));
+    assert!(
+        String::from_utf8_lossy(&fs::read(&template).unwrap()).contains(benign.trim_end()),
+        "the benign twin was not published. {}",
+        outputs(&push)
+    );
+}
