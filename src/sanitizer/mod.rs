@@ -513,6 +513,189 @@ mod tests {
     }
 
     #[test]
+    fn test_degenerate_home_not_parameterized() {
+        let sanitizer = Sanitizer::new();
+        let xdg = "/home/alice/.config";
+        let content = "/etc/x /home/alice/y ./z";
+        // The `.` fallback when no home is found, HOME=/ in a container, an empty
+        // or relative home: none of them is a path to parameterize.
+        for home in ["/", "//", ".", "", "home/alice"] {
+            assert_eq!(
+                sanitizer.parameterize_paths(content, home, xdg),
+                content,
+                "home {home:?} rewrote the text"
+            );
+        }
+
+        // A degenerate XDG path is ignored the same way; the home pass still runs.
+        let with_relative = "/etc/x /home/alice/y ./z =home/alice/.config/q";
+        let home_only = "/etc/x {{ user.home }}/y ./z =home/alice/.config/q";
+        for xdg in ["/", "//", ".", "home/alice/.config"] {
+            assert_eq!(
+                sanitizer.parameterize_paths(with_relative, "/home/alice", xdg),
+                home_only,
+                "xdg {xdg:?} rewrote the text"
+            );
+        }
+
+        // Positive control: a real home path is still parameterized.
+        assert_eq!(
+            sanitizer.parameterize_paths(content, "/home/alice", xdg),
+            "/etc/x {{ user.home }}/y ./z"
+        );
+    }
+
+    #[test]
+    fn test_path_encoding_rows() {
+        let sanitizer = Sanitizer::new();
+        let home = "/home/alice";
+        let xdg = "/home/alice/.config";
+        // The boundary test reads the neighbouring code point with char::is_alphanumeric.
+        assert_eq!(
+            sanitizer.parameterize_paths("/home/alice\u{e9}", home, xdg),
+            "/home/alice\u{e9}"
+        );
+        assert_eq!(
+            sanitizer.parameterize_paths("/home/alice\u{2192}x", home, xdg),
+            "{{ user.home }}\u{2192}x"
+        );
+        assert_eq!(
+            sanitizer.parameterize_paths("\u{e9}/home/alice", home, xdg),
+            "\u{e9}/home/alice"
+        );
+        assert_eq!(sanitizer.parameterize_paths("", home, xdg), "");
+
+        // Exact code points, no Unicode normalization: an NFD spelling of an NFC
+        // home path is not matched (documented behaviour).
+        let nfc_home = "/home/jos\u{e9}";
+        let nfc_xdg = "/home/jos\u{e9}/.config";
+        let nfd_text = "/home/jose\u{301}/x";
+        assert_eq!(
+            sanitizer.parameterize_paths(nfd_text, nfc_home, nfc_xdg),
+            nfd_text
+        );
+        // Control: the NFC spelling of the same path is replaced.
+        assert_eq!(
+            sanitizer.parameterize_paths("/home/jos\u{e9}/x", nfc_home, nfc_xdg),
+            "{{ user.home }}/x"
+        );
+    }
+
+    /// A template context whose home and XDG config paths are `home` and `xdg`,
+    /// built by hand so no git or environment lookup runs.
+    fn home_context(home: &str, xdg: &str) -> crate::template::TemplateContext {
+        crate::template::TemplateContext {
+            user: crate::template::UserContext {
+                home: home.to_string(),
+                xdg_config: xdg.to_string(),
+                xdg_data: format!("{home}/.local/share"),
+            },
+            user_home: home.to_string(),
+            xdg_config: xdg.to_string(),
+            xdg_data: format!("{home}/.local/share"),
+            git_user_name: "Alice".to_string(),
+            git_email: "alice@example.com".to_string(),
+            project_name: "sample-proj".to_string(),
+            project_type: "generic".to_string(),
+            maintainer_ssh_pubkey: None,
+            agent_ssh_pubkey: None,
+            extra: std::collections::HashMap::new(),
+        }
+    }
+
+    /// One piece of a round-trip text: `kind` picks the shape, `word` and
+    /// `delimiter` fill it.
+    fn roundtrip_piece(kind: u8, word: &str, delimiter: char, home: &str, xdg: &str) -> String {
+        match kind {
+            0 => home.to_string(),
+            1 => xdg.to_string(),
+            2 => format!("{home}/{word}"),
+            3 => format!("{xdg}/{word}"),
+            4 => word.to_string(),
+            5 => delimiter.to_string(),
+            6 => "2".to_string(),
+            _ => ".bak".to_string(),
+        }
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn prop_no_partial_substring_corruption(
+            name in "[a-z][a-z0-9]{0,7}",
+            word_suffix in proptest::prop_oneof![
+                "[A-Za-z0-9_-][A-Za-z0-9_./-]{0,10}",
+                r"\.[A-Za-z0-9][A-Za-z0-9_.-]{0,8}",
+            ],
+            delimiter_suffix in r#"[ )\],;:"'}]"#,
+            word_prefix in r"[A-Za-z0-9_]{1,6}[-.]?",
+            delimiter_prefix in r#"[a-z]{0,4}( |\(|=|"|:-)"#,
+        ) {
+            let sanitizer = Sanitizer::new();
+            let home = format!("/home/{name}");
+            let xdg = format!("{home}/.config");
+
+            // Trailing side: a word char, `_`, `-` or `.word` after the home path
+            // makes it a different path, which stays byte-identical.
+            let glued_after = format!("{home}{word_suffix}");
+            proptest::prop_assert_eq!(
+                sanitizer.parameterize_paths(&glued_after, &home, &xdg),
+                glued_after
+            );
+            // Companion: a delimiter after it is a boundary.
+            let delimited_after = format!("{home}{delimiter_suffix}");
+            let out = sanitizer.parameterize_paths(&delimited_after, &home, &xdg);
+            proptest::prop_assert!(out.starts_with("{{ user.home }}"), "{:?} -> {:?}", delimited_after, out);
+
+            // Leading side: a word char, `_`, `.`, or a `-` after one, before it.
+            let glued_before = format!("{word_prefix}{home}/x");
+            proptest::prop_assert_eq!(
+                sanitizer.parameterize_paths(&glued_before, &home, &xdg),
+                glued_before
+            );
+            // Companion: a space, `(`, `=`, `"` or `:-` before it is a boundary.
+            let delimited_before = format!("{delimiter_prefix}{home}/x");
+            let out = sanitizer.parameterize_paths(&delimited_before, &home, &xdg);
+            proptest::prop_assert!(out.contains("{{ user.home }}"), "{:?} -> {:?}", delimited_before, out);
+        }
+
+        #[test]
+        fn prop_parameterize_render_roundtrip(
+            name in "[a-z][a-z0-9]{0,7}",
+            pieces in proptest::collection::vec(
+                (
+                    0u8..8,
+                    "[A-Za-z0-9_]{1,6}",
+                    proptest::sample::select(" \t\n/\\\"':,;()[]<>-.".chars().collect::<Vec<char>>()),
+                ),
+                0..=12,
+            ),
+        ) {
+            let sanitizer = Sanitizer::new();
+            let renderer = crate::template::TemplateRenderer::new();
+            let home = format!("/home/{name}");
+            let xdg = format!("{home}/.config");
+            let text: String = pieces
+                .iter()
+                .map(|(kind, word, delimiter)| roundtrip_piece(*kind, word, *delimiter, &home, &xdg))
+                .collect();
+
+            let published = sanitizer.parameterize_paths(&text, &home, &xdg);
+            let rendered = renderer.render_str(&published, &home_context(&home, &xdg));
+            proptest::prop_assert_eq!(rendered, Ok(text.clone()));
+
+            // Cross-machine control: another home (one char longer, so never equal)
+            // renders every placeholder differently.
+            if published != text {
+                let other_home = format!("{home}z");
+                let other_xdg = format!("{other_home}/.config");
+                let elsewhere = renderer
+                    .render_str(&published, &home_context(&other_home, &other_xdg));
+                proptest::prop_assert_ne!(elsewhere, Ok(text));
+            }
+        }
+    }
+
+    #[test]
     fn test_local_only_boundary() {
         let sanitizer = Sanitizer::new();
         // By default without agent rules allowed:
