@@ -517,4 +517,169 @@ mod tests {
             })
         );
     }
+
+    /// The line of `set`'s first finding on `text` at `path`.
+    fn line_of(set: &RuleSet, text: &str, path: &str) -> Option<usize> {
+        set.first_finding(text.as_bytes(), Path::new(path))
+            .map(|f| f.line)
+    }
+
+    const ANY_PATH: &str = "projects/generic/gitconfig.repo";
+
+    #[test]
+    fn test_secret_group_selection() {
+        let regex = r"regex = '''(?:(foo)|bar)=([A-Za-z0-9]{16})'''";
+        let first_group = rules(&format!(
+            "[[rules]]\nid = \"grp\"\n{regex}\nentropy = 3.0\n"
+        ));
+        let distinct = "a1B2c3D4e5F6g7H8";
+        // The secret is group 2 (group 1 did not take part): 16 equal letters have
+        // entropy 0, 16 distinct characters have entropy 4.
+        assert_eq!(
+            line_of(&first_group, "bar=aaaaaaaaaaaaaaaa", ANY_PATH),
+            None
+        );
+        assert_eq!(
+            line_of(&first_group, &format!("bar={distinct}"), ANY_PATH),
+            Some(1)
+        );
+        // With `foo` the first non-empty group is `foo` (entropy about 1.58).
+        assert_eq!(
+            line_of(&first_group, &format!("foo={distinct}"), ANY_PATH),
+            None
+        );
+
+        let group = |n: usize| {
+            rules(&format!(
+                "[[rules]]\nid = \"grp\"\n{regex}\nentropy = 3.0\nsecretGroup = {n}\n"
+            ))
+        };
+        assert_eq!(
+            line_of(&group(1), &format!("foo={distinct}"), ANY_PATH),
+            None
+        );
+        assert_eq!(
+            line_of(&group(2), &format!("foo={distinct}"), ANY_PATH),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn test_entropy_floor_is_strict() {
+        let set = rules("[[rules]]\nid = \"floor\"\nregex = '''val=([a-z]+)'''\nentropy = 2.0\n");
+        // `abcd` has entropy exactly 2.0, which does not exceed the floor.
+        assert_eq!(line_of(&set, "val=abcd", ANY_PATH), None);
+        // `abcde` has entropy log2(5), about 2.32. A distinct-count ratio (1.0)
+        // would wrongly skip it.
+        assert_eq!(line_of(&set, "val=abcde", ANY_PATH), Some(1));
+    }
+
+    #[test]
+    fn test_global_allowlist() {
+        let set = rules(concat!(
+            "[allowlist]\n",
+            "paths = ['''gitconfig\\.repo$''']\n",
+            "regexes = ['''^SAFE''']\n",
+            "stopwords = [\"example\"]\n",
+            "[[rules]]\nid = \"tok\"\nregex = '''tok_([A-Za-z0-9]{12})'''\n",
+        ));
+        let prefix = "tok_";
+        // Regex on the secret.
+        assert_eq!(
+            line_of(&set, &format!("{prefix}SAFEx7Kq2Wm9"), ANY_PATH),
+            None
+        );
+        // Stopword, case-insensitive, in the secret.
+        assert_eq!(
+            line_of(&set, &format!("{prefix}q1ExAmPlEz9w"), ANY_PATH),
+            None
+        );
+        // Neither: reported, although the global `paths` entry matches the path.
+        assert_eq!(
+            line_of(&set, &format!("{prefix}A1b2C3d4E5f6"), ANY_PATH),
+            Some(1)
+        );
+    }
+
+    /// A rule `pfx_\w*:([a-z0-9]{12})` (secret = group 1) whose one allowlist
+    /// regex is `marker`, with `regexTarget` set to `target` (`None` = unset).
+    fn marker_rule(target: Option<&str>) -> RuleSet {
+        let target_line = target.map_or(String::new(), |t| format!("regexTarget = \"{t}\"\n"));
+        rules(&format!(
+            "[[rules]]\nid = \"m\"\nregex = '''pfx_\\w*:([a-z0-9]{{12}})'''\n\
+             [[rules.allowlists]]\n{target_line}regexes = ['''marker''']\n"
+        ))
+    }
+
+    #[test]
+    fn test_rule_allowlist_targets() {
+        let secret = marker_rule(None);
+        let matched = marker_rule(Some("match"));
+        let line = marker_rule(Some("line"));
+        let verdicts = |text: &str| {
+            [
+                line_of(&secret, text, ANY_PATH),
+                line_of(&matched, text, ANY_PATH),
+                line_of(&line, text, ANY_PATH),
+            ]
+        };
+        // No marker anywhere: every rule reports.
+        assert_eq!(verdicts("pfx_ab:abc123def456"), [Some(1); 3]);
+        // In the secret, which lies inside the match and the line too.
+        assert_eq!(verdicts("pfx_ab:marker123456"), [None; 3]);
+        // In the match, outside the secret group.
+        assert_eq!(verdicts("pfx_marker:abc123def456"), [Some(1), None, None]);
+        // Elsewhere on the line only.
+        assert_eq!(
+            verdicts("marker pfx_ab:abc123def456"),
+            [Some(1), Some(1), None]
+        );
+    }
+
+    #[test]
+    fn test_rule_allowlist_condition_and() {
+        let set = rules(concat!(
+            "[[rules]]\nid = \"and\"\nregex = '''=\"([a-z0-9]{10})\"'''\n",
+            "[[rules.allowlists]]\ncondition = \"AND\"\n",
+            "paths = ['''\\.bb$''']\nregexTarget = \"line\"\nregexes = ['''^SRC''']\n",
+        ));
+        let src_line = "SRC_URI=\"abc123def4\"";
+        assert_eq!(line_of(&set, src_line, "recipe.bb"), None);
+        assert_eq!(line_of(&set, src_line, ANY_PATH), Some(1));
+        assert_eq!(
+            line_of(&set, "DST_URI=\"abc123def4\"", "recipe.bb"),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn test_rule_allowlist_path_prefilter() {
+        let set = rules(concat!(
+            "[[rules]]\nid = \"pre\"\nregex = '''tok_[a-z0-9]{8}'''\n",
+            "[[rules.allowlists]]\npaths = ['''README\\.md$''']\n",
+        ));
+        let text = "tok_ab12cd34";
+        assert_eq!(line_of(&set, text, "docs/README.md"), None);
+        assert_eq!(line_of(&set, text, "README.txt"), Some(1));
+        // An empty path (the check_secrets wrapper) never skips a rule.
+        assert_eq!(line_of(&set, text, ""), Some(1));
+    }
+
+    #[test]
+    fn test_rule_path_gating() {
+        let scoped =
+            rules("[[rules]]\nid = \"tf\"\npath = '''\\.tf$'''\nregex = '''pw=[a-z0-9]{8}'''\n");
+        assert_eq!(line_of(&scoped, "x\npw=ab12cd34", "main.tf"), Some(2));
+        assert_eq!(line_of(&scoped, "x\npw=ab12cd34", "main.repo"), None);
+
+        let path_only = rules("[[rules]]\nid = \"p12\"\npath = '''\\.p12$'''\n");
+        assert_eq!(
+            path_only.first_finding(b"any\ncontent", Path::new("certs/a.p12")),
+            Some(Finding {
+                rule: "p12".to_string(),
+                line: 1,
+            })
+        );
+        assert_eq!(line_of(&path_only, "any\ncontent", "certs/a.repo"), None);
+    }
 }
