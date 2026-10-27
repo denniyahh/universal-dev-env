@@ -4094,6 +4094,70 @@ fn test_push_then_init_substitutes_home_on_new_project() {
     assert!(!gitconfig_c.contains(&fake), "{gitconfig_c}");
 }
 
+const EMAIL_PLACEHOLDER: &str = "[user]\n\temail = {{ git_email }}\n";
+
+#[test]
+fn test_push_skips_edit_over_static_template_with_logic() {
+    let temp = tempdir().unwrap();
+    let ude = sync_cli(temp.path());
+    let project_a = project_with_local_templates(temp.path(), "project_a");
+    let template = project_a.join(GITCONFIG_TEMPLATE);
+    append_to(&template, EMAIL_PLACEHOLDER);
+    let template_before = fs::read(&template).unwrap();
+    reinit_rust(&ude, &project_a);
+    let gitconfig = project_a.join(".gitconfig");
+    let rendered = fs::read_to_string(&gitconfig).unwrap();
+    assert!(
+        rendered.contains("email = tester@example.com"),
+        "precondition: init renders the fixture email: {rendered}"
+    );
+    append_to(&gitconfig, "[ude]\n\tx = 1\n");
+
+    // Status reports the skip before push makes it.
+    let status = outputs(&ude(&project_a, &["sync", "status"]));
+    let status_line = line_with(&status, ".gitconfig:");
+    assert!(status_line.contains("Locally Modified"), "{status}");
+    assert!(status_line.contains("its template has logic"), "{status}");
+
+    // Push skips the edit, exits 1 and leaves the placeholder in the shared template.
+    let push = ude(&project_a, &["sync", "push"]);
+    assert_eq!(push.status.code(), Some(1), "{}", outputs(&push));
+    let stderr = String::from_utf8_lossy(&push.stderr);
+    assert!(
+        line_with(&stderr, "contains template logic").contains(".gitconfig"),
+        "{}",
+        outputs(&push)
+    );
+    assert_eq!(
+        fs::read(&template).unwrap(),
+        template_before,
+        "{}",
+        outputs(&push)
+    );
+
+    // A consumer machine's init substitutes its own email, not the pusher's.
+    let temp2 = tempdir().unwrap();
+    let consumer_config = temp2.path().join("consumer-gitconfig");
+    let consumer_text = FIXTURE_GITCONFIG.replace("tester@example.com", "consumer@example.com");
+    fs::write(&consumer_config, &consumer_text).unwrap();
+    let ude2 = sync_cli_with_env(
+        temp2.path(),
+        vec![(
+            "GIT_CONFIG_GLOBAL".to_string(),
+            consumer_config.to_string_lossy().to_string(),
+        )],
+    );
+    let project_c = temp2.path().join("project_c");
+    let init = init_from(&ude2, &project_a, &project_c);
+    assert_eq!(init.status.code(), Some(0), "{}", outputs(&init));
+    let gitconfig_c = fs::read_to_string(project_c.join(".gitconfig")).unwrap();
+    assert!(
+        gitconfig_c.contains("email = consumer@example.com"),
+        "{gitconfig_c}"
+    );
+    assert!(!gitconfig_c.contains("tester@example.com"), "{gitconfig_c}");
+}
+
 /// A [`sync_cli`] runner on `root` whose HOME and XDG_CONFIG_HOME end in `/`.
 fn trailing_separator_cli(root: &Path) -> impl Fn(&Path, &[&str]) -> Output {
     let fake = fake_home(root);

@@ -5012,6 +5012,75 @@ mod tests {
         );
     }
 
+    /// Writes `template_text` as the `.gitconfig` template and records `.gitconfig` with
+    /// that template as push's own scan renders it (the host's git config supplies the
+    /// values). Returns the context and the rendered text.
+    fn record_rendered_gitconfig(
+        local: &Path,
+        upstream: &Path,
+        template_text: &str,
+    ) -> (crate::template::TemplateContext, String) {
+        write_upstream_gitconfig(upstream, template_text.as_bytes());
+        let ctx = crate::template::TemplateContext::detect_for_project(local, "project", "generic");
+        let rendered = crate::template::TemplateRenderer::new()
+            .render_str(template_text, &ctx)
+            .unwrap();
+        let mut state = ProjectState::default();
+        state.record_file(
+            Path::new(".gitconfig"),
+            SyncEngine::fingerprint(rendered.as_bytes()),
+            Some(rendered.clone()),
+        );
+        state.save_to_dir(local).unwrap();
+        (ctx, rendered)
+    }
+
+    #[test]
+    fn test_push_skips_static_template_with_logic() {
+        let engine = SyncEngine::new();
+        let local = tempdir().unwrap();
+        let upstream = tempdir().unwrap();
+        let template_text = "[user]\n\temail = {{ git_email }}\n";
+        let (ctx, rendered) =
+            record_rendered_gitconfig(local.path(), upstream.path(), template_text);
+        // Assertion messages never print file text: it holds the host's git email.
+        assert!(
+            !ctx.git_email.is_empty(),
+            "precondition: push's scan context has a git email"
+        );
+        assert!(
+            rendered.contains(&ctx.git_email),
+            "precondition: the rendered .gitconfig holds the email"
+        );
+        fs::write(
+            local.path().join(".gitconfig"),
+            format!("{rendered}\tname = Alice\n"),
+        )
+        .unwrap();
+
+        let result = push_dirs(&engine, local.path(), upstream.path());
+
+        let PushResult::Success {
+            synced_files,
+            skipped_templates,
+            ..
+        } = &result
+        else {
+            panic!("push did not return Success");
+        };
+        assert_eq!(skipped_templates, &vec![PathBuf::from(".gitconfig")]);
+        assert_eq!(*synced_files, 0);
+        let published = fs::read(upstream.path().join("projects/generic/gitconfig.repo")).unwrap();
+        assert!(
+            published == template_text.as_bytes(),
+            "push must leave the template's bytes unchanged"
+        );
+        assert!(
+            !String::from_utf8_lossy(&published).contains(&ctx.git_email),
+            "push must not publish the rendered email over its placeholder"
+        );
+    }
+
     #[test]
     fn test_push_local_deletion_respects_publish_boundary() {
         let engine = SyncEngine::new();
