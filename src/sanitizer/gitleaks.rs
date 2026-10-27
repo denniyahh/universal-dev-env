@@ -1074,4 +1074,116 @@ mod tests {
         let line = 1 + original.iter().filter(|&&b| b == b'\n').count();
         assert_eq!(sanitizer.scan_bytes(&bytes, relative), slack_finding(line));
     }
+
+    /// Writes the category corpus for the parity run against the gitleaks binary:
+    /// `<rule-id>.txt` per category positive and `benign.txt` (the Slack twin), into
+    /// the directory `UDE_PARITY_DIR` names. The port's own verdict on each file is
+    /// asserted first, so the comparison is between two checked results.
+    #[test]
+    #[ignore = "writes the gitleaks parity corpus; run by the 02-06 parity command"]
+    fn test_dump_parity_corpus() {
+        let Some(dir) = std::env::var_os("UDE_PARITY_DIR") else {
+            panic!("UDE_PARITY_DIR must name the directory for the parity corpus");
+        };
+        let dir = std::path::PathBuf::from(dir);
+        let rows = category_rows();
+        for row in &rows {
+            let file = dir.join(format!("{}.txt", row.rule));
+            std::fs::write(&file, &row.positive).expect("write category file");
+            let found = vendored()
+                .first_finding(row.positive.as_bytes(), &file)
+                .map(|f| f.rule);
+            assert_eq!(
+                found.as_deref(),
+                Some(row.rule),
+                "port on {}",
+                file.display()
+            );
+        }
+        let slack = rows
+            .iter()
+            .find(|row| row.rule == "slack-bot-token")
+            .expect("the table has a Slack row");
+        let benign = dir.join("benign.txt");
+        std::fs::write(&benign, &slack.twin).expect("write benign file");
+        assert_eq!(
+            vendored().first_finding(slack.twin.as_bytes(), &benign),
+            None
+        );
+    }
+
+    #[test]
+    fn test_match_is_trimmed_of_lf() {
+        // A match that begins and ends with LF bytes is trimmed before it is
+        // reported (detect.go `strings.Trim(..., "\n")`): the line is the token's
+        // line, and the match an allowlist sees is the token alone.
+        let regex = "regex = '''\\n+tok_[a-z0-9]{8}\\n+'''\n";
+        let text = "a\n\ntok_ab12cd34\n\nb";
+        let plain = rules(&format!("[[rules]]\nid = \"lf\"\n{regex}"));
+        assert_eq!(line_of(&plain, text, ANY_PATH), Some(3));
+        let anchored = rules(&format!(
+            "[[rules]]\nid = \"lf\"\n{regex}[[rules.allowlists]]\nregexTarget = \"match\"\n\
+             regexes = ['''^tok_[a-z0-9]{{8}}$''']\n"
+        ));
+        assert_eq!(line_of(&anchored, text, ANY_PATH), None);
+    }
+
+    #[test]
+    fn test_rule_allowlist_or_path_skips_file() {
+        // OR: a matching path allows the file even when the allowlist's regex
+        // matches nothing.
+        let set = rules(concat!(
+            "[[rules]]\nid = \"or\"\nregex = '''tok_[a-z0-9]{8}'''\n",
+            "[[rules.allowlists]]\npaths = ['''^fixtures/''']\nregexes = ['''^never$''']\n",
+        ));
+        let text = "tok_ab12cd34";
+        assert_eq!(line_of(&set, text, "fixtures/a.txt"), None);
+        assert_eq!(line_of(&set, text, "src/a.txt"), Some(1));
+    }
+
+    #[test]
+    fn test_rule_allowlist_and_needs_path_and_stopword() {
+        // AND with paths and stopwords: the path alone never skips the file.
+        let set = rules(concat!(
+            "[[rules]]\nid = \"and\"\nregex = '''tok_([a-z0-9]{8})'''\n",
+            "[[rules.allowlists]]\ncondition = \"AND\"\npaths = ['''^fixtures/''']\n",
+            "stopwords = [\"demo\"]\n",
+        ));
+        assert_eq!(line_of(&set, "tok_ab12cd34", "fixtures/a.txt"), Some(1));
+        assert_eq!(line_of(&set, "tok_demo1234", "fixtures/a.txt"), None);
+        assert_eq!(line_of(&set, "tok_demo1234", "src/a.txt"), Some(1));
+    }
+
+    #[test]
+    fn test_line_target_is_the_whole_line() {
+        // The line target runs from after the previous LF to before the next one.
+        let set = rules(concat!(
+            "[[rules]]\nid = \"ln\"\nregex = '''tok_[a-z0-9]{8}'''\n",
+            "[[rules.allowlists]]\nregexTarget = \"line\"\n",
+            "regexes = ['''^SAFE''', '''marker$''']\n",
+        ));
+        assert_eq!(line_of(&set, "x\nSAFE tok_ab12cd34\ny", ANY_PATH), None);
+        assert_eq!(line_of(&set, "x\ntok_ab12cd34 marker\ny", ANY_PATH), None);
+        // Controls: the anchors fail when the text is not at the line's edge.
+        assert_eq!(
+            line_of(&set, "x\nUNSAFE tok_ab12cd34\ny", ANY_PATH),
+            Some(2)
+        );
+        assert_eq!(
+            line_of(&set, "x\ntok_ab12cd34 marker!\ny", ANY_PATH),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn test_secret_group_zero_is_unset() {
+        // gitleaks reads `secretGroup = 0` as unset: the first non-empty group.
+        let set = rules(concat!(
+            "[[rules]]\nid = \"grp\"\nregex = '''(?:(foo)|bar)=([A-Za-z0-9]{16})'''\n",
+            "entropy = 3.0\nsecretGroup = 0\n",
+        ));
+        let distinct = "a1B2c3D4e5F6g7H8";
+        assert_eq!(line_of(&set, &format!("foo={distinct}"), ANY_PATH), None);
+        assert_eq!(line_of(&set, &format!("bar={distinct}"), ANY_PATH), Some(1));
+    }
 }
