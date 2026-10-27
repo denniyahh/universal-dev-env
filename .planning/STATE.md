@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 02
 current_phase_name: Sanitizer, Boundaries & Security Hardening
 status: executing
-stopped_at: Completed 02-08-PLAN.md
-last_updated: "2026-10-27T17:46:11.435Z"
+stopped_at: Completed 02-09-PLAN.md
+last_updated: "2026-10-27T18:00:50.590Z"
 last_activity: 2026-10-27
 last_activity_desc: Phase 02 execution started
-state_head: 0f5f3b21210e005ba503303c24dfa830e7966fb7
+state_head: 4d283d11de543292531493a2799f8effcf2f7a1e
 progress:
   total_phases: 4
   completed_phases: 1
   total_plans: 21
-  completed_plans: 19
+  completed_plans: 20
 ---
 
 # Project State
@@ -27,8 +27,8 @@ See: `.planning/PROJECT.md` (updated 2026-10-22)
 ## Current Position
 
 Phase: 02 (Sanitizer, Boundaries & Security Hardening) — EXECUTING
-Plan: 9 of 10
-Status: Executing Phase 02
+Plan: 10 of 10
+Status: Ready to execute
 Last activity: 2026-10-27 — Phase 02 execution started
 
 Progress: [███░░░░░░░] 25%
@@ -77,6 +77,7 @@ Progress: [███░░░░░░░] 25%
 | Phase 02 P06 | 23 min | 3 tasks | 2 files |
 | Phase 02 P07 | 17 min | 3 tasks | 3 files |
 | Phase 02 P08 | 15 min | 3 tasks | 4 files |
+| Phase 02 P09 | 13min | 3 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -138,6 +139,7 @@ Recent decisions affecting current work:
 - [Phase 02]: 02-08: gate 5 renders with a context built from push_updates' user_home and xdg_config arguments; scan_project keeps the host-derived context (separate todo)
 - [Phase 02]: 02-08: publication gates bind each non-deleted staged or committed blob to the fingerprint push_updates recorded; a missing record or a differing blob exits 2
 - [Phase 02]: Gap closure fixes the non-.jinja placeholder push (verification gap 2 / review CR-02): push gate 2 uses template::should_render, not the .jinja extension; no SC4 override — Operator chose option A on 2026-10-27: init renders any template with {{ since 02-02, so push must protect the same set
+- [Phase 02]: 02-09: home and XDG config roots are normalized with sanitizer::normalize_root (trailing separators trimmed, a separator-only root kept) in push_updates, parameterize_paths and detect_for_project; src/main.rs and xdg_data unchanged
 
 ### Pending Todos
 
@@ -177,6 +179,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-27T08:44:21.545Z
-Stopped at: Completed 02-08-PLAN.md
+Last session: 2026-10-27T18:00:50.360Z
+Stopped at: Completed 02-09-PLAN.md
 Resume file: None
