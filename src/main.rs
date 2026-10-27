@@ -1166,6 +1166,7 @@ fn main() {
                             skipped_boundary,
                             skipped_templates,
                             skipped_missing_upstream,
+                            validated_blobs,
                         } => {
                             println!(
                                 "  {} Sanitization gate passed: clean of secrets & parameters applied.",
@@ -1259,6 +1260,7 @@ fn main() {
                                     &branch,
                                     pr,
                                     &staged_files,
+                                    &validated_blobs,
                                     fetched_sha,
                                 ) {
                                     Ok(msg) => {

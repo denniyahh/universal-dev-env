@@ -108,6 +108,36 @@ fn existing_text_eol_style(path: &Path) -> Option<EolStyle> {
     Some(detect_eol_style(&bytes))
 }
 
+/// The fingerprint of every file `push_updates` published, keyed by the same path that
+/// appears in `staged_files`, so the publication gates can refuse a stored blob that
+/// differs from what the secret scan (gate 4) and the reversibility check (gate 5)
+/// validated, whatever git filter or commit hook changed it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ValidatedBlobs {
+    digests: std::collections::BTreeMap<PathBuf, String>,
+}
+
+impl ValidatedBlobs {
+    /// Records the fingerprint ([`SyncEngine::fingerprint`]: SHA-256 of LF-normalized
+    /// UTF-8, raw bytes otherwise) of the exact bytes published at `path`.
+    fn record(&mut self, _path: PathBuf, _published: &[u8]) {}
+
+    /// The record of each file's current bytes. Tests that call the gates without
+    /// `push_updates` use it as the stand-in record; production code never builds a
+    /// record from the working tree.
+    #[cfg(test)]
+    pub(crate) fn from_files(paths: &[PathBuf]) -> Self {
+        let mut validated = Self::default();
+        for path in paths {
+            let bytes = fs::read(path).expect("read a validated file");
+            validated
+                .digests
+                .insert(path.clone(), SyncEngine::fingerprint(&bytes));
+        }
+        validated
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum PushResult {
     Success {
@@ -130,6 +160,8 @@ pub enum PushResult {
         skipped_templates: Vec<PathBuf>,
         /// Locally edited files whose template the remote never had: never published.
         skipped_missing_upstream: Vec<PathBuf>,
+        /// See [`ValidatedBlobs`].
+        validated_blobs: ValidatedBlobs,
     },
     /// The project could not be compared with upstream; nothing was changed.
     ScanFailed {
@@ -1565,6 +1597,7 @@ impl SyncEngine {
         // `transaction` deletes the temps and any directories staging created.
         let mut transaction = staging::StagedTransaction::new(upstream_root);
         let mut updated_records = Vec::new();
+        let mut validated_blobs = ValidatedBlobs::default();
 
         for (rel_path, target_upstream, parameterized_bytes, raw_bytes, raw_local_str) in
             candidates_to_write
@@ -1585,6 +1618,8 @@ impl SyncEngine {
                     reason,
                 };
             }
+            // The exact bytes gate 4 scanned and gate 5 validated, keyed as staged_files.
+            validated_blobs.record(upstream_root.join(upstream_rel), &parameterized_bytes);
             updated_records.push((rel_path, Self::fingerprint(&raw_bytes), raw_local_str));
         }
 
@@ -1660,6 +1695,7 @@ impl SyncEngine {
             skipped_boundary,
             skipped_templates,
             skipped_missing_upstream,
+            validated_blobs,
         }
     }
 
@@ -1673,19 +1709,26 @@ impl SyncEngine {
         branch: &str,
         open_pr: bool,
         staged_files: &[PathBuf],
+        validated: &ValidatedBlobs,
         fetched_sha: &str,
     ) -> Result<String, PushRemoteError> {
         let Some(expected_set) = self
-            .stage_publication(remote_checkout, staged_files)
+            .stage_publication(remote_checkout, staged_files, validated)
             .map_err(PushRemoteError::Failed)?
         else {
             return Ok("No changes to push to remote repository.".to_string());
         };
         if open_pr {
-            self.push_pr_branch(remote_checkout, branch, &expected_set)
+            self.push_pr_branch(remote_checkout, branch, &expected_set, validated)
                 .map_err(PushRemoteError::Failed)
         } else {
-            self.push_direct(remote_checkout, branch, &expected_set, fetched_sha)
+            self.push_direct(
+                remote_checkout,
+                branch,
+                &expected_set,
+                validated,
+                fetched_sha,
+            )
         }
     }
 
@@ -1696,6 +1739,7 @@ impl SyncEngine {
         &self,
         remote_checkout: &Path,
         staged_files: &[PathBuf],
+        validated: &ValidatedBlobs,
     ) -> Result<Option<HashSet<PathBuf>>, String> {
         let mut status_cmd = self.git(Some(remote_checkout));
         status_cmd.args(["status", "--porcelain"]);
@@ -1826,6 +1870,7 @@ impl SyncEngine {
         remote_checkout: &Path,
         branch: &str,
         expected_set: &HashSet<PathBuf>,
+        validated: &ValidatedBlobs,
     ) -> Result<String, String> {
         let epoch_secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1864,7 +1909,7 @@ impl SyncEngine {
             ));
         }
 
-        if let Err(err) = self.validate_committed_tree(remote_checkout, expected_set) {
+        if let Err(err) = self.validate_committed_tree(remote_checkout, expected_set, validated) {
             self.rollback_commit(remote_checkout);
             self.abandon_sync_branch(remote_checkout, branch, &sync_branch);
             return Err(err);
@@ -1923,6 +1968,7 @@ impl SyncEngine {
         remote_checkout: &Path,
         branch: &str,
         expected_set: &HashSet<PathBuf>,
+        validated: &ValidatedBlobs,
         fetched_sha: &str,
     ) -> Result<String, PushRemoteError> {
         use PushRemoteError::Failed;
@@ -1940,7 +1986,7 @@ impl SyncEngine {
             )));
         }
 
-        if let Err(err) = self.validate_committed_tree(remote_checkout, expected_set) {
+        if let Err(err) = self.validate_committed_tree(remote_checkout, expected_set, validated) {
             self.rollback_commit(remote_checkout);
             return Err(Failed(err));
         }
@@ -2047,7 +2093,12 @@ impl SyncEngine {
     /// Validates the committed tree in HEAD before pushing to remote repository,
     /// asserting that no unexpected files or secret credentials exist in the committed
     /// tree. `paths` is the validated allowlist, relative to `repo`.
-    fn validate_committed_tree(&self, repo: &Path, paths: &HashSet<PathBuf>) -> Result<(), String> {
+    fn validate_committed_tree(
+        &self,
+        repo: &Path,
+        paths: &HashSet<PathBuf>,
+        validated: &ValidatedBlobs,
+    ) -> Result<(), String> {
         let mut diff_tree = self.git(Some(repo));
         diff_tree.args([
             "diff-tree",
@@ -4747,8 +4798,15 @@ mod tests {
 
         let gitconfig = tmpl_dir.join("projects/generic/gitconfig.repo");
         fs::remove_file(&gitconfig).unwrap();
-        let pushed =
-            engine.push_to_remote(checkout, "main", false, &[gitconfig], &cached.fetched_sha);
+        // A deletion publishes no blob, so it needs no validated content.
+        let pushed = engine.push_to_remote(
+            checkout,
+            "main",
+            false,
+            &[gitconfig],
+            &ValidatedBlobs::default(),
+            &cached.fetched_sha,
+        );
         assert!(pushed.is_ok(), "deletion push: {pushed:?}");
         let tree = remote_tree();
         assert!(!tree.contains("gitconfig.repo"), "{tree}");
@@ -4765,11 +4823,13 @@ mod tests {
         let prefix = "ghp_";
         let body = "111122223333444455556666777788889999";
         fs::write(&hook, format!("#!/bin/sh\n# {prefix}{body}\n")).unwrap();
+        let validated = ValidatedBlobs::from_files(std::slice::from_ref(&hook));
         let err = push_failure(engine.push_to_remote(
             checkout,
             "main",
             false,
             &[gitignore, hook],
+            &validated,
             &cached.fetched_sha,
         ));
         assert!(
@@ -6735,7 +6795,15 @@ mod tests {
         let staged_allowlist = vec![valid_file.clone()];
         // Note: git push will fail because there is no remote server, but staging and commit will execute
         let head = git.output(remote_repo.path(), &["rev-parse", "HEAD"]);
-        let _ = engine.push_to_remote(remote_repo.path(), "main", false, &staged_allowlist, &head);
+        let validated = ValidatedBlobs::from_files(&staged_allowlist);
+        let _ = engine.push_to_remote(
+            remote_repo.path(),
+            "main",
+            false,
+            &staged_allowlist,
+            &validated,
+            &head,
+        );
 
         // Verify git status: the dirty secret file must remain UNTRACKED / UNSTAGED!
         let status_out = git.output(remote_repo.path(), &["status", "--porcelain"]);
@@ -6926,8 +6994,15 @@ mod tests {
         // Working tree file has benign content, but staged index blob will have secret via clean filter!
         let staged_allowlist = vec![valid_file.clone()];
         let head = git.output(remote_repo.path(), &["rev-parse", "HEAD"]);
-        let res =
-            engine.push_to_remote(remote_repo.path(), "main", false, &staged_allowlist, &head);
+        let validated = ValidatedBlobs::from_files(&staged_allowlist);
+        let res = engine.push_to_remote(
+            remote_repo.path(),
+            "main",
+            false,
+            &staged_allowlist,
+            &validated,
+            &head,
+        );
 
         // Publication gate must detect secret in the staged blob and reject!
         assert!(
@@ -6985,7 +7060,15 @@ mod tests {
         .unwrap();
 
         let head = git.output(remote_repo.path(), &["rev-parse", "HEAD"]);
-        let res = engine.push_to_remote(remote_repo.path(), "main", false, &[valid_file], &head);
+        let validated = ValidatedBlobs::from_files(std::slice::from_ref(&valid_file));
+        let res = engine.push_to_remote(
+            remote_repo.path(),
+            "main",
+            false,
+            &[valid_file],
+            &validated,
+            &head,
+        );
         let diff_cached = git.output(remote_repo.path(), &["diff", "--cached", "--name-only"]);
         (res, diff_cached)
     }
@@ -7216,8 +7299,15 @@ mod tests {
         )
         .unwrap();
         let staged = vec![managed_gitconfig.clone()];
-        let pr_res =
-            engine.push_to_remote(remote_checkout, "main", true, &staged, &cached.fetched_sha);
+        let validated = ValidatedBlobs::from_files(&staged);
+        let pr_res = engine.push_to_remote(
+            remote_checkout,
+            "main",
+            true,
+            &staged,
+            &validated,
+            &cached.fetched_sha,
+        );
         assert!(pr_res.is_ok(), "PR push must succeed: {:?}", pr_res.err());
 
         // Explicitly release first lock before acquiring lock in Step 3
@@ -7248,11 +7338,13 @@ mod tests {
         )
         .unwrap();
         let staged_2 = vec![managed_gitconfig_2.clone()];
+        let validated_2 = ValidatedBlobs::from_files(&staged_2);
         let direct_res = engine.push_to_remote(
             remote_checkout_2,
             "main",
             false,
             &staged_2,
+            &validated_2,
             &cached_2.fetched_sha,
         );
         assert!(
@@ -7301,6 +7393,264 @@ mod tests {
         bare
     }
 
+    #[test]
+    fn test_push_updates_records_validated_digests() {
+        let local = "[core]\n\tx = /home/alice/y\n";
+        let (res, _upstream) = push_as_alice(".gitconfig", local.as_bytes());
+        let PushResult::Success {
+            staged_files,
+            validated_blobs,
+            ..
+        } = &res
+        else {
+            panic!("Expected Success, got {res:?}");
+        };
+        assert_eq!(staged_files.len(), 1, "{staged_files:?}");
+        assert_eq!(validated_blobs.digests.len(), 1, "{validated_blobs:?}");
+        let published = fs::read(&staged_files[0]).unwrap();
+        assert!(
+            String::from_utf8_lossy(&published).contains("{{ user.home }}"),
+            "{}",
+            String::from_utf8_lossy(&published)
+        );
+        assert_eq!(
+            validated_blobs.digests.get(&staged_files[0]),
+            Some(&SyncEngine::fingerprint(&published))
+        );
+        // The record is the published text, not the local text.
+        assert_ne!(
+            validated_blobs.digests.get(&staged_files[0]),
+            Some(&SyncEngine::fingerprint(local.as_bytes()))
+        );
+    }
+
+    /// A repository whose `templates/projects/generic/gitconfig.repo` is committed as
+    /// `[core]\n  autocrlf = true\n`; returns the repository and that file's path.
+    fn gate_repo(git: &GitFixture) -> (tempfile::TempDir, PathBuf) {
+        let repo = tempdir().unwrap();
+        git.run(repo.path(), &["init", "-b", "main"]);
+        let file = repo
+            .path()
+            .join("templates/projects/generic/gitconfig.repo");
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(&file, "[core]\n  autocrlf = true\n").unwrap();
+        git.run(repo.path(), &["add", "-A"]);
+        git.run(repo.path(), &["commit", "-m", "base commit"]);
+        (repo, file)
+    }
+
+    /// Runs the template in `repo` through a clean filter whose script is
+    /// `filter_body` (POSIX sh).
+    fn set_clean_filter(git: &GitFixture, repo: &Path, filter_body: &str) {
+        let script = repo.join("rewrite_blob.sh");
+        fs::write(&script, format!("#!/bin/sh\n{filter_body}")).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let filter_cmd = script.display().to_string();
+        git.run(repo, &["config", "filter.rewriteblob.clean", &filter_cmd]);
+        let info_dir = repo.join(".git/info");
+        fs::create_dir_all(&info_dir).unwrap();
+        fs::write(
+            info_dir.join("attributes"),
+            "templates/projects/generic/gitconfig.repo filter=rewriteblob\n",
+        )
+        .unwrap();
+    }
+
+    const GATE_REL: &str = "templates/projects/generic/gitconfig.repo";
+
+    #[test]
+    fn test_publication_gate_refuses_blob_changed_by_clean_filter() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let (repo, file) = gate_repo(&git);
+        fs::write(&file, "[core]\n\tx = 1\n").unwrap();
+        let validated = ValidatedBlobs::from_files(std::slice::from_ref(&file));
+
+        // The filter appends an irreversible template the reversibility check never saw.
+        set_clean_filter(
+            &git,
+            repo.path(),
+            "cat\necho '{# unterminated'\necho '{{ user.home }}'\n",
+        );
+        let err = engine
+            .stage_publication(repo.path(), std::slice::from_ref(&file), &validated)
+            .expect_err("a blob changed by a clean filter must be refused");
+        assert!(
+            err.contains("Publication gate violation: staged index blob"),
+            "{err}"
+        );
+        assert!(err.contains("differs from the validated content"), "{err}");
+        assert_eq!(
+            git.output(repo.path(), &["diff", "--cached", "--name-only"]),
+            ""
+        );
+
+        // Control: a pass-through filter stores the validated bytes and is published.
+        set_clean_filter(&git, repo.path(), "cat\n");
+        let staged = engine
+            .stage_publication(repo.path(), std::slice::from_ref(&file), &validated)
+            .expect("a pass-through filter must publish");
+        assert!(
+            staged
+                .as_ref()
+                .is_some_and(|set| set.contains(Path::new(GATE_REL))),
+            "{staged:?}"
+        );
+    }
+
+    #[test]
+    fn test_publication_gate_refuses_rewritten_working_tree() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let (repo, file) = gate_repo(&git);
+        let original = "[core]\n\tx = 1\n";
+        fs::write(&file, original).unwrap();
+        let validated = ValidatedBlobs::from_files(std::slice::from_ref(&file));
+
+        // A filter writing `%f` or a hook rewrites the working tree too, so index and
+        // working tree agree after `git add`.
+        let rewritten = "[core]\n{# unterminated\n{{ user.home }}\n";
+        fs::write(&file, rewritten).unwrap();
+        let err = engine
+            .stage_publication(repo.path(), std::slice::from_ref(&file), &validated)
+            .expect_err("a rewritten file must be refused");
+        assert!(err.contains("differs from the validated content"), "{err}");
+        assert_eq!(
+            git.output(repo.path(), &["diff", "--cached", "--name-only"]),
+            ""
+        );
+
+        // Opposite direction: git stores the rewritten bytes exactly, so a gate that
+        // re-read the working tree would have passed this blob.
+        git.run(repo.path(), &["add", "--", GATE_REL]);
+        let stored = git
+            .checked(repo.path(), &["show", &format!(":{GATE_REL}")])
+            .stdout;
+        assert_eq!(stored, rewritten.as_bytes());
+        git.run(repo.path(), &["reset", "-q", "HEAD", "--"]);
+
+        // Control: the validated text restored is published.
+        fs::write(&file, original).unwrap();
+        let staged = engine
+            .stage_publication(repo.path(), std::slice::from_ref(&file), &validated)
+            .expect("the validated text must publish");
+        assert!(staged.is_some(), "{staged:?}");
+
+        // Control: a staged path with no record is refused.
+        let err = engine
+            .stage_publication(
+                repo.path(),
+                std::slice::from_ref(&file),
+                &ValidatedBlobs::default(),
+            )
+            .expect_err("a staged path with no record must be refused");
+        assert!(err.contains("no validated content recorded for"), "{err}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_post_commit_hook_rewrite_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let bare = seeded_bare_remote(&git);
+        let remote_main = || git.output(bare.path(), &["rev-parse", "refs/heads/main"]);
+        let cache = tempdir().unwrap();
+        let cached = engine
+            .ensure_remote_repo(bare.path().to_str().unwrap(), "main", cache.path())
+            .unwrap();
+        let checkout = cached.checkout_dir.as_path();
+        let managed = cached.templates_dir.join("projects/generic/gitconfig.repo");
+        let managed_rel = managed
+            .strip_prefix(checkout)
+            .unwrap()
+            .display()
+            .to_string();
+        fs::write(&managed, "[core]\n\tx = 1\n").unwrap();
+        let validated = ValidatedBlobs::from_files(std::slice::from_ref(&managed));
+
+        // post-commit runs despite --no-verify. The hook amends the commit once; the
+        // marker stops the amend's own post-commit from amending again.
+        let marker = checkout.join(".git/ude-test-amended");
+        let hook = checkout.join(".git/hooks/post-commit");
+        fs::create_dir_all(hook.parent().unwrap()).unwrap();
+        fs::write(
+            &hook,
+            format!(
+                "#!/bin/sh\n[ -e .git/ude-test-amended ] && exit 0\n: > .git/ude-test-amended\nprintf '%s\\n' '{{# unterminated' >> '{managed_rel}'\ngit add -- '{managed_rel}'\ngit commit --amend --no-edit --no-verify -q\n"
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let res = engine.push_to_remote(
+            checkout,
+            "main",
+            false,
+            std::slice::from_ref(&managed),
+            &validated,
+            &cached.fetched_sha,
+        );
+        let err = push_failure(res);
+        assert!(
+            err.contains("Post-commit publication gate violation: committed HEAD blob"),
+            "{err}"
+        );
+        assert!(err.contains("differs from the validated content"), "{err}");
+        assert_eq!(remote_main(), cached.fetched_sha);
+        // Opposite direction: the hook did run, so the refusal is its rewrite caught.
+        assert!(marker.exists(), "the post-commit hook never ran");
+
+        // Control: without the hook the same content is published.
+        fs::remove_file(&hook).unwrap();
+        fs::remove_file(&marker).unwrap();
+        fs::write(&managed, "[core]\n\tx = 1\n").unwrap();
+        let validated = ValidatedBlobs::from_files(std::slice::from_ref(&managed));
+        let res = engine.push_to_remote(
+            checkout,
+            "main",
+            false,
+            std::slice::from_ref(&managed),
+            &validated,
+            &cached.fetched_sha,
+        );
+        assert!(res.is_ok(), "{res:?}");
+        assert_ne!(remote_main(), cached.fetched_sha);
+    }
+
+    #[test]
+    fn test_publication_gate_allows_line_ending_normalization() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let (repo, file) = gate_repo(&git);
+        let crlf = "[core]\r\n\tx = 1\r\n";
+        fs::write(&file, crlf).unwrap();
+        let validated = ValidatedBlobs::from_files(std::slice::from_ref(&file));
+        let info_dir = repo.path().join(".git/info");
+        fs::create_dir_all(&info_dir).unwrap();
+        fs::write(
+            info_dir.join("attributes"),
+            format!("{GATE_REL} text eol=lf\n"),
+        )
+        .unwrap();
+
+        let staged = engine
+            .stage_publication(repo.path(), std::slice::from_ref(&file), &validated)
+            .expect("CRLF-to-LF normalization must still publish");
+        assert!(staged.is_some(), "{staged:?}");
+        // The stored blob differs from the working-tree bytes, so the filter ran and
+        // the pass is the fingerprint's CRLF tolerance.
+        let stored = git
+            .checked(repo.path(), &["show", &format!(":{GATE_REL}")])
+            .stdout;
+        assert_eq!(stored, b"[core]\n\tx = 1\n");
+        assert_ne!(stored, crlf.as_bytes());
+    }
+
     /// `git status` decides whether anything is published, so its failure (here: the
     /// directory is not a repository) is a hard error, never "nothing to push".
     #[test]
@@ -7323,10 +7673,21 @@ mod tests {
         fs::create_dir_all(edited.parent().unwrap()).unwrap();
         fs::write(&edited, "[core]\n").unwrap();
         let err = engine
-            .stage_publication(not_repo.path(), std::slice::from_ref(&edited))
+            .stage_publication(
+                not_repo.path(),
+                std::slice::from_ref(&edited),
+                &ValidatedBlobs::default(),
+            )
             .expect_err("a failed git status must be an error");
         assert!(err.contains("git status"), "{err}");
-        let pushed = engine.push_to_remote(not_repo.path(), "main", false, &[edited], "");
+        let pushed = engine.push_to_remote(
+            not_repo.path(),
+            "main",
+            false,
+            &[edited],
+            &ValidatedBlobs::default(),
+            "",
+        );
         assert!(
             matches!(pushed, Err(PushRemoteError::Failed(_))),
             "{pushed:?}"
@@ -7342,12 +7703,17 @@ mod tests {
         git.run(repo.path(), &["add", "-A"]);
         git.run(repo.path(), &["commit", "-m", "seed"]);
         assert_eq!(
-            engine.stage_publication(repo.path(), std::slice::from_ref(&tracked)),
+            engine.stage_publication(
+                repo.path(),
+                std::slice::from_ref(&tracked),
+                &ValidatedBlobs::default()
+            ),
             Ok(None)
         );
         fs::write(&tracked, "[core]\n  autocrlf = false\n").unwrap();
+        let validated = ValidatedBlobs::from_files(std::slice::from_ref(&tracked));
         let staged = engine
-            .stage_publication(repo.path(), std::slice::from_ref(&tracked))
+            .stage_publication(repo.path(), std::slice::from_ref(&tracked), &validated)
             .unwrap()
             .expect("the edit must be staged");
         assert!(staged.contains(rel), "{staged:?}");
@@ -7413,7 +7779,15 @@ mod tests {
         let checkout = cached.checkout_dir.as_path();
         let managed = cached.templates_dir.join("projects/generic/gitconfig.repo");
         fs::write(&managed, content).unwrap();
-        engine.push_to_remote(checkout, "main", false, &[managed], &cached.fetched_sha)
+        let validated = ValidatedBlobs::from_files(std::slice::from_ref(&managed));
+        engine.push_to_remote(
+            checkout,
+            "main",
+            false,
+            &[managed],
+            &validated,
+            &cached.fetched_sha,
+        )
     }
 
     #[test]
@@ -7646,7 +8020,15 @@ mod tests {
         let managed = cached.templates_dir.join("projects/generic/gitconfig.repo");
         fs::write(&managed, "[core]\n  autocrlf = false\n").unwrap();
         let start = std::time::Instant::now();
-        let res = engine.push_to_remote(checkout, "main", false, &[managed], &cached.fetched_sha);
+        let validated = ValidatedBlobs::from_files(std::slice::from_ref(&managed));
+        let res = engine.push_to_remote(
+            checkout,
+            "main",
+            false,
+            &[managed],
+            &validated,
+            &cached.fetched_sha,
+        );
         (res, start.elapsed())
     }
 
@@ -7728,7 +8110,9 @@ mod tests {
         fs::write(&base_file, "updated benign content").unwrap();
         git.run(remote_repo.path(), &["add", "base.txt"]);
         git.run(remote_repo.path(), &["commit", "-m", "benign update"]);
-        let clean_check = engine.validate_committed_tree(remote_repo.path(), &expected_set);
+        let validated = ValidatedBlobs::from_files(std::slice::from_ref(&base_file));
+        let clean_check =
+            engine.validate_committed_tree(remote_repo.path(), &expected_set, &validated);
         assert!(
             clean_check.is_ok(),
             "Clean commit must pass validate_committed_tree"
@@ -7742,7 +8126,9 @@ mod tests {
         git.run(remote_repo.path(), &["add", "base.txt"]);
         git.run(remote_repo.path(), &["commit", "-m", "injected secret"]);
 
-        let secret_check = engine.validate_committed_tree(remote_repo.path(), &expected_set);
+        let validated = ValidatedBlobs::from_files(std::slice::from_ref(&base_file));
+        let secret_check =
+            engine.validate_committed_tree(remote_repo.path(), &expected_set, &validated);
         assert!(
             secret_check.is_err(),
             "Committed secret must fail validate_committed_tree"
@@ -7784,7 +8170,8 @@ mod tests {
         git.run(remote_repo.path(), &["commit", "-m", "update"]);
         let expected_set: std::collections::HashSet<PathBuf> =
             [PathBuf::from("base.txt")].into_iter().collect();
-        engine.validate_committed_tree(remote_repo.path(), &expected_set)
+        let validated = ValidatedBlobs::from_files(std::slice::from_ref(&base_file));
+        engine.validate_committed_tree(remote_repo.path(), &expected_set, &validated)
     }
 
     #[test]
@@ -7854,8 +8241,9 @@ mod tests {
         fs::write(&base_file, "updated benign content\n").unwrap();
         git.run(remote_repo.path(), &["add", "base.txt"]);
         git.run(remote_repo.path(), &["commit", "-m", "benign update"]);
+        let validated = ValidatedBlobs::from_files(std::slice::from_ref(&base_file));
         assert_eq!(
-            engine.validate_committed_tree(remote_repo.path(), &expected_set),
+            engine.validate_committed_tree(remote_repo.path(), &expected_set, &validated),
             Ok(())
         );
 
@@ -7863,8 +8251,9 @@ mod tests {
         fs::write(&base_file, format!("notify = {tok}\n")).unwrap();
         git.run(remote_repo.path(), &["add", "base.txt"]);
         git.run(remote_repo.path(), &["commit", "-m", "injected token"]);
+        let validated = ValidatedBlobs::from_files(std::slice::from_ref(&base_file));
         let err = engine
-            .validate_committed_tree(remote_repo.path(), &expected_set)
+            .validate_committed_tree(remote_repo.path(), &expected_set, &validated)
             .expect_err("a committed Slack bot token must fail the gate");
         assert!(
             err.contains("secret detected in committed HEAD blob"),
