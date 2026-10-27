@@ -32,6 +32,10 @@ pub struct TemplateContext {
 
 impl TemplateContext {
     /// Detects host defaults from system environment and git config for a specific project directory
+    ///
+    /// The home and XDG config roots are normalized with `sanitizer::normalize_root`
+    /// like `push_updates` normalizes them, so init, status and pull render the
+    /// placeholders push writes with the same spelling (CR-01).
     pub fn detect_for_project(
         project_dir: &std::path::Path,
         project_name: &str,
@@ -46,11 +50,13 @@ impl TemplateContext {
                     .or_else(|_| std::env::var("USERPROFILE"))
                     .unwrap_or_else(|_| ".".to_string())
             });
+        let user_home = crate::sanitizer::normalize_root(&user_home).to_string();
 
         let xdg_config = base_dirs
             .as_ref()
             .map(|b| b.config_dir().to_string_lossy().to_string())
             .unwrap_or_else(|| format!("{}/.config", user_home));
+        let xdg_config = crate::sanitizer::normalize_root(&xdg_config).to_string();
 
         let xdg_data = base_dirs
             .as_ref()
