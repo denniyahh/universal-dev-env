@@ -687,10 +687,7 @@ impl SyncEngine {
                     if let Some(bytes) = read_if_present(upstream_root, p)? {
                         if let Ok(raw_str) = std::str::from_utf8(&bytes) {
                             let raw_string = raw_str.to_string();
-                            let should_render = p.extension().and_then(|e| e.to_str())
-                                == Some("jinja")
-                                || raw_string.contains("{{");
-                            if should_render {
+                            if crate::template::should_render(p, &raw_string) {
                                 if let Some(c) = ctx {
                                     let rendered = renderer
                                         .render_str(&raw_string, c)
@@ -1110,10 +1107,7 @@ impl SyncEngine {
 
                 let (content_bytes, ancestor_content) =
                     if let Ok(raw_str) = std::str::from_utf8(&upstream_bytes) {
-                        let should_render = upstream_path.extension().and_then(|e| e.to_str())
-                            == Some("jinja")
-                            || raw_str.contains("{{");
-                        let rendered = if should_render {
+                        let rendered = if crate::template::should_render(&upstream_path, raw_str) {
                             match renderer.render_str(raw_str, ctx) {
                                 Ok(r) => r,
                                 Err(e) => {
