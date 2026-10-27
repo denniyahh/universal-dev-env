@@ -503,13 +503,18 @@ mod tests {
         assert_eq!(param_colon, "{{ user.home }}:{{ user.home }}");
     }
 
-    /// The SEC-03 boundary table for home `/home/alice` (XDG `/home/alice/.config`):
-    /// every row is checked and every failing row is named in the one report.
+    /// The SEC-03 boundary table for home `/home/alice` (XDG `/home/alice/.config`),
+    /// checked for each spelling of the roots with and without trailing
+    /// separators: every row is checked and every failing row is named in the one
+    /// report.
     #[test]
     fn test_path_boundary_table() {
         let sanitizer = Sanitizer::new();
-        let home = "/home/alice";
-        let xdg = "/home/alice/.config";
+        let spellings = [
+            ("/home/alice", "/home/alice/.config"),
+            ("/home/alice/", "/home/alice/.config/"),
+            ("/home/alice//", "/home/alice/.config//"),
+        ];
         let rows: &[(&str, &str)] = &[
             // Replaced: both boundaries hold.
             ("cd /home/alice now", "cd {{ user.home }} now"),
@@ -549,19 +554,22 @@ mod tests {
             // The first occurrence is bounded; the second follows a word char.
             ("/home/alice/home/alice", "{{ user.home }}/home/alice"),
         ];
-        let failures: Vec<String> = rows
-            .iter()
-            .filter_map(|(input, expected)| {
+        let mut failures = Vec::new();
+        for (home, xdg) in spellings {
+            for (input, expected) in rows {
                 let actual = sanitizer.parameterize_paths(input, home, xdg);
-                (actual != *expected)
-                    .then(|| format!("row {input:?}: expected {expected:?}, got {actual:?}"))
-            })
-            .collect();
+                if actual != *expected {
+                    failures.push(format!(
+                        "home {home:?}, row {input:?}: expected {expected:?}, got {actual:?}"
+                    ));
+                }
+            }
+        }
         assert!(
             failures.is_empty(),
             "{} of {} boundary rows failed:\n{}",
             failures.len(),
-            rows.len(),
+            rows.len() * spellings.len(),
             failures.join("\n")
         );
     }
@@ -612,7 +620,7 @@ mod tests {
         let content = "/etc/x /home/alice/y ./z";
         // The `.` fallback when no home is found, HOME=/ in a container, an empty
         // or relative home: none of them is a path to parameterize.
-        for home in ["/", "//", ".", "", "home/alice"] {
+        for home in ["/", "//", "///", ".", "", "home/alice"] {
             assert_eq!(
                 sanitizer.parameterize_paths(content, home, xdg),
                 content,
@@ -623,7 +631,7 @@ mod tests {
         // A degenerate XDG path is ignored the same way; the home pass still runs.
         let with_relative = "/etc/x /home/alice/y ./z =home/alice/.config/q";
         let home_only = "/etc/x {{ user.home }}/y ./z =home/alice/.config/q";
-        for xdg in ["/", "//", ".", "home/alice/.config"] {
+        for xdg in ["/", "//", "///", ".", "home/alice/.config"] {
             assert_eq!(
                 sanitizer.parameterize_paths(with_relative, "/home/alice", xdg),
                 home_only,
@@ -775,6 +783,12 @@ mod tests {
             let published = sanitizer.parameterize_paths(&text, &home, &xdg);
             let rendered = renderer.render_str(&published, &home_context(&home, &xdg));
             proptest::prop_assert_eq!(rendered, Ok(text.clone()));
+
+            // Companion: roots spelled with a trailing separator publish the same text.
+            proptest::prop_assert_eq!(
+                sanitizer.parameterize_paths(&text, &format!("{home}/"), &format!("{xdg}/")),
+                published.clone()
+            );
 
             // Cross-machine control: another home (one char longer, so never equal)
             // renders every placeholder differently.
