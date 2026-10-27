@@ -4149,6 +4149,72 @@ fn test_cli_push_parameterizes_trailing_separator_home() {
 }
 
 #[test]
+fn test_trailing_separator_home_renders_and_reads_in_sync() {
+    let temp = tempdir().unwrap();
+    let fake = fake_home(temp.path());
+    let slash_ude = trailing_separator_cli(temp.path());
+    let plain_ude = sync_cli(temp.path());
+    let placeholders =
+        format!("{HOME_INCLUDE_PLACEHOLDER}[ude]\n\tcfg = {{{{ user.xdg_config }}}}/app\n");
+    let slash = project_with_local_templates(temp.path(), "slash");
+    let plain = project_with_local_templates(temp.path(), "plain");
+    append_to(&slash.join(GITCONFIG_TEMPLATE), &placeholders);
+    append_to(&plain.join(GITCONFIG_TEMPLATE), &placeholders);
+    reinit_rust(&slash_ude, &slash);
+    reinit_rust(&plain_ude, &plain);
+
+    let slash_gitconfig = fs::read_to_string(slash.join(".gitconfig")).unwrap();
+    assert!(
+        slash_gitconfig.contains(&format!("{fake}/.gitconfig.local")),
+        "{slash_gitconfig}"
+    );
+    assert!(
+        slash_gitconfig.contains(&format!("{fake}/.config/app")),
+        "{slash_gitconfig}"
+    );
+    assert!(
+        !slash_gitconfig.contains(&format!("{fake}//")),
+        "{slash_gitconfig}"
+    );
+    assert!(
+        !slash_gitconfig.contains(&format!("{fake}/.config//")),
+        "{slash_gitconfig}"
+    );
+    // Control: the plain HOME renders the same bytes.
+    assert_eq!(
+        slash_gitconfig,
+        fs::read_to_string(plain.join(".gitconfig")).unwrap()
+    );
+
+    // A pushed edit publishes placeholders with single separators and reads In Sync.
+    append_to(
+        &slash.join(".gitconfig"),
+        &format!("\tnote = {fake}/notes\n"),
+    );
+    let push = slash_ude(&slash, &["sync", "push"]);
+    assert_eq!(push.status.code(), Some(0), "{}", outputs(&push));
+    let template = fs::read_to_string(slash.join(GITCONFIG_TEMPLATE)).unwrap();
+    assert!(
+        template.contains("path = {{ user.home }}/.gitconfig.local"),
+        "{template}"
+    );
+    assert!(
+        template.contains("cfg = {{ user.xdg_config }}/app"),
+        "{template}"
+    );
+    assert!(
+        template.contains("note = {{ user.home }}/notes"),
+        "{template}"
+    );
+    assert!(!template.contains("}}//"), "{template}");
+    let status = outputs(&slash_ude(&slash, &["sync", "status"]));
+    assert!(
+        line_with(&status, ".gitconfig:").contains("In Sync"),
+        "{status}"
+    );
+}
+
+#[test]
 fn test_push_refuses_unrenderable_parameterized_hook() {
     let temp = tempdir().unwrap();
     let ude = sync_cli(temp.path());
