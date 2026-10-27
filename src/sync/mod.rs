@@ -7,7 +7,7 @@ pub use state::{FileStateRecord, ProjectState};
 use crate::process::{self, RunOutput};
 use crate::sanitizer::Sanitizer;
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -120,7 +120,22 @@ pub struct ValidatedBlobs {
 impl ValidatedBlobs {
     /// Records the fingerprint ([`SyncEngine::fingerprint`]: SHA-256 of LF-normalized
     /// UTF-8, raw bytes otherwise) of the exact bytes published at `path`.
-    fn record(&mut self, _path: PathBuf, _published: &[u8]) {}
+    fn record(&mut self, path: PathBuf, published: &[u8]) {
+        self.digests
+            .insert(path, SyncEngine::fingerprint(published));
+    }
+
+    /// The record keyed relative to `repo`, the way the gates key staged paths
+    /// (`strip_prefix`, falling back to the key itself).
+    fn relative_to(&self, repo: &Path) -> HashMap<PathBuf, &str> {
+        self.digests
+            .iter()
+            .map(|(path, digest)| {
+                let rel = path.strip_prefix(repo).unwrap_or(path).to_path_buf();
+                (rel, digest.as_str())
+            })
+            .collect()
+    }
 
     /// The record of each file's current bytes. Tests that call the gates without
     /// `push_updates` use it as the stand-in record; production code never builds a
@@ -1811,6 +1826,7 @@ impl SyncEngine {
 
         let staged_output = String::from_utf8_lossy(&diff_cached.stdout);
         let expected_set: HashSet<PathBuf> = rel_staged_paths.into_iter().collect();
+        let validated_rel = validated.relative_to(remote_checkout);
 
         for line in staged_output.lines() {
             if line.trim().is_empty() {
@@ -1857,6 +1873,27 @@ impl SyncEngine {
                     p.display(),
                     finding.reason()
                 ));
+            }
+
+            // The blob must be the bytes push_updates validated. Git runs clean filters
+            // during `git add`, and a filter or hook can rewrite the working tree too,
+            // so the gate compares against the record and never re-reads the file.
+            match validated_rel.get(&p) {
+                None => {
+                    self.reset_index(remote_checkout);
+                    return Err(format!(
+                        "Publication gate violation: no validated content recorded for {}",
+                        p.display()
+                    ));
+                }
+                Some(digest) if *digest != Self::fingerprint(&blob_res.stdout) => {
+                    self.reset_index(remote_checkout);
+                    return Err(format!(
+                        "Publication gate violation: staged index blob {} differs from the validated content",
+                        p.display()
+                    ));
+                }
+                Some(_) => {}
             }
         }
 
@@ -2118,6 +2155,7 @@ impl SyncEngine {
         }
 
         let committed_output = String::from_utf8_lossy(&diff_tree.stdout);
+        let validated_rel = validated.relative_to(repo);
         for line in committed_output.lines() {
             if line.trim().is_empty() {
                 continue;
@@ -2158,6 +2196,24 @@ impl SyncEngine {
                     p.display(),
                     finding.reason()
                 ));
+            }
+
+            // Same binding as the staged gate: a post-commit hook (it runs despite
+            // --no-verify) may amend the commit after the staged gate passed.
+            match validated_rel.get(&p) {
+                None => {
+                    return Err(format!(
+                        "Post-commit publication gate violation: no validated content recorded for {}",
+                        p.display()
+                    ));
+                }
+                Some(digest) if *digest != Self::fingerprint(&blob_res.stdout) => {
+                    return Err(format!(
+                        "Post-commit publication gate violation: committed HEAD blob {} differs from the validated content",
+                        p.display()
+                    ));
+                }
+                Some(_) => {}
             }
         }
 
