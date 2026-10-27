@@ -2443,13 +2443,20 @@ fn remove_conflict_sidecar(local_root: &Path, rel: &Path) -> Result<(), String> 
 /// these survives a push of its rendered text.
 const PARAMETERIZED_PLACEHOLDERS: [&str; 2] = ["{{ user.home }}", "{{ user.xdg_config }}"];
 
-/// Whether `template` is a `.jinja` file with template constructs (other than the
-/// parameterized path placeholders) that publishing rendered text would erase (CR-02).
-/// An absent template has none.
+/// Whether `template` holds template logic that push must neither overwrite nor delete.
+///
+/// A UTF-8 template has logic when the shared render rule
+/// ([`crate::template::should_render`], the rule init, scan and pull use) renders it and
+/// it holds a template construct (`{{`, `{%` or `{#`) other than the parameterized path
+/// placeholders: a push of its rendered text would erase that construct (CR-02), and a
+/// deletion would remove it for every project. An absent template has none.
+///
+/// A template that is not UTF-8 is never rendered. It has logic only when it is a
+/// `.jinja` template whose bytes hold such a construct after the same placeholder
+/// removal (Phase 01 D-14: push never deletes a `.jinja` template that has template
+/// logic). The check runs on the raw bytes with every non-ASCII byte read as NUL; every
+/// placeholder and marker is ASCII, so this keeps every match and creates none.
 pub fn template_has_logic(template: &Path) -> Result<bool, String> {
-    if template.extension().is_none_or(|ext| ext != "jinja") {
-        return Ok(false);
-    }
     let bytes = match fs::read(template) {
         Ok(bytes) => bytes,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
@@ -2460,7 +2467,23 @@ pub fn template_has_logic(template: &Path) -> Result<bool, String> {
             ));
         }
     };
-    let mut text = String::from_utf8_lossy(&bytes).into_owned();
+    let guarded = match std::str::from_utf8(&bytes) {
+        Ok(text) => crate::template::should_render(template, text),
+        Err(_) => template.extension().is_some_and(|ext| ext == "jinja"),
+    };
+    if !guarded {
+        return Ok(false);
+    }
+    let mut text: String = bytes
+        .iter()
+        .map(|&byte| {
+            if byte.is_ascii() {
+                char::from(byte)
+            } else {
+                '\0'
+            }
+        })
+        .collect();
     for placeholder in PARAMETERIZED_PLACEHOLDERS {
         text = text.replace(placeholder, "");
     }
