@@ -4141,6 +4141,45 @@ fn test_push_refuses_unrenderable_parameterized_hook() {
 }
 
 #[test]
+fn test_push_refusal_never_echoes_template_text() {
+    let sentinel = "ude_sentinel_label";
+    let temp = tempdir().unwrap();
+    let ude = sync_cli(temp.path());
+    let project = project_with_local_templates(temp.path(), "project");
+    reinit_rust(&ude, &project);
+    let template_before = fs::read(project.join(GITCONFIG_TEMPLATE)).unwrap();
+
+    append_to(
+        &project.join(".gitconfig"),
+        &format!("[ude]\n\tx = {{{{ 1 | {sentinel} }}}}\n"),
+    );
+    let push = ude(&project, &["sync", "push"]);
+    assert_eq!(push.status.code(), Some(1), "{}", outputs(&push));
+    let stdout = String::from_utf8_lossy(&push.stdout);
+    let stderr = String::from_utf8_lossy(&push.stderr);
+    assert!(stderr.contains(".gitconfig"), "{}", outputs(&push));
+    assert!(stderr.contains("Push rejected"), "{}", outputs(&push));
+    assert!(stderr.contains("unknown filter"), "{}", outputs(&push));
+    assert!(!stdout.contains(sentinel), "{}", outputs(&push));
+    assert!(!stderr.contains(sentinel), "{}", outputs(&push));
+    assert_eq!(
+        fs::read(project.join(GITCONFIG_TEMPLATE)).unwrap(),
+        template_before,
+        "{}",
+        outputs(&push)
+    );
+
+    // Control: a plain line is published.
+    let temp = tempdir().unwrap();
+    let ude = sync_cli(temp.path());
+    let project = project_with_local_templates(temp.path(), "project");
+    reinit_rust(&ude, &project);
+    append_to(&project.join(".gitconfig"), "[ude]\n\tx = plain\n");
+    let push = ude(&project, &["sync", "push"]);
+    assert_eq!(push.status.code(), Some(0), "{}", outputs(&push));
+}
+
+#[test]
 fn test_init_renders_placeholders_in_static_templates_in_sync() {
     let temp = tempdir().unwrap();
     let ude = sync_cli(temp.path());

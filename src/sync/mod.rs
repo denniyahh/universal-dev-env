@@ -5671,12 +5671,18 @@ mod tests {
 
     /// Pushes `local_bytes` as `scripts/hooks/commit-msg` with home `/home/alice`.
     fn push_commit_msg_as_alice(local_bytes: &[u8]) -> (PushResult, tempfile::TempDir) {
+        push_as_alice("scripts/hooks/commit-msg", local_bytes)
+    }
+
+    /// Pushes `local_bytes` as the managed file `rel` (no upstream template yet) with
+    /// home `/home/alice`; returns the result and the upstream root.
+    fn push_as_alice(rel: &str, local_bytes: &[u8]) -> (PushResult, tempfile::TempDir) {
         let engine = SyncEngine::new();
         let local_dir = tempdir().unwrap();
         let upstream_dir = tempdir().unwrap();
-        let hook = local_dir.path().join("scripts/hooks/commit-msg");
-        fs::create_dir_all(hook.parent().unwrap()).unwrap();
-        fs::write(&hook, local_bytes).unwrap();
+        let file = local_dir.path().join(rel);
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(&file, local_bytes).unwrap();
         let res = engine.push_updates(
             local_dir.path(),
             upstream_dir.path(),
@@ -5686,6 +5692,183 @@ mod tests {
             true,
         );
         (res, upstream_dir)
+    }
+
+    /// A render context for home `/home/alice`, as push builds it for that home.
+    fn alice_render_ctx() -> crate::template::TemplateContext {
+        crate::template::TemplateContext {
+            user: crate::template::UserContext {
+                home: "/home/alice".to_string(),
+                xdg_config: "/home/alice/.config".to_string(),
+                xdg_data: "/home/alice/.local/share".to_string(),
+            },
+            user_home: "/home/alice".to_string(),
+            xdg_config: "/home/alice/.config".to_string(),
+            xdg_data: "/home/alice/.local/share".to_string(),
+            git_user_name: "Alice".to_string(),
+            git_email: "alice@example.com".to_string(),
+            project_name: "test-proj".to_string(),
+            project_type: "generic".to_string(),
+            maintainer_ssh_pubkey: None,
+            agent_ssh_pubkey: None,
+            extra: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Runs push gate 5's check with the `/home/alice` context.
+    fn render_back(target: &str, published: &str, local_lf: &str) -> Result<(), String> {
+        SyncEngine::check_render_back(
+            &crate::template::TemplateRenderer::new(),
+            &alice_render_ctx(),
+            Path::new(target),
+            published,
+            local_lf,
+        )
+    }
+
+    #[test]
+    fn test_push_refuses_irreversible_shapes() {
+        // (local file, its content, upstream template, what the case shows)
+        let cases: [(&str, &str, &str, &str); 4] = [
+            (
+                ".gitconfig",
+                "[core]\n\tx = x{{/home/alice/y\n",
+                "projects/generic/gitconfig.repo",
+                "`{{` before a home path becomes `{{{{`",
+            ),
+            (
+                ".gitconfig",
+                "[core]\n\tt = ${{ secrets.TOKEN }}\n",
+                "projects/generic/gitconfig.repo",
+                "literal `${{ }}` with no home path (undefined value)",
+            ),
+            (
+                "mise.toml",
+                "a = \"{# not a comment\"\n",
+                "projects/agents/mise.toml.jinja",
+                "`{#` in text published to a .jinja template",
+            ),
+            (
+                ".gitconfig",
+                "[user]\n\temail = {{ git_email }}\n",
+                "projects/generic/gitconfig.repo",
+                "literal `{{ git_email }}` renders to different text",
+            ),
+        ];
+        let mut failures = Vec::new();
+        for (rel, local, upstream_rel, shape) in cases {
+            let (res, upstream) = push_as_alice(rel, local.as_bytes());
+            match &res {
+                PushResult::ReversibilityBlocked { path, reason } if path == Path::new(rel) => {
+                    if upstream.path().join(upstream_rel).exists() {
+                        failures.push(format!("{shape}: refused but {upstream_rel} was written"));
+                    }
+                    if shape.contains("git_email")
+                        && (!reason.contains("line 2") || reason.contains("email ="))
+                    {
+                        failures.push(format!("{shape}: reason {reason:?}"));
+                    }
+                }
+                other => failures.push(format!(
+                    "{shape}: expected ReversibilityBlocked, got {other:?}"
+                )),
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "{} of 4 irreversible shapes were not refused as planned:\n{}",
+            failures.len(),
+            failures.join("\n")
+        );
+
+        // Control: plain text published to a .jinja template renders back to itself.
+        let (res, upstream) = push_as_alice("mise.toml", b"a = 1\n");
+        assert!(
+            matches!(
+                res,
+                PushResult::Success {
+                    synced_files: 1,
+                    ..
+                }
+            ),
+            "Expected Success, got {res:?}"
+        );
+        assert_eq!(
+            fs::read(upstream.path().join("projects/agents/mise.toml.jinja")).unwrap(),
+            b"a = 1\n"
+        );
+    }
+
+    #[test]
+    fn test_check_render_back_reason_has_no_template_text() {
+        let sentinel = "ude_sentinel_label";
+        let filter = format!("[core]\n\tx = {{{{ 1 | {sentinel} }}}}\n");
+        let reason = render_back("gitconfig.repo", &filter, "[core]\n\tx = 1\n").unwrap_err();
+        assert!(reason.contains("unknown filter"), "{reason}");
+        assert!(reason.contains("line 2"), "{reason}");
+        assert!(!reason.contains(sentinel), "{reason}");
+
+        let function = format!("[core]\n\tx = {{{{ {sentinel}() }}}}\n");
+        let reason = render_back("gitconfig.repo", &function, "[core]\n\tx = 1\n").unwrap_err();
+        assert!(reason.contains("unknown function"), "{reason}");
+        assert!(!reason.contains(sentinel), "{reason}");
+    }
+
+    #[test]
+    fn test_check_render_back_exact_contract() {
+        // LF text with a placeholder renders back to the local text.
+        assert_eq!(
+            render_back("t.jinja", "p = {{ user.home }}/x\n", "p = /home/alice/x\n"),
+            Ok(())
+        );
+        // A CRLF published copy of a CRLF local file: both compared after LF normalization.
+        let local_crlf = "p = /home/alice/x\r\nq = 1\r\n";
+        assert_eq!(
+            render_back(
+                "t.jinja",
+                "p = {{ user.home }}/x\r\nq = 1\r\n",
+                &SyncEngine::normalize_eol(local_crlf)
+            ),
+            Ok(())
+        );
+        // A trailing-newline difference is a mismatch on the extra line.
+        let reason = render_back("t.jinja", "a\n", "a").unwrap_err();
+        assert!(reason.contains("renders back differently"), "{reason}");
+        assert!(reason.contains("line 2"), "{reason}");
+        // No `{{` and a non-.jinja target: not rendered, so `{#` passes.
+        assert_eq!(
+            render_back("gitconfig.repo", "x {# y\n", "x {# y\n"),
+            Ok(())
+        );
+        // The same text with a .jinja target is rendered and fails.
+        let reason = render_back("t.jinja", "x {# y\n", "x {# y\n").unwrap_err();
+        assert!(reason.contains("syntax error"), "{reason}");
+    }
+
+    #[test]
+    fn test_push_secret_scan_precedes_reversibility() {
+        let prefix = "ghp_";
+        let body = "111122223333444455556666777788889999";
+        let local = format!("[core]\n\tt = {prefix}{body}\n\tc = {{# /home/alice/x\n");
+        let (res, upstream) = push_as_alice(".gitconfig", local.as_bytes());
+        match &res {
+            PushResult::SecretBlocked { path, .. } => assert_eq!(path, Path::new(".gitconfig")),
+            other => panic!("Expected SecretBlocked, got {other:?}"),
+        }
+        assert!(
+            !upstream
+                .path()
+                .join("projects/generic/gitconfig.repo")
+                .exists()
+        );
+
+        // Control: without the token line the same file is a reversibility refusal.
+        let local = "[core]\n\tc = {# /home/alice/x\n";
+        let (res, _upstream) = push_as_alice(".gitconfig", local.as_bytes());
+        assert!(
+            matches!(res, PushResult::ReversibilityBlocked { .. }),
+            "Expected ReversibilityBlocked, got {res:?}"
+        );
     }
 
     #[test]
