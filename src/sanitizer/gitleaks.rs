@@ -329,14 +329,15 @@ fn line_span(bytes: &[u8], start: usize, end: usize) -> &[u8] {
 }
 
 /// Narrows `start..end` past LF bytes at both ends (Go `strings.Trim(s, "\n")`).
-fn trim_lf(bytes: &[u8], mut start: usize, mut end: usize) -> (usize, usize) {
-    while start < end && bytes[start] == b'\n' {
-        start += 1;
-    }
-    while end > start && bytes[end - 1] == b'\n' {
-        end -= 1;
-    }
-    (start, end)
+fn trim_lf(bytes: &[u8], start: usize, end: usize) -> (usize, usize) {
+    let span = &bytes[start..end];
+    let leading = span.iter().take_while(|&&b| b == b'\n').count();
+    let trailing = span[leading..]
+        .iter()
+        .rev()
+        .take_while(|&&b| b == b'\n')
+        .count();
+    (start + leading, end - trailing)
 }
 
 /// Shannon entropy in bits, H = −Σ p_b·log2(p_b) over the distinct bytes b of
