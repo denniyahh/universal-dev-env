@@ -4094,6 +4094,60 @@ fn test_push_then_init_substitutes_home_on_new_project() {
     assert!(!gitconfig_c.contains(&fake), "{gitconfig_c}");
 }
 
+/// A [`sync_cli`] runner on `root` whose HOME and XDG_CONFIG_HOME end in `/`.
+fn trailing_separator_cli(root: &Path) -> impl Fn(&Path, &[&str]) -> Output {
+    let fake = fake_home(root);
+    sync_cli_with_env(
+        root,
+        vec![
+            ("HOME".to_string(), format!("{fake}/")),
+            ("XDG_CONFIG_HOME".to_string(), format!("{fake}/.config/")),
+        ],
+    )
+}
+
+/// Initializes a `name` project with `ude`, appends `lines` to its `.gitconfig`,
+/// pushes, and returns the published GITCONFIG_TEMPLATE.
+fn push_gitconfig_lines(
+    ude: &impl Fn(&Path, &[&str]) -> Output,
+    root: &Path,
+    name: &str,
+    lines: &str,
+) -> String {
+    let project = project_with_local_templates(root, name);
+    reinit_rust(ude, &project);
+    append_to(&project.join(".gitconfig"), lines);
+    let push = ude(&project, &["sync", "push"]);
+    assert_eq!(push.status.code(), Some(0), "{name}: {}", outputs(&push));
+    fs::read_to_string(project.join(GITCONFIG_TEMPLATE)).unwrap()
+}
+
+#[test]
+fn test_cli_push_parameterizes_trailing_separator_home() {
+    let temp = tempdir().unwrap();
+    let fake = fake_home(temp.path());
+    let lines = format!("[ude]\n\ta = ({fake})\n\tb = {fake}/x\n\tc = {fake}/.config/app\n");
+
+    let slash = push_gitconfig_lines(
+        &trailing_separator_cli(temp.path()),
+        temp.path(),
+        "slash",
+        &lines,
+    );
+    assert!(
+        slash.ends_with(
+            "[ude]\n\ta = ({{ user.home }})\n\tb = {{ user.home }}/x\n\tc = {{ user.xdg_config }}/app\n"
+        ),
+        "{slash}"
+    );
+    assert!(!slash.contains(&format!("({fake})")), "{slash}");
+    assert!(!slash.contains(&format!("{fake}/")), "{slash}");
+
+    // Control: the same edit pushed with the plain HOME publishes the same bytes.
+    let plain = push_gitconfig_lines(&sync_cli(temp.path()), temp.path(), "plain", &lines);
+    assert_eq!(slash, plain);
+}
+
 #[test]
 fn test_push_refuses_unrenderable_parameterized_hook() {
     let temp = tempdir().unwrap();

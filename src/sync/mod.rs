@@ -5741,6 +5741,80 @@ mod tests {
         assert_eq!(gitconfig.status, SyncStatus::InSync);
     }
 
+    /// Pushes `local` as `.gitconfig` from fresh local and upstream dirs with the
+    /// given roots; returns the push result and the published template, if any.
+    fn push_gitconfig_with_roots(
+        engine: &SyncEngine,
+        local: &str,
+        home: &str,
+        xdg: &str,
+    ) -> (PushResult, Option<String>) {
+        let local_dir = tempdir().unwrap();
+        let upstream_dir = tempdir().unwrap();
+        fs::write(local_dir.path().join(".gitconfig"), local).unwrap();
+        let res = engine.push_updates(
+            local_dir.path(),
+            upstream_dir.path(),
+            home,
+            xdg,
+            false,
+            true,
+        );
+        let published =
+            fs::read_to_string(upstream_dir.path().join("projects/generic/gitconfig.repo")).ok();
+        (res, published)
+    }
+
+    const HOME_LINES_GITCONFIG: &str = "[core]\n\ta = (/home/alice)\n\tb = /home/alice/x\n\tc = /home/alice/.config/app\n\td = /home/alice2/y\n";
+
+    #[test]
+    fn test_push_parameterizes_home_with_trailing_separator() {
+        let engine = SyncEngine::new();
+        // `d` is a neighbouring path that must stay byte-identical.
+        let expected = "[core]\n\ta = ({{ user.home }})\n\tb = {{ user.home }}/x\n\tc = {{ user.xdg_config }}/app\n\td = /home/alice2/y\n";
+        let mut failures = Vec::new();
+        for (home, xdg) in [
+            ("/home/alice/", "/home/alice/.config/"),
+            ("/home/alice//", "/home/alice/.config//"),
+        ] {
+            let (res, published) =
+                push_gitconfig_with_roots(&engine, HOME_LINES_GITCONFIG, home, xdg);
+            match res {
+                PushResult::Success { synced_files, .. } if synced_files == 1 => {}
+                other => failures.push(format!(
+                    "home {home:?}, xdg {xdg:?}: expected Success with 1 file, got {other:?}"
+                )),
+            }
+            if published.as_deref() != Some(expected) {
+                failures.push(format!(
+                    "home {home:?}, xdg {xdg:?}: expected {expected:?}, published {published:?}"
+                ));
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    /// A home or XDG root made only of separators rewrites nothing.
+    #[test]
+    fn test_push_does_not_parameterize_root_home() {
+        let engine = SyncEngine::new();
+        for root in ["/", "//"] {
+            let (res, published) =
+                push_gitconfig_with_roots(&engine, HOME_LINES_GITCONFIG, root, root);
+            match res {
+                PushResult::Success { synced_files, .. } => {
+                    assert_eq!(synced_files, 1, "root {root:?}")
+                }
+                other => panic!("root {root:?}: expected Success, got {other:?}"),
+            }
+            assert_eq!(
+                published.as_deref(),
+                Some(HOME_LINES_GITCONFIG),
+                "root {root:?} rewrote the text"
+            );
+        }
+    }
+
     #[test]
     fn test_push_updates_blocked_on_secret() {
         let engine = SyncEngine::new();

@@ -140,6 +140,11 @@ fn is_parameterizable_root(path: &str) -> bool {
             .any(|component| matches!(component, Component::Normal(_)))
 }
 
+/// Stub: returns `path` unchanged.
+pub fn normalize_root(path: &str) -> &str {
+    path
+}
+
 /// Replaces each occurrence of `needle` in `content` whose leading and trailing
 /// boundaries both hold with `placeholder`, in one left-to-right pass over
 /// `str::match_indices`. Everything else is copied through unchanged.
@@ -537,6 +542,45 @@ mod tests {
         assert!(
             failures.is_empty(),
             "{} of {} boundary rows failed:\n{}",
+            failures.len(),
+            rows.len(),
+            failures.join("\n")
+        );
+    }
+
+    /// Trailing separators are trimmed from a root; a root made only of
+    /// separators, and anything with no trailing separator, is returned as is.
+    #[test]
+    fn test_normalize_root() {
+        #[allow(unused_mut)]
+        let mut rows: Vec<(&str, &str)> = vec![
+            ("/home/alice/", "/home/alice"),
+            ("/home/alice//", "/home/alice"),
+            ("/home/alice", "/home/alice"),
+            // A root of only separators is kept, so is_parameterizable_root
+            // still rejects it instead of seeing the empty string.
+            ("/", "/"),
+            ("//", "//"),
+            ("///", "///"),
+            (".", "."),
+            ("", ""),
+            // Still relative after trimming, so still rejected.
+            ("home/alice/", "home/alice"),
+        ];
+        // On Unix a backslash is a file-name character, not a separator.
+        #[cfg(unix)]
+        rows.push(("/home/alice\\", "/home/alice\\"));
+        let failures: Vec<String> = rows
+            .iter()
+            .filter_map(|(input, expected)| {
+                let actual = normalize_root(input);
+                (actual != *expected)
+                    .then(|| format!("row {input:?}: expected {expected:?}, got {actual:?}"))
+            })
+            .collect();
+        assert!(
+            failures.is_empty(),
+            "{} of {} normalize_root rows failed:\n{}",
             failures.len(),
             rows.len(),
             failures.join("\n")
