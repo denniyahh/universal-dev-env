@@ -495,6 +495,7 @@ mod tests {
                 "${W:-{{ user.home }}/Github/x}",
             ),
             ("see /home/alice.", "see {{ user.home }}."),
+            ("see /home/alice. Then", "see {{ user.home }}. Then"),
             ("/home/alice,", "{{ user.home }},"),
             ("a;/home/alice;b", "a;{{ user.home }};b"),
             ("/home/alice}", "{{ user.home }}}"),
@@ -504,6 +505,8 @@ mod tests {
             // Untouched: a word char, `.word` or `-` neighbour blocks the match.
             ("/home/alice2", "/home/alice2"),
             ("/home/alice.bak", "/home/alice.bak"),
+            ("/home/alice._x", "/home/alice._x"),
+            ("/home/alice.-x", "/home/alice.-x"),
             ("/home/alice-old", "/home/alice-old"),
             ("/home/alice_x", "/home/alice_x"),
             ("/backup/home/alice", "/backup/home/alice"),
