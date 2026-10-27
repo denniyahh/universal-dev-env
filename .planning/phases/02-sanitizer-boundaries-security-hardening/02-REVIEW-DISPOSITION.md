@@ -35,10 +35,13 @@ findings:
     severity: info
     disposition: open
     title: "ARCHITECTURE.md overstates what the gate guarantees"
-open: 8
-total: 8
-unparsed: 1
-recorded: 2026-10-27T08:56:12.749Z
+  - id: IN-05
+    severity: info
+    disposition: open
+    title: "The TypeSafe drift check sends unparameterized AGENTS.md text to an external API (pre-existing, outside the phase diff)"
+open: 9
+total: 9
+recorded: 2026-10-27T08:56:31.867Z
 ---
 
 # Phase 02: Code Review Disposition
@@ -53,6 +56,7 @@ recorded: 2026-10-27T08:56:12.749Z
 | IN-02 | info | open | - |
 | IN-03 | info | open | - |
 | IN-04 | info | open | - |
+| IN-05 | info | open | - |
 
 Dispositions: `open` (recorded, not yet triaged), `fixed`, `skipped`, `deferred`.
 Set `deferred` by hand and put the reason in the Source cell; both are preserved. A `|` in the reason is kept as prose and escaped on the next run.
