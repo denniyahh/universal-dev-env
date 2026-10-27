@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 02
 current_phase_name: Sanitizer, Boundaries & Security Hardening
 status: executing
-stopped_at: Completed 02-06-PLAN.md
-last_updated: "2026-10-27T00:55:41.367Z"
+stopped_at: Completed 02-07-PLAN.md
+last_updated: "2026-10-27T01:15:08.185Z"
 last_activity: 2026-10-26
 last_activity_desc: Phase 02 execution started
-state_head: 09b184c559edf2b334fb9ca3c29d69e7e989b2b3
+state_head: 20f44ba9562a23ae691fa16f45b96c52238e1136
 progress:
   total_phases: 4
   completed_phases: 1
   total_plans: 19
-  completed_plans: 17
+  completed_plans: 18
 ---
 
 # Project State
@@ -27,7 +27,7 @@ See: `.planning/PROJECT.md` (updated 2026-10-22)
 ## Current Position
 
 Phase: 02 (Sanitizer, Boundaries & Security Hardening) — EXECUTING
-Plan: 7 of 8
+Plan: 8 of 8
 Status: Ready to execute
 Last activity: 2026-10-26 — Phase 02 execution started
 
@@ -75,6 +75,7 @@ Progress: [███░░░░░░░] 25%
 | Phase 02 P04 | 14 min | 2 tasks | 1 files |
 | Phase 02 P05 | 15 min | 2 tasks | 5 files |
 | Phase 02 P06 | 23 min | 3 tasks | 2 files |
+| Phase 02 P07 | 17 min | 3 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -129,6 +130,9 @@ Recent decisions affecting current work:
 - [Phase 02]: 02-05: global allowlist paths never skip a file (A4); rule allowlist paths and the AND pre-check are honoured
 - [Phase 02]: 02-06: trim_lf uses take_while counts instead of manual index advances (behaviour unchanged), removing the loop-advance hang class from the mutation gate
 - [Phase 02]: 02-06: 207 of 222 vendored gitleaks rules have no behavioural fixture; recorded as residual risk (T-02-29)
+- [Phase 02]: 02-07: a home or XDG path is replaced only when both boundaries hold; a leading '-' counts only after ':' (shell default), a trailing '.' only when not followed by a word char, '_' or '-'
+- [Phase 02]: 02-07: parameterize_paths skips a home or XDG path that is not absolute with a normal component (the '.' no-home fallback, HOME=/)
+- [Phase 02]: 02-07: no xdg.config alias; ARCHITECTURE.md lists only the two placeholders push writes
 
 ### Pending Todos
 
@@ -168,6 +172,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-27T00:55:41.103Z
-Stopped at: Completed 02-06-PLAN.md
+Last session: 2026-10-27T01:15:07.994Z
+Stopped at: Completed 02-07-PLAN.md
 Resume file: None
