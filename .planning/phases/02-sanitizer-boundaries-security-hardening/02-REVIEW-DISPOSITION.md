@@ -61,7 +61,7 @@ findings:
     title: "The vendored rule pin is enforced only under `cargo test`, and line-ending conversion would break it"
 open: 12
 total: 14
-recorded: 2026-10-28T00:43:24.947Z
+recorded: 2026-10-28T00:43:52.184Z
 ---
 
 # Phase 02: Code Review Disposition
@@ -77,11 +77,11 @@ recorded: 2026-10-28T00:43:24.947Z
 | CR-02 | critical | fixed | plan 02-10; confirmed fixed by re-review ed8dc0d (not in the current review) |
 | IN-04 | info | open | - (not in the current review) |
 | IN-05 | info | open | - (not in the current review) |
-| WR-101 | warning | open | WR-01 of first review a32cd36; id reused by re-review ed8dc0d, restored |
-| WR-102 | warning | open | WR-02 of first review a32cd36; id reused by re-review ed8dc0d, restored |
-| IN-101 | info | open | IN-01 of first review a32cd36; id reused by re-review ed8dc0d, restored |
-| IN-102 | info | open | IN-02 of first review a32cd36; id reused by re-review ed8dc0d, restored |
-| IN-103 | info | open | IN-03 of first review a32cd36; id reused by re-review ed8dc0d, restored |
+| WR-101 | warning | open | WR-01 of first review a32cd36; id reused by re-review ed8dc0d, restored (not in the current review) |
+| WR-102 | warning | open | WR-02 of first review a32cd36; id reused by re-review ed8dc0d, restored (not in the current review) |
+| IN-101 | info | open | IN-01 of first review a32cd36; id reused by re-review ed8dc0d, restored (not in the current review) |
+| IN-102 | info | open | IN-02 of first review a32cd36; id reused by re-review ed8dc0d, restored (not in the current review) |
+| IN-103 | info | open | IN-03 of first review a32cd36; id reused by re-review ed8dc0d, restored (not in the current review) |
 
 Dispositions: `open` (recorded, not yet triaged), `fixed`, `skipped`, `deferred`.
 Set `deferred` by hand and put the reason in the Source cell; both are preserved. A `|` in the reason is kept as prose and escaped on the next run.
