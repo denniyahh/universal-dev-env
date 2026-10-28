@@ -1,0 +1,1 @@
+No external API integration: phase 02 hardens UDE's local sanitizer (src/sanitizer) and the git publication gates of `ude sync push` (src/sync); the detector's only signal is a mention of the existing local-text scan that runs before the TypeSafe call in src/main.rs, which this phase neither adds nor changes (TypeSafe hardening is Phase 3, SEC-05).
