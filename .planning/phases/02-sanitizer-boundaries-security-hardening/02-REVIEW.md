@@ -1,251 +1,174 @@
 ---
 phase: 02-sanitizer-boundaries-security-hardening
-reviewed: 2026-10-27T08:54:26Z
+reviewed: 2026-10-28T00:41:34Z
 depth: deep
-files_reviewed: 9
+files_reviewed: 4
 files_reviewed_list:
-  - src/main.rs
-  - src/sanitizer/entropy.rs
-  - src/sanitizer/gitleaks.rs
   - src/sanitizer/mod.rs
-  - src/sanitizer/rules/gitleaks.toml
   - src/sync/mod.rs
   - src/template/mod.rs
   - tests/e2e_lifecycle.rs
-  - docs/ARCHITECTURE.md
 findings:
-  critical: 2
+  critical: 0
   warning: 2
-  info: 5
-  total: 9
+  info: 3
+  total: 5
 status: issues_found
 ---
 
 # Phase 02: Code Review Report
 
-**Reviewed:** 2026-10-27T08:54:26Z
+**Reviewed:** 2026-10-28T00:41:34Z
 **Depth:** deep
-**Files Reviewed:** 9
+**Files Reviewed:** 4
 **Status:** issues_found
 
 ## Summary
 
-Scope: the diff `2070f2d..HEAD` for the nine listed files, plus the surrounding code it calls:
-`scan_project`, `template_has_logic`, `map_to_upstream`, `open_remote_cache`, and `dirs-sys` 0.5.0's
-`home_dir`. The secret-scan layers are sound for what they claim. Named rules, then the vendored
-gitleaks rules, then R11, each run on the raw view and on a NUL-stripped view. The gates run in the
-right order: the scan and the render-back check run in pass 1, before anything is staged. The staged
-and committed blob gates scan the real blob bytes (`git show` does not apply textconv; checked on
-git 2.56.0). They also tie each blob to the digest recorded in pass 1, which closes the clean-filter
-and working-tree TOCTOU.
+Scope: the diff `a32cd36..HEAD` for the four listed files. These are gap-closure plans 02-09
+(normalize trailing separators off the home and XDG roots) and 02-10 (push gate 2 decided by the
+shared render rule). Cross-file call chains were traced into `src/main.rs`:
+- the `ude sync` root derivation at lines 724-735;
+- `locally_modified_hint`, `logic_template` and `run_sync_resolve`;
+- `scan_project`, `read_if_present` and `check_render_back`;
+- `directories` 6.0.0 and `dirs-sys` 0.5.0 (the locked versions).
 
-Two ways remain for the pusher's identity to reach a published commit, and both are verified:
+Both critical findings of the previous review are closed:
+- **Old CR-01 (a trailing-separator HOME parameterized nothing).** `normalize_root` is applied in
+  `parameterize_paths`, in `push_updates` and in `TemplateContext::detect_for_project`, the only
+  production constructor of a render context. The dependency behaviour cited in the doc comment
+  matches the vendored sources: `dirs-sys` returns `$HOME` as given, and `directories` uses an
+  absolute `XDG_CONFIG_HOME` as given.
+- **Old CR-02 (gate 2 checked only `.jinja` templates).** `template_has_logic` now asks
+  `template::should_render`, the rule that scan, init and pull use. The ASCII-only byte mapping
+  cannot destroy a marker. Placeholder removal can only create a marker, never hide one, so any
+  error falls on the conservative side.
 
-1. If `HOME` ends in `/`, home-path parameterization does nothing (CR-01).
-2. Push gate 2 still detects template logic by the `.jinja` extension, while the new shared render
-   rule also renders non-`.jinja` templates that contain `{{`. A rendered value such as the git email
-   can then be published over the placeholder (CR-02).
+Checks run in this pass:
+- `cargo test` filtered to the phase's new tests: 11 unit and 6 e2e tests passed.
+- `cargo clippy --all-targets -D warnings` exited 0.
+- The working tree was clean afterwards.
 
-Nothing checks the published text for the raw home path after parameterization. So every occurrence
-the boundary rules reject is published silently (WR-01). The post-commit gate passes vacuously when
-HEAD is a merge commit, and PR mode never checks ancestry (WR-02).
+What those checks do not show: the passing unit test for the placeholder-only static template
+does not show that the placeholder survives push (WR-02). No mutation run was made against gate 2
+in this pass.
 
-Vendored rule pin: `test_vendored_rules_load_all` hashes `VENDORED_RULES`, the same
-`include_str!` bytes compiled into the binary, so the file on disk and the compiled rules cannot
-diverge. It has a negative control (one extra byte changes the digest). The checked-out file's
-SHA-256 matches the pinned value. The pin only runs under `cargo test` (IN-03).
-
-## Critical Issues
-
-### CR-01: If HOME ends in `/`, parameterization does nothing and the raw home path is published
-
-**File:** `src/main.rs:724-727`, `src/sanitizer/mod.rs:135-141, 149-165, 256-266`
-**Issue:** `user_home` is `BaseDirs::home_dir().to_string_lossy()`. `dirs-sys` 0.5.0 (the locked
-version) returns `PathBuf::from($HOME)` as is, so `HOME=/home/alice/` yields the needle
-`/home/alice/`. `is_parameterizable_root` accepts it, but `replace_bounded` can then never match a
-real occurrence:
-- `cd /home/alice` does not contain the trailing `/`.
-- In `/home/alice/x`, the needle is followed by `x`, an alphanumeric, which fails
-  `is_trailing_boundary`.
-
-The text therefore passes through unchanged. Gate 5 then compares unchanged text to itself, so it
-passes. No other gate looks for the home path. Verified with verbatim copies of
-`is_leading_boundary`, `is_trailing_boundary`, `is_parameterizable_root` and `replace_bounded`:
-`home="/home/alice/"` leaves `cd /home/alice/x and cd /home/alice` unchanged. The control
-`home="/home/alice"` yields `cd {{ user.home }}/x`. The XDG pass still works in this case,
-because `config_dir` joins `.config` onto the slash-terminated home. Only the home pass fails, and
-it fails silently.
-**Fix:** Normalize both roots before use. Strip trailing separators, keeping a lone `/` so the
-degenerate-root check still rejects it, and refuse or warn when a root is not parameterizable.
-`TemplateContext::detect_for_project` should apply the same normalization so render and parameterize
-agree:
-```rust
-fn normalize_root(path: &str) -> &str {
-    let trimmed = path.trim_end_matches('/');
-    if trimmed.is_empty() { path } else { trimmed }
-}
-// in parameterize_paths (and wherever user_home / xdg_config are derived):
-let user_home = normalize_root(user_home);
-let xdg_config = normalize_root(xdg_config);
-```
-Add a test row with `home = "/home/alice/"`. Add a negative control showing that `"/"` is still
-rejected.
-
-### CR-02: Gate 2 only treats `.jinja` templates as having logic, so push can overwrite logic in other rendered templates and publish the pusher's values
-
-**File:** `src/sync/mod.rs:1491-1508`, `src/sync/mod.rs:2445-2466`, `src/sync/mod.rs:546-548`, `src/template/mod.rs:146-148`, `src/main.rs:1689`
-**Issue:** This phase makes `template::should_render` the single render rule: `.jinja`, or text
-containing `{{`. Init (`materialize_template`), scan and pull now render every template that
-matches it, including non-`.jinja` templates such as `gitconfig.repo` and the hook templates.
-`template_has_logic` (push gate 2) still returns `Ok(false)` for any non-`.jinja` path
-(line 2446). Consider an upstream `projects/generic/gitconfig.repo` containing
-`email = {{ git_email }}` or `name = {{ project_name }}`:
-1. Init writes the rendered value, the pusher's real git email, into `.gitconfig`.
-2. The user edits any line, so scan reports `LocallyModified`.
-3. Gate 2 does not skip the file, because the template is not `.jinja`.
-4. Gate 3 only replaces home and XDG paths.
-5. Gate 4 does not treat an email as a secret.
-6. Gate 5 is skipped, because `should_render("gitconfig.repo", published)` is false when the
-   published text has no `{{`.
-
-The published template then has the placeholder replaced by the pusher's email. This erases the
-template logic for every project (the invariant CR-02 was meant to protect) and publishes personal
-data. If the template also has `{{ user.home }}`, Gate 5 runs, but rendering plain text returns the
-same text, so it passes anyway. No template in the current `templates/` tree triggers this, but the
-template repository is remote content the pusher does not control.
-**Fix:** Make Gate 2 use the same rule as rendering. Run the logic check on any template the render
-rule would render, not only on `.jinja` files:
-```rust
-pub fn template_has_logic(template: &Path) -> Result<bool, String> {
-    let bytes = match fs::read(template) { /* as today */ };
-    let Ok(raw) = std::str::from_utf8(&bytes) else { return Ok(false) };
-    if !crate::template::should_render(template, raw) {
-        return Ok(false);
-    }
-    let mut text = raw.to_string();
-    for placeholder in PARAMETERIZED_PLACEHOLDERS {
-        text = text.replace(placeholder, "");
-    }
-    Ok(["{{", "{%", "{#"].iter().any(|m| text.contains(m)))
-}
-```
-Add a regression test: a non-`.jinja` template with `{{ git_email }}`, a local edit, and push. The
-expected result is that the file lands in `skipped_templates` and the email never appears in the
-staged bytes.
+The previous review's WR-01 (no check for a raw home path after parameterization), WR-02 (the
+merge-HEAD and PR-mode binding gate) and its Info items are outside this diff. The code at those
+sites is unchanged, so they are carried forward and not re-counted here.
 
 ## Warnings
 
-### WR-01: Nothing checks for the raw home path after parameterization, so every rejected occurrence is published silently
+### WR-01: `ude sync resolve` promises a publish or deletion that gate 2 now refuses for static templates
 
-**File:** `src/sync/mod.rs:1543-1595`, `src/sanitizer/mod.rs:102-126`
-**Issue:** Parameterization is the only defense for the home path. Every occurrence it declines to
-rewrite is published raw, Gate 5 passes it (the text renders to itself), and no gate refuses it.
-Beyond the accepted cases (alias spellings, `.`/`./` suffixes), these inputs also publish the
-pusher's home path verbatim (verified with the copied functions):
-- Compiler and linker flags such as `CFLAGS=-I/home/alice/include -L/home/alice/lib` (for example in
-  `mise.toml` env). The leading `I` or `L` is alphanumeric, so `is_leading_boundary` rejects the
-  match.
-- JSON with escaped slashes, such as `"\/home\/alice\/x"`.
-- Any managed file that is not UTF-8 (Latin-1, UTF-16). Gate 3 is skipped for it (lines 1559-1561),
-  although Gate 4 scans the same file through the NUL-stripped view.
+**File:** `src/main.rs:1621-1626` (consequence of `src/sync/mod.rs:2459-2492`)
+**Issue:** After `resolve_conflict` returns `KeptLocal`, it records the upstream hash as the
+ancestor (`src/sync/mod.rs:913-918`), so the next scan reads the file as `LocallyModified`. For
+`AcceptedLocalDeletion` it reads as `LocalDeleted`. Both statuses go through gate 2. Since
+`a30c969`, gate 2 also skips non-`.jinja` templates that `should_render` renders, such as
+`gitconfig.repo` holding `{{ git_email }}` or a hook template holding `{{ project_name }}`.
+`run_sync_resolve` still prints these messages unconditionally:
+- "local content will be published on the next push"
+- "the next push deletes the upstream template if it still exists"
 
-Afterwards, main prints "Sanitization gate passed: clean of secrets & parameters applied" with no
-warning.
-**Fix:** After Gate 3, scan the published bytes for the raw `user_home` byte string (and the
-UTF-16LE/BE encodings, reusing the NUL-stripped view). Refuse on any hit with a fixed-text reason and
-a line number, for example `PushResult::HomePathBlocked { path, line }`. Do this whether or not the
-occurrence was at a boundary. The decision to leave `/home/alice.bak` unrewritten then stays a
-rewriting rule, and no longer lets the path through silently.
+The next push then lands the file in `skipped_templates` and exits 1. This is the opposite of what
+resolve just told the user. The gap already existed for `.jinja` templates, and this phase widened
+it to every managed static template. `status`, `init` and the deletion hints all consult
+`logic_template`. The resolve message is the one user-facing promise that does not.
+**Fix:** Have `run_sync_resolve` check the template the same way the status hints do. For example:
+```rust
+let has_logic = logic_template(&root_template_dir, file).is_some();
+let meaning = match (outcome, has_logic) {
+    (sync::ResolveOutcome::KeptLocal, true) => format!(
+        "kept locally; push skips it because its template has logic; {}",
+        template_logic_remedy(file, &root_template_dir, &template)),
+    (sync::ResolveOutcome::AcceptedLocalDeletion, true) =>
+        "deletion kept locally; push skips it because its template has logic".to_string(),
+    // ... existing arms
+};
+```
+`run_sync_resolve` is offline, so it needs the template root passed in. Add an e2e test:
+1. Set up a conflict over a `gitconfig.repo` that holds `{{ git_email }}`.
+2. Run `sync resolve`.
+3. Assert that the message does not claim a publish, and that `push` reports the skip.
 
-### WR-02: The post-commit binding gate passes vacuously on a merge HEAD, and PR mode never checks ancestry
+### WR-02: The unit test for a placeholder-only static template passes on a push that erases the placeholder
 
-**File:** `src/sync/mod.rs:2133-2221`, `src/sync/mod.rs:1949-1955`, `src/sync/mod.rs:2026-2034`
-**Issue:** `validate_committed_tree` lists only `git diff-tree -r HEAD`, which prints nothing for a
-merge commit, and accepts an empty listing. The comment at lines 2201-2202 names a post-commit hook
-that amends the commit as the threat this gate exists for. Verified on git 2.56.0: a merge HEAD whose
-first parent is the base and whose tree adds `secret.txt` produced empty `diff-tree` output with
-exit 0. The control, the same commands on a non-merge commit, listed `A secret.txt`. `HEAD~1` still
-equalled the base, so `check_continuity` passes too, and direct mode would push it. In PR mode
-(`push_pr_branch`) there is no continuity check at all. A hook that amends the commit and then adds
-an empty commit on top leaves a HEAD diff that validates, and `git push -u origin <sync_branch>`
-publishes both commits.
-**Fix:** Check the commit's shape before checking its contents:
-1. Require exactly one parent: `git rev-list --parents -n 1 HEAD` has two fields.
-2. In both modes, require that parent to equal `fetched_sha`. PR mode needs `fetched_sha` passed in.
-3. Require the committed path set to equal `expected_set`, which rules out an empty listing.
+**File:** `src/sync/mod.rs` (`test_push_publishes_over_placeholder_only_static_template`; `record_rendered_gitconfig`; `push_dirs` at line 4799)
+**Issue:** `record_rendered_gitconfig` renders the template with the host context from
+`detect_for_project`, so the local `.gitconfig` holds the host's real home path, for example
+`/var/home/<user>/.gitconfig.local`. `push_dirs` then pushes with the roots `/home/alice` and
+`/home/alice/.config`. Traced through `push_updates`:
+1. Gate 3 parameterizes with `/home/alice` and finds nothing to replace.
+2. The published text has no `{{` left, so `check_render_back` returns `Ok` without rendering
+   (`src/sync/mod.rs:546-548`).
+3. The published `gitconfig.repo` therefore carries the host's literal home path where
+   `{{ user.home }}` used to be.
 
-Roll back on any failure.
+The test asserts only that the file is not in `skipped_templates` and checks the suffix, so it
+passes on exactly the lossy publish this phase exists to prevent. The comment hands the
+placeholder check to the e2e test. That leaves the unit layer, the one gate 2 regressions hit
+first, endorsing a placeholder-erasing outcome.
+
+The test reflects a latent API hazard. `push_updates` scans with the host-detected roots
+(`dummy_ctx`, line 1423) but parameterizes and renders back (gates 3 and 5) with the roots the
+caller passes. When the two disagree, gate 5 cannot catch the loss. In production they agree,
+because `main.rs` derives both from `BaseDirs`.
+**Fix:** In the test, push with the context's own roots and assert that the placeholder survives:
+```rust
+let (ctx, rendered) = record_rendered_gitconfig(local.path(), upstream.path(), template_text);
+let result = engine.push_updates(local.path(), upstream.path(),
+    &ctx.user_home, &ctx.xdg_config, false, true);
+// ...
+assert!(published.contains("path = {{ user.home }}/.gitconfig.local"));
+```
+To remove the hazard itself, `push_updates` could build `dummy_ctx` from the roots it is given
+instead of detecting them again. Alternatively, it could `debug_assert!` that the detected and
+given roots agree after normalization.
 
 ## Info
 
-### IN-01: A home path that cannot be parameterized is skipped with no diagnostic
+### IN-01: Two roots are still not single-spelled
 
-**File:** `src/sanitizer/mod.rs:256-266`, `src/main.rs:727`
-**Issue:** When `user_home` is `.` (the fallback), relative, `/` or `//`, `parameterize_paths`
-silently returns the input. Push then still reports "parameters applied". This conflicts with the
-project's fail-closed observability rule.
-**Fix:** Have `parameterize_paths`, or its caller in `push_updates`, report that the root was
-rejected. Emit a stderr warning naming which root was skipped and why, without printing the value.
+**File:** `src/template/mod.rs:55-64`
+**Issue:** Two cases slip past normalization:
+- **`xdg_data`.** It is never passed through `normalize_root`, so `XDG_DATA_HOME=/x/` renders
+  `{{ user.xdg_data }}/a` as `/x//a`.
+- **A derived `config_dir`.** When `XDG_CONFIG_HOME` is unset, `directories` builds `config_dir`
+  as `home_dir.join(".config")`. `Path::join` adds no separator after a trailing one, so
+  `HOME=/home/alice//` yields `/home/alice//.config`. `normalize_root` trims only trailing
+  separators, so that inner `//` reaches every render of `{{ user.xdg_config }}`.
 
-### IN-02: Init has two template-render paths with different rules
+Both cases are consistent within one machine and reversible. They are cosmetic, but they
+contradict the "one spelling of each root" claim in the `detect_for_project` doc. The unit test
+pair `("/home/alice//", "/home/alice/.config//")` is not a pair `directories` can produce from
+`HOME=/home/alice//`.
+**Fix:** Normalize `xdg_data` too. Either derive `xdg_config` from the normalized `user_home` when
+`XDG_CONFIG_HOME` is unset, or document the inner-separator case.
 
-**File:** `src/main.rs:1714-1752` vs `src/main.rs:1675-1712`
-**Issue:** `render_and_write` / `rendered_template` always render (`.jinja` call sites) through
-`fs::read_to_string`. `materialize_template` renders by `should_render` and copies non-UTF-8 files.
-The phase's stated goal was a single render rule (SEC-04). Today the hardcoded `.jinja` arguments
-keep the two paths consistent. A future call site that picks the wrong helper would diverge without
-any error.
-**Fix:** Route the `.jinja` call sites through `materialize_template` and delete
-`render_and_write` / `rendered_template`. `kept_ancestor` already uses the shared rule.
+### IN-02: `template_has_logic` reads templates differently from `read_if_present`
 
-### IN-03: The vendored rule pin is enforced only under `cargo test`, and line-ending conversion would break it
+**File:** `src/sync/mod.rs:2459-2469`, `src/main.rs:1424-1427`
+**Issue:** `read_if_present` refuses a symlinked template and reads `NotADirectory` as absent.
+`template_has_logic` follows symlinks and turns `NotADirectory` into an error. Inside push, the
+scan runs first and fails before gate 2, so push is unaffected. The init and status hints
+(`logic_template` via `print_missing_tracked_warning`) can still disagree with
+`renders_template`, which refuses symlinks. The two then give opposite answers for the same
+template. Also, `logic_template` collapses `Err` to "no logic" with `unwrap_or(false)`.
+**Fix:** Read through `read_if_present(upstream_root, template)` (pass the root in), and let
+`logic_template` surface `Err` the way `locally_modified_hint` does.
 
-**File:** `src/sanitizer/gitleaks.rs:17-20, 557-576`
-**Issue:** The pin is a real guard for CI: it hashes the compiled-in bytes and has a negative
-control. It does not run in `cargo build`, so a release built without tests ships whatever
-`gitleaks.toml` holds. The repository also has no `.gitattributes`. A checkout with
-`core.autocrlf=true` would rewrite the file to CRLF, fail the hash, and change the compiled bytes.
-**Fix:** Add `src/sanitizer/rules/* -text` (or `binary`) to `.gitattributes`. Optionally, make CI
-run the pin test as a separate required job.
+### IN-03: Upgrading re-renders every placeholder file for users whose HOME or XDG root ended in a separator
 
-### IN-04: ARCHITECTURE.md overstates what the gate guarantees
-
-**File:** `docs/ARCHITECTURE.md:75, 77-80`
-**Issue:**
-- "Rejecting any files containing high-entropy strings" contradicts the measured limits stated in
-  `entropy.rs:5-8`: hex-only and single-case secrets are never caught, and 3-23% of random keys
-  pass.
-- Section 2 lists `C:\Users\alice` and claims the paths are parameterized. It does not mention that
-  boundary-rejected occurrences and non-UTF-8 files are published raw (WR-01), or the
-  exact-spelling-only matching (forward-slash `C:/Users/alice` and escaped `C:\\Users\\alice` are
-  not matched).
-
-**Fix:** State the limits. Point to `entropy.rs` for the R11 detection rates and to the
-`test_path_boundary_table` rows for which spellings are rewritten.
-
-### IN-05: The TypeSafe drift check sends unparameterized AGENTS.md text to an external API (pre-existing, outside the phase diff)
-
-**File:** `src/main.rs:1079-1100`
-**Issue:** Before `evaluate_drift`, the local `.agents/AGENTS.md` is only secret-scanned
-(`check_secrets`). Its raw text, including any home path or username, is sent to the TypeSafe API.
-This is outside the phase goal ("before remote git staging or push") and these lines did not change
-in this phase. It is recorded here because it is a second outbound channel the sanitizer only partly
-covers.
-**Fix:** Send `parameterize_paths(local_txt, user_home, xdg_config)` instead of the raw text, or
-document the egress.
+**File:** `src/template/mod.rs:53,59`
+**Issue:** Existing `state.json` ancestors were rendered with the old spelling, for example
+`/home/alice//x`. After this change, scan renders upstream as `/home/alice/x`, so each such file
+reads as `UpstreamModified`, or as a merge or conflict if it was edited locally. This happens once
+and is benign, but it arrives with no note.
+**Fix:** Mention it in the changelog or release notes. No code change is needed.
 
 ---
 
-Verification notes:
-- CR-01 and WR-01 were reproduced by compiling verbatim copies of the four boundary functions from
-  `src/sanitizer/mod.rs:102-165`. The trailing-slash behaviour of `HOME` comes from reading
-  `dirs-sys` 0.5.0 `home_dir`. It was not run end to end through `ude sync push`.
-- WR-02's `git diff-tree` behaviour was reproduced in a scratch repo, with a control. The full hook
-  scenario was not run against `push_to_remote`.
-- CR-02 was confirmed by reading the code: `template_has_logic` returns early for non-`.jinja`
-  files, and `check_render_back` is skipped when the published text has no `{{`. It was not run end
-  to end.
-
-_Reviewed: 2026-10-27T08:54:26Z_
+_Reviewed: 2026-10-28T00:41:34Z_
 _Reviewer: Claude (gsd-code-reviewer)_
 _Depth: deep_
