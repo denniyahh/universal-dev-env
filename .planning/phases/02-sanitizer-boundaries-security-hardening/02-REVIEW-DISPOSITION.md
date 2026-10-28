@@ -39,8 +39,28 @@ findings:
     severity: info
     disposition: open
     title: "The vendored rule pin is enforced only under `cargo test`, and line-ending conversion would break it"
-open: 7
-total: 9
+  - id: WR-101
+    severity: warning
+    disposition: open
+    title: "Nothing checks for the raw home path after parameterization, so every rejected occurrence is published silently"
+  - id: WR-102
+    severity: warning
+    disposition: open
+    title: "The post-commit binding gate passes vacuously on a merge HEAD, and PR mode never checks ancestry"
+  - id: IN-101
+    severity: info
+    disposition: open
+    title: "A home path that cannot be parameterized is skipped with no diagnostic"
+  - id: IN-102
+    severity: info
+    disposition: open
+    title: "Init has two template-render paths with different rules"
+  - id: IN-103
+    severity: info
+    disposition: open
+    title: "The vendored rule pin is enforced only under `cargo test`, and line-ending conversion would break it"
+open: 12
+total: 14
 recorded: 2026-10-28T00:43:24.947Z
 ---
 
@@ -57,6 +77,11 @@ recorded: 2026-10-28T00:43:24.947Z
 | CR-02 | critical | fixed | plan 02-10; confirmed fixed by re-review ed8dc0d (not in the current review) |
 | IN-04 | info | open | - (not in the current review) |
 | IN-05 | info | open | - (not in the current review) |
+| WR-101 | warning | open | WR-01 of first review a32cd36; id reused by re-review ed8dc0d, restored |
+| WR-102 | warning | open | WR-02 of first review a32cd36; id reused by re-review ed8dc0d, restored |
+| IN-101 | info | open | IN-01 of first review a32cd36; id reused by re-review ed8dc0d, restored |
+| IN-102 | info | open | IN-02 of first review a32cd36; id reused by re-review ed8dc0d, restored |
+| IN-103 | info | open | IN-03 of first review a32cd36; id reused by re-review ed8dc0d, restored |
 
 Dispositions: `open` (recorded, not yet triaged), `fixed`, `skipped`, `deferred`.
 Set `deferred` by hand and put the reason in the Source cell; both are preserved. A `|` in the reason is kept as prose and escaped on the next run.
