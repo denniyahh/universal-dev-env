@@ -8170,6 +8170,19 @@ git update-ref HEAD "$M"
     #[cfg(unix)]
     const HOOK_EXTRA_COMMIT: &str = "git commit --allow-empty --no-verify -q -m extra\n";
 
+    /// Hook tail: replaces HEAD with a parentless commit of the same tree.
+    #[cfg(unix)]
+    const HOOK_PARENTLESS: &str = r#"R=$(git commit-tree "$(git rev-parse 'HEAD^{tree}')" -m root)
+git update-ref HEAD "$R"
+"#;
+
+    /// Hook tail: amends a file nobody validated into UDE's commit.
+    #[cfg(unix)]
+    const HOOK_ADD_FILE: &str = r#"printf '%s\n' INJECTED_BY_HOOK > templates/hook-extra.txt
+git add -- templates/hook-extra.txt
+git commit --amend --no-edit --no-verify -q
+"#;
+
     /// What a test inspects after [`push_with_post_commit_hook`].
     #[cfg(unix)]
     struct HookedPush {
@@ -8177,6 +8190,7 @@ git update-ref HEAD "$M"
         bare: tempfile::TempDir,
         _cache: tempfile::TempDir,
         fetched_sha: String,
+        managed_rel: String,
         /// The hook's marker exists: a refusal or a publish without it proves nothing.
         hook_ran: bool,
     }
@@ -8235,6 +8249,7 @@ git update-ref HEAD "$M"
             bare,
             _cache: cache,
             fetched_sha,
+            managed_rel,
             hook_ran,
         }
     }
@@ -8314,6 +8329,214 @@ git update-ref HEAD "$M"
         assert_remote_unchanged(&git, &pushed);
         let err = push_failure(pushed.res);
         assert!(err.contains("Branch continuity check failed"), "{err}");
+    }
+
+    /// The exact bytes of the managed template on `refname` of the bare remote.
+    #[cfg(unix)]
+    fn remote_managed_blob(git: &GitFixture, pushed: &HookedPush, refname: &str) -> Vec<u8> {
+        git.checked(
+            pushed.bare.path(),
+            &["show", &format!("{refname}:{}", pushed.managed_rel)],
+        )
+        .stdout
+    }
+
+    /// The name of the one `refs/heads/ude-sync-*` ref of the bare remote; `main` must
+    /// still be at the fetched head and nothing else may exist.
+    #[cfg(unix)]
+    fn single_sync_branch(git: &GitFixture, pushed: &HookedPush) -> String {
+        let heads = remote_heads(git, pushed.bare.path());
+        let (sync, others): (Vec<_>, Vec<_>) = heads
+            .into_iter()
+            .partition(|(name, _)| name.starts_with("refs/heads/ude-sync-"));
+        assert_eq!(
+            others,
+            vec![("refs/heads/main".to_string(), pushed.fetched_sha.clone())]
+        );
+        assert_eq!(sync.len(), 1, "{sync:?}");
+        sync[0].0.clone()
+    }
+
+    #[test]
+    fn test_raw_commit_parents() {
+        let id = |digit: char| digit.to_string().repeat(40);
+        let (tree, p1, p2, p8, p9) = (id('0'), id('1'), id('2'), id('8'), id('9'));
+        let people = "author a <a@x> 1 +0000\ncommitter c <c@x> 1 +0000\n";
+        let mut invalid_message = format!("tree {tree}\nparent {p1}\n{people}\nmsg ").into_bytes();
+        invalid_message.extend_from_slice(&[0xFF, 0xFE, b'\n']);
+        let rows: Vec<(&str, Vec<u8>, Vec<String>)> = vec![
+            (
+                "one parent",
+                format!("tree {tree}\nparent {p1}\n{people}\nmsg\n").into_bytes(),
+                vec![p1.clone()],
+            ),
+            (
+                "two parents in order",
+                format!("tree {tree}\nparent {p1}\nparent {p2}\n{people}\nmsg\n").into_bytes(),
+                vec![p1.clone(), p2.clone()],
+            ),
+            (
+                "no parent",
+                format!("tree {tree}\n{people}\nmsg\n").into_bytes(),
+                vec![],
+            ),
+            (
+                "parent text in the message",
+                format!("tree {tree}\nparent {p1}\n{people}\nparent {p9}\n").into_bytes(),
+                vec![p1.clone()],
+            ),
+            (
+                "indented header continuation line",
+                format!(
+                    "tree {tree}\nparent {p1}\n{people}gpgsig -----BEGIN\n parent {p8}\n -----END\n\nmsg\n"
+                )
+                .into_bytes(),
+                vec![p1.clone()],
+            ),
+            (
+                "message with invalid UTF-8",
+                invalid_message,
+                vec![p1.clone()],
+            ),
+        ];
+        let mut failures = Vec::new();
+        for (name, raw, expected) in rows {
+            let actual = raw_commit_parents(&raw);
+            if actual != expected {
+                failures.push(format!("{name}: {actual:?} != {expected:?}"));
+            }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+
+    #[test]
+    fn test_committed_gate_compares_full_object_ids() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let repo = tempdir().unwrap();
+        git.run(repo.path(), &["init", "-b", "main"]);
+        let base_file = repo.path().join("base.txt");
+        fs::write(&base_file, "initial").unwrap();
+        git.run(repo.path(), &["add", "-A"]);
+        git.run(repo.path(), &["commit", "-m", "base commit"]);
+        let base = git.output(repo.path(), &["rev-parse", "HEAD"]);
+        fs::write(&base_file, "updated\n").unwrap();
+        git.run(repo.path(), &["add", "base.txt"]);
+        git.run(repo.path(), &["commit", "-m", SYNC_COMMIT_MESSAGE]);
+        let head = git.output(repo.path(), &["rev-parse", "HEAD"]);
+        let expected_set: HashSet<PathBuf> = [PathBuf::from("base.txt")].into_iter().collect();
+        let validated = ValidatedBlobs::from_files(std::slice::from_ref(&base_file));
+
+        let rows: [(&str, &str, Option<&str>); 4] = [
+            ("full id", &base, None),
+            (
+                "first 12 characters",
+                &base[..12],
+                Some("Branch continuity check failed"),
+            ),
+            ("empty base", "", Some("no fetched head")),
+            (
+                "the commit's own id",
+                &head,
+                Some("Branch continuity check failed"),
+            ),
+        ];
+        let mut failures = Vec::new();
+        for (name, row_base, expected) in rows {
+            let verdict = engine.validate_committed_tree(
+                repo.path(),
+                &head,
+                row_base,
+                &expected_set,
+                &validated,
+            );
+            let as_expected = match (&verdict, expected) {
+                (Ok(()), None) => true,
+                (Err(err), Some(text)) => err.contains(text),
+                _ => false,
+            };
+            if !as_expected {
+                failures.push(format!("{name}: {verdict:?}, expected {expected:?}"));
+            }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_pr_push_refuses_hook_parentless_commit() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let pushed = push_with_post_commit_hook(&git, &engine, true, HOOK_PARENTLESS);
+
+        assert!(pushed.hook_ran, "the post-commit hook never ran");
+        assert_remote_unchanged(&git, &pushed);
+        let err = push_failure(pushed.res);
+        assert!(err.contains("has 0 parents"), "{err}");
+        assert!(err.contains("exactly one parent"), "{err}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_direct_push_refuses_hook_added_commit() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let tail = format!("{HOOK_AMEND_INJECT}{HOOK_EXTRA_COMMIT}");
+        let pushed = push_with_post_commit_hook(&git, &engine, false, &tail);
+
+        assert!(pushed.hook_ran, "the post-commit hook never ran");
+        assert_remote_unchanged(&git, &pushed);
+        let err = push_failure(pushed.res);
+        assert!(err.contains("Branch continuity check failed"), "{err}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_push_refuses_hook_added_file() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let pushed = push_with_post_commit_hook(&git, &engine, false, HOOK_ADD_FILE);
+
+        assert!(pushed.hook_ran, "the post-commit hook never ran");
+        assert_remote_unchanged(&git, &pushed);
+        let err = push_failure(pushed.res);
+        assert!(
+            err.contains("unvalidated file committed in HEAD: templates/hook-extra.txt"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_direct_push_publishes_with_benign_post_commit_hook() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let pushed = push_with_post_commit_hook(&git, &engine, false, "");
+
+        assert!(pushed.hook_ran, "the post-commit hook never ran");
+        assert!(pushed.res.is_ok(), "{:?}", pushed.res);
+        let main = git.output(pushed.bare.path(), &["rev-parse", "refs/heads/main"]);
+        assert_ne!(main, pushed.fetched_sha, "remote main did not advance");
+        assert_eq!(
+            remote_managed_blob(&git, &pushed, "refs/heads/main"),
+            HOOKED_TEMPLATE.as_bytes()
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_pr_push_publishes_with_benign_post_commit_hook() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let pushed = push_with_post_commit_hook(&git, &engine, true, "");
+
+        assert!(pushed.hook_ran, "the post-commit hook never ran");
+        assert!(pushed.res.is_ok(), "{:?}", pushed.res);
+        let sync = single_sync_branch(&git, &pushed);
+        assert_eq!(
+            remote_managed_blob(&git, &pushed, &sync),
+            HOOKED_TEMPLATE.as_bytes()
+        );
     }
 
     #[test]
