@@ -8068,6 +8068,174 @@ mod tests {
         assert_ne!(remote_main(), cached.fetched_sha);
     }
 
+    /// The template bytes every hooked push validates.
+    #[cfg(unix)]
+    const HOOKED_TEMPLATE: &str = "[core]\n\tx = 1\n";
+
+    /// Hook tail: appends a line to the managed file and amends UDE's commit.
+    #[cfg(unix)]
+    const HOOK_AMEND_INJECT: &str = r#"printf '%s\n' INJECTED_BY_HOOK >> "$F"
+git add -- "$F"
+git commit --amend --no-edit --no-verify -q
+"#;
+
+    /// Hook tail: makes HEAD a merge whose first parent is HEAD's parent and whose second
+    /// parent is HEAD, with HEAD's tree.
+    #[cfg(unix)]
+    const HOOK_MERGE_WRAP: &str = r#"M=$(git commit-tree "$(git rev-parse 'HEAD^{tree}')" -p "$(git rev-parse HEAD~1)" -p "$(git rev-parse HEAD)" -m merge)
+git update-ref HEAD "$M"
+"#;
+
+    /// Hook tail: stacks an empty commit on HEAD.
+    #[cfg(unix)]
+    const HOOK_EXTRA_COMMIT: &str = "git commit --allow-empty --no-verify -q -m extra\n";
+
+    /// What a test inspects after [`push_with_post_commit_hook`].
+    #[cfg(unix)]
+    struct HookedPush {
+        res: Result<String, PushRemoteError>,
+        bare: tempfile::TempDir,
+        _cache: tempfile::TempDir,
+        fetched_sha: String,
+        /// The hook's marker exists: a refusal or a publish without it proves nothing.
+        hook_ran: bool,
+    }
+
+    /// Publishes [`HOOKED_TEMPLATE`] over the seeded template of a fresh bare remote with
+    /// a post-commit hook installed in the cache checkout. The hook runs its body once
+    /// (a marker stops an amend's own post-commit), with `F` set to the managed file's
+    /// checkout-relative path, then `hook_tail`.
+    #[cfg(unix)]
+    fn push_with_post_commit_hook(
+        git: &GitFixture,
+        engine: &SyncEngine,
+        open_pr: bool,
+        hook_tail: &str,
+    ) -> HookedPush {
+        use std::os::unix::fs::PermissionsExt;
+        let bare = seeded_bare_remote(git);
+        let cache = tempdir().unwrap();
+        let cached = engine
+            .ensure_remote_repo(bare.path().to_str().unwrap(), "main", cache.path())
+            .unwrap();
+        let checkout = cached.checkout_dir.clone();
+        let managed = cached.templates_dir.join("projects/generic/gitconfig.repo");
+        let managed_rel = managed
+            .strip_prefix(&checkout)
+            .unwrap()
+            .display()
+            .to_string();
+        fs::write(&managed, HOOKED_TEMPLATE).unwrap();
+        let validated = ValidatedBlobs::from_files(std::slice::from_ref(&managed));
+
+        let hook = checkout.join(".git/hooks/post-commit");
+        fs::create_dir_all(hook.parent().unwrap()).unwrap();
+        fs::write(
+            &hook,
+            format!(
+                "#!/bin/sh\n[ -e .git/ude-test-hook-ran ] && exit 0\n: > .git/ude-test-hook-ran\nF='{managed_rel}'\n{hook_tail}"
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let res = engine.push_to_remote(
+            &checkout,
+            "main",
+            open_pr,
+            std::slice::from_ref(&managed),
+            &validated,
+            &cached.fetched_sha,
+        );
+        let hook_ran = checkout.join(".git/ude-test-hook-ran").exists();
+        let fetched_sha = cached.fetched_sha.clone();
+        drop(cached);
+        HookedPush {
+            res,
+            bare,
+            _cache: cache,
+            fetched_sha,
+            hook_ran,
+        }
+    }
+
+    /// `(refname, object id)` of every `refs/heads/*` of the bare remote.
+    #[cfg(unix)]
+    fn remote_heads(git: &GitFixture, bare: &Path) -> Vec<(String, String)> {
+        git.output(
+            bare,
+            &[
+                "for-each-ref",
+                "--format=%(refname) %(objectname)",
+                "refs/heads",
+            ],
+        )
+        .lines()
+        .map(|line| {
+            let (name, id) = line.split_once(' ').expect("refname and object id");
+            (name.to_string(), id.to_string())
+        })
+        .collect()
+    }
+
+    /// The remote's only head is still `main` at the fetched head: nothing was published,
+    /// and no `ude-sync-*` branch exists.
+    #[cfg(unix)]
+    fn assert_remote_unchanged(git: &GitFixture, pushed: &HookedPush) {
+        assert_eq!(
+            remote_heads(git, pushed.bare.path()),
+            vec![("refs/heads/main".to_string(), pushed.fetched_sha.clone())],
+            "the remote changed; push result: {:?}",
+            pushed.res
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_direct_push_refuses_hook_merge_over_amended_commit() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let tail = format!("{HOOK_AMEND_INJECT}{HOOK_MERGE_WRAP}");
+        let pushed = push_with_post_commit_hook(&git, &engine, false, &tail);
+
+        assert!(pushed.hook_ran, "the post-commit hook never ran");
+        assert_remote_unchanged(&git, &pushed);
+        let err = push_failure(pushed.res);
+        assert!(
+            err.contains("Post-commit publication gate violation"),
+            "{err}"
+        );
+        assert!(err.contains("exactly one parent"), "{err}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_pr_push_refuses_hook_merge_over_amended_commit() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let tail = format!("{HOOK_AMEND_INJECT}{HOOK_MERGE_WRAP}");
+        let pushed = push_with_post_commit_hook(&git, &engine, true, &tail);
+
+        assert!(pushed.hook_ran, "the post-commit hook never ran");
+        assert_remote_unchanged(&git, &pushed);
+        let err = push_failure(pushed.res);
+        assert!(err.contains("exactly one parent"), "{err}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_pr_push_refuses_hook_added_commit() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let tail = format!("{HOOK_AMEND_INJECT}{HOOK_EXTRA_COMMIT}");
+        let pushed = push_with_post_commit_hook(&git, &engine, true, &tail);
+
+        assert!(pushed.hook_ran, "the post-commit hook never ran");
+        assert_remote_unchanged(&git, &pushed);
+        let err = push_failure(pushed.res);
+        assert!(err.contains("Branch continuity check failed"), "{err}");
+    }
+
     #[test]
     fn test_publication_gate_allows_line_ending_normalization() {
         let git = GitFixture::new();
