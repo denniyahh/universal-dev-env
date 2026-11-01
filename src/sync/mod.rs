@@ -8779,6 +8779,54 @@ git rev-parse ude-hook-tag > .git/ude-test-tag
 
     #[test]
     #[cfg(unix)]
+    fn test_direct_push_publishes_the_validated_commit_after_head_moves() {
+        use std::os::unix::fs::PermissionsExt;
+        let git = GitFixture::new();
+        let real_git = Command::new("sh")
+            .args(["-c", "command -v git"])
+            .output()
+            .unwrap();
+        let real_git = String::from_utf8(real_git.stdout).unwrap();
+        // No hook runs between the committed gate and the push, so the engine's `git` is a
+        // shim that moves HEAD at exactly that point, right before the real push starts.
+        let shim_dir = tempdir().unwrap();
+        let shim = shim_dir.path().join("git");
+        fs::write(
+            &shim,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = push ]; then\n  F=templates/projects/generic/gitconfig.repo\n  printf '%s\\n' INJECTED_BY_HOOK >> \"$F\"\n  '{real}' add -- \"$F\"\n  '{real}' commit --amend --no-edit --no-verify -q\nfi\nexec '{real}' \"$@\"\n",
+                real = real_git.trim()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&shim, fs::Permissions::from_mode(0o755)).unwrap();
+        let inherited = std::env::var_os("PATH").unwrap();
+        let path = std::env::join_paths(
+            std::iter::once(shim_dir.path().to_path_buf()).chain(std::env::split_paths(&inherited)),
+        )
+        .unwrap();
+        let mut engine_env = git.gitconfig_env();
+        engine_env.push(("PATH".into(), path));
+        let engine = SyncEngine::new().with_extra_env(engine_env);
+
+        let pushed = push_with_post_commit_hook(&git, &engine, false, "");
+
+        assert!(pushed.res.is_ok(), "{:?}", pushed.res);
+        assert_eq!(
+            remote_managed_blob(&git, &pushed, "refs/heads/main"),
+            HOOKED_TEMPLATE.as_bytes()
+        );
+        // Opposite direction: HEAD did move to the shim's commit, so a push of HEAD would
+        // have published the injected line.
+        let head_blob = git.output(
+            &pushed.checkout,
+            &["show", &format!("HEAD:{}", pushed.managed_rel)],
+        );
+        assert!(head_blob.contains("INJECTED_BY_HOOK"), "{head_blob}");
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn test_direct_push_does_not_publish_hook_tag() {
         let git = GitFixture::new();
         let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
