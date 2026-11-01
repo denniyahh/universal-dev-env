@@ -2,17 +2,17 @@
 gsd_state_version: "1.0"
 current_phase: 02
 current_phase_name: Sanitizer, Boundaries & Security Hardening
-status: executing
-stopped_at: Completed 02-11-PLAN.md
-last_updated: "2026-11-01T15:09:34.943Z"
+status: verifying
+stopped_at: Completed 02-12-PLAN.md
+last_updated: "2026-11-01T15:45:48.622Z"
 last_activity: 2026-11-01
 last_activity_desc: Phase 02 execution started
-state_head: 6a88d0dd61972d34a909e6ecb0cc03426c628d9e
+state_head: e3c070ad67649036047dbcd132f6789a8bfb5baa
 progress:
   total_phases: 4
   completed_phases: 1
   total_plans: 23
-  completed_plans: 22
+  completed_plans: 23
 ---
 
 # Project State
@@ -28,7 +28,7 @@ See: `.planning/PROJECT.md` (updated 2026-10-22)
 
 Phase: 02 (Sanitizer, Boundaries & Security Hardening) — EXECUTING
 Plan: 12 of 12
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-11-01 — Phase 02 execution started
 
 Progress: [███░░░░░░░] 25%
@@ -80,6 +80,7 @@ Progress: [███░░░░░░░] 25%
 | Phase 02 P09 | 13min | 3 tasks | 4 files |
 | Phase 02 P10 | 14min | 3 tasks | 2 files |
 | Phase 02 P11 | 15 min | 3 tasks | 1 files |
+| Phase 02 P12 | 32 min | 3 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -146,6 +147,9 @@ Recent decisions affecting current work:
 - [Phase 02]: 02-11: the committed gate requires exactly one parent equal to the fetched head in both push modes, read from the raw commit object, and lists changes with a two-tree diff-tree from that head; check_continuity is removed and its message text moved into the gate
 - [Phase 02]: 02-11: the gate's cat-file, diff-tree and show reads pass --no-replace-objects (the environment form is stripped by process::prepare_command); resolve_commit's rev-parse does not, because its id is what the gate reads raw and the push sends
 - [Phase 02]: 02-11: both pushes send the validated commit id with --no-follow-tags; the PR push no longer sets an upstream
+- [Phase 02]: 02-12: the committed gate requires the raw commit message to equal SYNC_COMMIT_MESSAGE plus exactly one LF, secret-scans the header (a scan, not a bind) and refuses any directory with no entry below it
+- [Phase 02]: 02-12: the push is refused while the cache checkout has a grafts file; commit-graphs and bitmaps are disabled on both pushes instead of refused on presence, and every GIT_TEST_* variable is removed from both push commands
+- [Phase 02]: 02-12: the grafts path is read as strict UTF-8, so a cache checkout under a non-UTF-8 path refuses rather than checking a lossy path that could read as absent
 
 ### Pending Todos
 
@@ -185,6 +189,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-01T15:09:34.751Z
-Stopped at: Completed 02-11-PLAN.md
+Last session: 2026-11-01T15:45:48.136Z
+Stopped at: Completed 02-12-PLAN.md
 Resume file: None

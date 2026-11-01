@@ -71,7 +71,7 @@ Plans:
   3. Path parameterization matches only full word and punctuation boundaries (`\b`, path delimiters), preventing corruption of partial substring tokens.
   4. Sanitizer round-tripping verifies that templated tokens substitute back cleanly to local machine environments on initialization.
 
-**Plans**: 11/12 plans executed
+**Plans**: 12/12 plans executed
 
 Plans:
 **Wave 1**
@@ -102,7 +102,7 @@ Plans:
 - [x] 02-11: Post-commit gate binds the published commit to the fetched head in direct and PR mode (exactly one parent, raw objects read past replace refs, diff from the fetched head), and the push sends only the validated commit id with no tags following (`--no-follow-tags`), so a commit hook that merges, stacks or replaces commits or objects, moves the sync branch or tags the commit cannot publish unvalidated content (re-verification gap 1, review WR-102, first half); fmt, clippy and targeted tests (SEC-04).
 
 **Wave 9** *(gap closure; blocked on Wave 8 completion)*
-- [ ] 02-12: Gate binds the commit message to the sync commit message, secret-scans the header and refuses empty directories; push is refused while a grafts file exists and both pushes run with commit-graphs and bitmaps disabled (every GIT_TEST_* variable removed), so hook-written commit text and objects outside the validated commit cannot publish, except the accepted pre-push-hook grafts residual (T-02-52), while a gc'd local-path remote still pushes (re-verification gap 1, second half); scoped mutation run and phase final gates (SEC-04).
+- [x] 02-12: Gate binds the commit message to the sync commit message, secret-scans the header and refuses empty directories; push is refused while a grafts file exists and both pushes run with commit-graphs and bitmaps disabled (every GIT_TEST_* variable removed), so hook-written commit text and objects outside the validated commit cannot publish, except the accepted pre-push-hook grafts residual (T-02-52), while a gc'd local-path remote still pushes (re-verification gap 1, second half); scoped mutation run and phase final gates (SEC-04).
 
 ### Phase 3: Doctor & CLI Hardening
 
@@ -150,7 +150,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Sync Engine & State Hermeticity | 11/11 | Complete    | 2026-10-22 |
-| 2. Sanitizer, Boundaries & Security Hardening | 11/12 | In Progress | - |
+| 2. Sanitizer, Boundaries & Security Hardening | 12/12 | In Progress | - |
 | 3. Doctor & CLI Hardening | 0/4 | Not started | - |
 | 4. Templates, Archetypes & Manifest Decoupling | 0/3 | Not started | - |
 
