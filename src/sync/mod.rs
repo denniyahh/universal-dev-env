@@ -2175,9 +2175,10 @@ impl SyncEngine {
     }
 
     /// Validates `commit` (a full object id) before pushing it, as the only commit the
-    /// push adds on top of `base` (the fetched head): it has exactly one parent, `base`,
-    /// and every file it changes is on the allowlist `paths` (relative to `repo`), free
-    /// of secrets and identical to what `validated` recorded.
+    /// push adds on top of `base` (the fetched head): it has exactly one parent, `base`;
+    /// its message is the sync commit message and its header is free of secrets; every
+    /// file it changes is on the allowlist `paths` (relative to `repo`), free of secrets
+    /// and identical to what `validated` recorded; and its tree holds no empty directory.
     fn validate_committed_tree(
         &self,
         repo: &Path,
@@ -2225,6 +2226,32 @@ impl SyncEngine {
                     parents.len()
                 ));
             }
+        }
+
+        let Some((header, message)) = raw_commit_parts(&raw_commit.stdout) else {
+            return Err(format!(
+                "Post-commit publication gate violation: unparseable commit {commit}"
+            ));
+        };
+        // prepare-commit-msg runs despite --no-verify and a post-commit hook can amend, so
+        // the message is bound byte for byte. Nothing is trimmed: git stored exactly one LF
+        // after `-m` under every commit.cleanup mode (probed), so no tolerance is needed.
+        if message.strip_suffix(b"\n") != Some(SYNC_COMMIT_MESSAGE.as_bytes()) {
+            return Err(
+                "Post-commit publication gate violation: the message of the commit to publish is not the sync commit message; a prepare-commit-msg or post-commit hook in the cache checkout most likely rewrote it"
+                    .to_string(),
+            );
+        }
+        // The rest of the commit text a hook can write has no independent value to bind to,
+        // so it is scanned. A scan, not a bind: text the scanner does not flag still publishes.
+        if let Some(finding) = self
+            .sanitizer
+            .scan_bytes(header, Path::new("commit-header"))
+        {
+            return Err(format!(
+                "Post-commit publication gate violation: secret detected in the header of the commit to publish: {}",
+                finding.reason()
+            ));
         }
 
         let mut diff_tree = self.git(Some(repo));
@@ -2309,7 +2336,41 @@ impl SyncEngine {
             }
         }
 
-        Ok(())
+        // `diff-tree -r` lists blobs only, so an empty directory's name would publish
+        // unlisted. The name is hook-chosen text and is never printed.
+        let mut ls_tree = self.git(Some(repo));
+        ls_tree.args([
+            "--no-replace-objects",
+            "ls-tree",
+            "-r",
+            "-t",
+            "-z",
+            "--full-tree",
+            commit,
+        ]);
+        let listing = self.run_local(ls_tree, "git ls-tree").map_err(|e| {
+            format!(
+                "Post-commit publication gate violation: failed to list the tree of {commit}: {e}"
+            )
+        })?;
+        if !listing.status.success() {
+            return Err(with_excerpt(
+                format!(
+                    "Post-commit publication gate violation: failed to list the tree of {commit}"
+                ),
+                &listing,
+            ));
+        }
+        match count_empty_directories(&listing.stdout) {
+            None => Err(format!(
+                "Post-commit publication gate violation: unparseable tree entry in {commit}"
+            )),
+            Some(0) => Ok(()),
+            Some(_) => Err(
+                "Post-commit publication gate violation: the commit to publish contains an empty directory"
+                    .to_string(),
+            ),
+        }
     }
 }
 
@@ -2334,6 +2395,43 @@ fn raw_commit_parents(raw: &[u8]) -> Vec<String> {
         .filter_map(|line| line.strip_prefix(b"parent "))
         .map(|id| String::from_utf8_lossy(id).into_owned())
         .collect()
+}
+
+/// Splits a raw commit object (`git cat-file commit` output) at its first empty line into
+/// its header bytes and its message bytes, with no decoding and no trimming. `None` when
+/// the object has no empty line.
+fn raw_commit_parts(raw: &[u8]) -> Option<(&[u8], &[u8])> {
+    raw.windows(2)
+        .position(|pair| pair == b"\n\n")
+        .map(|last_header_byte| (&raw[..=last_header_byte], &raw[last_header_byte + 2..]))
+}
+
+/// Counts the `tree` records with no record below them in `ls-tree -r -t -z` output
+/// (records `<mode> SP <type> SP <oid> TAB <path>`, each ended by NUL). A record is below
+/// a path when its own path starts with that path followed by `/`, compared as raw bytes,
+/// never through a lossy decode. `None` for a record it cannot parse.
+fn count_empty_directories(listing: &[u8]) -> Option<usize> {
+    let mut trees = Vec::new();
+    let mut ancestors = HashSet::new();
+    for record in listing.split_inclusive(|byte| *byte == 0) {
+        let record = record.strip_suffix(&[0])?;
+        let mut fields = record.splitn(2, |byte| *byte == b'\t');
+        let (meta, path) = (fields.next()?, fields.next()?);
+        if meta.split(|byte| *byte == b' ').nth(1)? == b"tree" {
+            trees.push(path);
+        }
+        for (end, byte) in path.iter().enumerate() {
+            if *byte == b'/' {
+                ancestors.insert(&path[..end]);
+            }
+        }
+    }
+    Some(
+        trees
+            .into_iter()
+            .filter(|tree| !ancestors.contains(tree))
+            .count(),
+    )
 }
 
 /// Appends the redacted stderr excerpt of a failed git/gh run to `message`.
@@ -8569,6 +8667,130 @@ git update-ref HEAD "$N"
     }
 
     #[test]
+    fn test_raw_commit_parts() {
+        let header = b"tree t\nparent p\nauthor a <a@x> 1 +0000\ncommitter c <c@x> 1 +0000\n";
+        let with_message = |message: &[u8]| {
+            let mut raw = header.to_vec();
+            raw.push(b'\n');
+            raw.extend_from_slice(message);
+            raw
+        };
+        let rows: [(&str, &[u8]); 6] = [
+            ("message with a final LF", b"msg\n"),
+            ("message without a final LF", b"msg"),
+            ("message ending in two LFs", b"msg\n\n"),
+            ("a parent line in the message", b"parent p9\n"),
+            ("message with invalid UTF-8", &[0xFF, 0xFE]),
+            ("message with an empty line of its own", b"one\n\ntwo\n"),
+        ];
+        let mut failures = Vec::new();
+        for (name, message) in rows {
+            let raw = with_message(message);
+            let parts = raw_commit_parts(&raw);
+            if parts != Some((header.as_slice(), message)) {
+                failures.push(format!("{name}: {parts:?}"));
+            }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
+        assert_eq!(raw_commit_parts(b"tree t\nauthor a\ncommitter c\n"), None);
+        assert_eq!(raw_commit_parts(b""), None);
+    }
+
+    #[test]
+    fn test_count_empty_directories() {
+        let oid = "0".repeat(40);
+        let entry = |kind: &str, path: &[u8]| {
+            let mode = if kind == "tree" { "040000" } else { "100644" };
+            let mut record = format!("{mode} {kind} {oid}\t").into_bytes();
+            record.extend_from_slice(path);
+            record.push(0);
+            record
+        };
+        let listing = |entries: &[(&str, &[u8])]| {
+            entries
+                .iter()
+                .flat_map(|(kind, path)| entry(kind, path))
+                .collect::<Vec<u8>>()
+        };
+        let rows: Vec<(&str, Vec<u8>, Option<usize>)> = vec![
+            ("no records", Vec::new(), Some(0)),
+            (
+                "blobs only",
+                listing(&[("blob", b"f"), ("blob", b"g")]),
+                Some(0),
+            ),
+            (
+                "a directory holding a blob",
+                listing(&[("tree", b"a"), ("blob", b"a/f")]),
+                Some(0),
+            ),
+            (
+                "a directory with nothing below it",
+                listing(&[("tree", b"a"), ("blob", b"f")]),
+                Some(1),
+            ),
+            (
+                "a directory holding only an empty directory",
+                listing(&[("tree", b"a"), ("tree", b"a/b")]),
+                Some(1),
+            ),
+            (
+                "a sibling sharing a name prefix is not below it",
+                listing(&[("tree", b"a"), ("blob", b"a-b/x")]),
+                Some(1),
+            ),
+            (
+                "a blob named like a directory counts nothing",
+                listing(&[("blob", b"a"), ("blob", b"a-b")]),
+                Some(0),
+            ),
+            (
+                "a deep blob holds every directory above it",
+                listing(&[("tree", b"a"), ("tree", b"a/b"), ("blob", b"a/b/c")]),
+                Some(0),
+            ),
+            (
+                "tab and newline bytes in a path",
+                listing(&[("tree", b"a\tb\nc"), ("blob", b"a\tb\nc/f")]),
+                Some(0),
+            ),
+            (
+                "an empty directory whose name holds a tab",
+                listing(&[("tree", b"a\tb")]),
+                Some(1),
+            ),
+            (
+                "a path of invalid UTF-8",
+                listing(&[
+                    ("tree", &[0xFF]),
+                    ("tree", &[0xFE]),
+                    ("blob", &[0xFE, b'/', 0xFD]),
+                ]),
+                Some(1),
+            ),
+            ("a record without a tab", b"100644 blob x\0".to_vec(), None),
+            (
+                "a record without a type field",
+                b"100644\tf\0".to_vec(),
+                None,
+            ),
+            (
+                "a final record without its NUL",
+                format!("100644 blob {oid}\tf").into_bytes(),
+                None,
+            ),
+        ];
+        let mut failures = Vec::new();
+        for (name, raw, expected) in rows {
+            let actual = count_empty_directories(&raw);
+            if actual != expected {
+                failures.push(format!("{name}: {actual:?} != {expected:?}"));
+            }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+
+    #[test]
     fn test_committed_gate_compares_full_object_ids() {
         let git = GitFixture::new();
         let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
@@ -9696,7 +9918,7 @@ git update-ref HEAD "$N"
         // 1. Clean commit validation
         fs::write(&base_file, "updated benign content").unwrap();
         git.run(remote_repo.path(), &["add", "base.txt"]);
-        git.run(remote_repo.path(), &["commit", "-m", "benign update"]);
+        git.run(remote_repo.path(), &["commit", "-m", SYNC_COMMIT_MESSAGE]);
         let validated = ValidatedBlobs::from_files(std::slice::from_ref(&base_file));
         let clean_check = engine.validate_committed_tree(
             remote_repo.path(),
@@ -9716,7 +9938,7 @@ git update-ref HEAD "$N"
         let secret_val = format!("{prefix}{body}");
         fs::write(&base_file, format!("token = {secret_val}\n")).unwrap();
         git.run(remote_repo.path(), &["add", "base.txt"]);
-        git.run(remote_repo.path(), &["commit", "-m", "injected secret"]);
+        git.run(remote_repo.path(), &["commit", "-m", SYNC_COMMIT_MESSAGE]);
 
         let validated = ValidatedBlobs::from_files(std::slice::from_ref(&base_file));
         let secret_check = engine.validate_committed_tree(
@@ -9764,7 +9986,7 @@ git update-ref HEAD "$N"
         git.run(remote_repo.path(), &["commit", "-m", "base commit"]);
         fs::write(&base_file, bytes).unwrap();
         git.run(remote_repo.path(), &["add", "base.txt"]);
-        git.run(remote_repo.path(), &["commit", "-m", "update"]);
+        git.run(remote_repo.path(), &["commit", "-m", SYNC_COMMIT_MESSAGE]);
         let expected_set: std::collections::HashSet<PathBuf> =
             [PathBuf::from("base.txt")].into_iter().collect();
         let validated = ValidatedBlobs::from_files(std::slice::from_ref(&base_file));
@@ -9843,7 +10065,7 @@ git update-ref HEAD "$N"
         // Negative control: a clean commit validates.
         fs::write(&base_file, "updated benign content\n").unwrap();
         git.run(remote_repo.path(), &["add", "base.txt"]);
-        git.run(remote_repo.path(), &["commit", "-m", "benign update"]);
+        git.run(remote_repo.path(), &["commit", "-m", SYNC_COMMIT_MESSAGE]);
         let validated = ValidatedBlobs::from_files(std::slice::from_ref(&base_file));
         assert_eq!(
             engine.validate_committed_tree(
@@ -9859,7 +10081,7 @@ git update-ref HEAD "$N"
         let tok = seeded_slack_bot_token();
         fs::write(&base_file, format!("notify = {tok}\n")).unwrap();
         git.run(remote_repo.path(), &["add", "base.txt"]);
-        git.run(remote_repo.path(), &["commit", "-m", "injected token"]);
+        git.run(remote_repo.path(), &["commit", "-m", SYNC_COMMIT_MESSAGE]);
         let validated = ValidatedBlobs::from_files(std::slice::from_ref(&base_file));
         let err = engine
             .validate_committed_tree(
