@@ -354,8 +354,9 @@ pub struct RemoteCache {
     /// derive it from `templates_dir`: for a remote without `templates/` the two are
     /// the same directory.
     pub checkout_dir: PathBuf,
-    /// The remote branch head UDE fetched (`refs/remotes/origin/<branch>`). A direct
-    /// push must build on exactly this commit (branch continuity, D-18).
+    /// The remote branch head UDE fetched (`refs/remotes/origin/<branch>`). Every push,
+    /// direct or PR, must publish exactly one commit whose only parent is this commit
+    /// (branch continuity, D-18).
     pub fetched_sha: String,
     /// The cache lock; hold it for the whole sync action.
     pub lock: RemoteLockGuard,
@@ -1721,7 +1722,8 @@ impl SyncEngine {
     /// Publishes the staged template updates: commits them in the cache checkout and
     /// pushes the commit directly to `branch`, or to a fresh `ude-sync-*` branch with a
     /// PR when `open_pr` is set. `fetched_sha` is the head UDE fetched
-    /// ([`RemoteCache::fetched_sha`]); a direct push must build on it.
+    /// ([`RemoteCache::fetched_sha`]); the published commit must have it as its only
+    /// parent.
     pub fn push_to_remote(
         &self,
         remote_checkout: &Path,
@@ -1738,8 +1740,14 @@ impl SyncEngine {
             return Ok("No changes to push to remote repository.".to_string());
         };
         if open_pr {
-            self.push_pr_branch(remote_checkout, branch, &expected_set, validated)
-                .map_err(PushRemoteError::Failed)
+            self.push_pr_branch(
+                remote_checkout,
+                branch,
+                &expected_set,
+                validated,
+                fetched_sha,
+            )
+            .map_err(PushRemoteError::Failed)
         } else {
             self.push_direct(
                 remote_checkout,
@@ -1905,13 +1913,15 @@ impl SyncEngine {
     }
 
     /// PR mode: commits on a fresh `ude-sync-<hash>-<epoch>` branch, pushes it and opens
-    /// a PR against `branch`. Not subject to the upstream-moved abort (D-18 scope note).
+    /// a PR against `branch`. Not subject to the upstream-moved abort (D-18 scope note),
+    /// but its commit must sit directly on `fetched_sha`, like a direct push's.
     fn push_pr_branch(
         &self,
         remote_checkout: &Path,
         branch: &str,
         expected_set: &HashSet<PathBuf>,
         validated: &ValidatedBlobs,
+        fetched_sha: &str,
     ) -> Result<String, String> {
         let epoch_secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1950,7 +1960,22 @@ impl SyncEngine {
             ));
         }
 
-        if let Err(err) = self.validate_committed_tree(remote_checkout, expected_set, validated) {
+        let commit = match self.resolve_commit(remote_checkout, "HEAD") {
+            Ok(commit) => commit,
+            Err(err) => {
+                self.rollback_commit(remote_checkout);
+                self.abandon_sync_branch(remote_checkout, branch, &sync_branch);
+                return Err(err);
+            }
+        };
+
+        if let Err(err) = self.validate_committed_tree(
+            remote_checkout,
+            &commit,
+            fetched_sha,
+            expected_set,
+            validated,
+        ) {
             self.rollback_commit(remote_checkout);
             self.abandon_sync_branch(remote_checkout, branch, &sync_branch);
             return Err(err);
@@ -2027,12 +2052,21 @@ impl SyncEngine {
             )));
         }
 
-        if let Err(err) = self.validate_committed_tree(remote_checkout, expected_set, validated) {
-            self.rollback_commit(remote_checkout);
-            return Err(Failed(err));
-        }
+        let commit = match self.resolve_commit(remote_checkout, "HEAD") {
+            Ok(commit) => commit,
+            Err(err) => {
+                self.rollback_commit(remote_checkout);
+                return Err(Failed(err));
+            }
+        };
 
-        if let Err(err) = self.check_continuity(remote_checkout, branch, fetched_sha) {
+        if let Err(err) = self.validate_committed_tree(
+            remote_checkout,
+            &commit,
+            fetched_sha,
+            expected_set,
+            validated,
+        ) {
             self.rollback_commit(remote_checkout);
             return Err(Failed(err));
         }
@@ -2066,26 +2100,20 @@ impl SyncEngine {
         ))
     }
 
-    /// Checks that the cache commit's parent is the fetched head of `branch`.
-    fn check_continuity(&self, repo: &Path, branch: &str, fetched_sha: &str) -> Result<(), String> {
+    /// The full object id of the commit `rev` names in `repo`.
+    fn resolve_commit(&self, repo: &Path, rev: &str) -> Result<String, String> {
+        const REFUSAL: &str =
+            "Post-commit publication gate violation: cannot resolve the commit to publish";
+        let spec = format!("{rev}^{{commit}}");
         let mut rev_parse = self.git(Some(repo));
-        rev_parse.args(["rev-parse", "--verify", "HEAD~1"]);
+        rev_parse.args(["rev-parse", "--verify", &spec]);
         let out = self
             .run_local(rev_parse, "git rev-parse")
-            .map_err(|e| format!("Branch continuity check failed: {e}"))?;
+            .map_err(|e| format!("{REFUSAL}: {e}"))?;
         if !out.status.success() {
-            return Err(with_excerpt(
-                "Branch continuity check failed: cache commit has no parent".to_string(),
-                &out,
-            ));
+            return Err(with_excerpt(REFUSAL.to_string(), &out));
         }
-        let parent = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        if parent != fetched_sha {
-            return Err(format!(
-                "Branch continuity check failed: cache commit parent {parent} is not the fetched {branch} head {fetched_sha}"
-            ));
-        }
-        Ok(())
+        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
     }
 
     /// The cache-checkout commit command (no hooks, no signing).
@@ -2131,24 +2159,64 @@ impl SyncEngine {
         }
     }
 
-    /// Validates the committed tree in HEAD before pushing to remote repository,
-    /// asserting that no unexpected files or secret credentials exist in the committed
-    /// tree. `paths` is the validated allowlist, relative to `repo`.
+    /// Validates `commit` (a full object id) before pushing it, as the only commit the
+    /// push adds on top of `base` (the fetched head): it has exactly one parent, `base`,
+    /// and every file it changes is on the allowlist `paths` (relative to `repo`), free
+    /// of secrets and identical to what `validated` recorded.
     fn validate_committed_tree(
         &self,
         repo: &Path,
+        commit: &str,
+        base: &str,
         paths: &HashSet<PathBuf>,
         validated: &ValidatedBlobs,
     ) -> Result<(), String> {
+        if base.is_empty() {
+            return Err(
+                "Post-commit publication gate violation: no fetched head to bind the commit to"
+                    .to_string(),
+            );
+        }
+
+        // A post-commit hook (it runs despite --no-verify) can amend, add commits or build
+        // a merge, and a single-commit listing shows nothing for a merge. So the gate
+        // requires exactly one new commit on the fetched head and lists everything that
+        // commit changes.
+        let mut cat_file = self.git(Some(repo));
+        cat_file.args(["cat-file", "commit", commit]);
+        let raw_commit = self.run_local(cat_file, "git cat-file").map_err(|e| {
+            format!("Post-commit publication gate violation: failed to read commit {commit}: {e}")
+        })?;
+        if !raw_commit.status.success() {
+            return Err(with_excerpt(
+                format!("Post-commit publication gate violation: failed to read commit {commit}"),
+                &raw_commit,
+            ));
+        }
+        match raw_commit_parents(&raw_commit.stdout).as_slice() {
+            [parent] if parent == base => {}
+            [parent] => {
+                return Err(format!(
+                    "Branch continuity check failed: cache commit parent {parent} is not the fetched head {base}"
+                ));
+            }
+            parents => {
+                return Err(format!(
+                    "Post-commit publication gate violation: the commit to publish has {} parents; it must have exactly one parent, the fetched head {base}",
+                    parents.len()
+                ));
+            }
+        }
+
         let mut diff_tree = self.git(Some(repo));
         diff_tree.args([
             "diff-tree",
-            "--root",
+            "-r",
             "--no-commit-id",
             "--name-status",
             "--no-renames",
-            "-r",
-            "HEAD",
+            base,
+            commit,
         ]);
         let diff_tree = self.run_local(diff_tree, "git diff-tree").map_err(|e| {
             format!("Failed to inspect committed diff-tree in remote checkout: {e}")
@@ -2180,7 +2248,7 @@ impl SyncEngine {
                 continue;
             }
 
-            let show_arg = format!("HEAD:{}", p.to_string_lossy());
+            let show_arg = format!("{commit}:{}", p.to_string_lossy());
             let mut show = self.git(Some(repo));
             show.args(["show", &show_arg]);
             let blob_res = self
@@ -2234,6 +2302,18 @@ fn parse_name_status(line: &str) -> Option<(&str, PathBuf)> {
         return None;
     }
     Some((status, PathBuf::from(path)))
+}
+
+/// The parent ids of a raw commit object (`git cat-file commit` output), taken only from
+/// its header lines, which end at the first empty line. A line counts only when it starts
+/// with `parent `, so indented continuation lines of multi-line headers such as `gpgsig`
+/// and any `parent` text in the message never count.
+fn raw_commit_parents(raw: &[u8]) -> Vec<String> {
+    raw.split(|byte| *byte == b'\n')
+        .take_while(|line| !line.is_empty())
+        .filter_map(|line| line.strip_prefix(b"parent "))
+        .map(|id| String::from_utf8_lossy(id).into_owned())
+        .collect()
 }
 
 /// Appends the redacted stderr excerpt of a failed git/gh run to `message`.
@@ -8725,8 +8805,13 @@ git update-ref HEAD "$M"
         git.run(remote_repo.path(), &["add", "base.txt"]);
         git.run(remote_repo.path(), &["commit", "-m", "benign update"]);
         let validated = ValidatedBlobs::from_files(std::slice::from_ref(&base_file));
-        let clean_check =
-            engine.validate_committed_tree(remote_repo.path(), &expected_set, &validated);
+        let clean_check = engine.validate_committed_tree(
+            remote_repo.path(),
+            &git.output(remote_repo.path(), &["rev-parse", "HEAD"]),
+            &base_head_sha,
+            &expected_set,
+            &validated,
+        );
         assert!(
             clean_check.is_ok(),
             "Clean commit must pass validate_committed_tree"
@@ -8741,8 +8826,13 @@ git update-ref HEAD "$M"
         git.run(remote_repo.path(), &["commit", "-m", "injected secret"]);
 
         let validated = ValidatedBlobs::from_files(std::slice::from_ref(&base_file));
-        let secret_check =
-            engine.validate_committed_tree(remote_repo.path(), &expected_set, &validated);
+        let secret_check = engine.validate_committed_tree(
+            remote_repo.path(),
+            &git.output(remote_repo.path(), &["rev-parse", "HEAD"]),
+            &git.output(remote_repo.path(), &["rev-parse", "HEAD~1"]),
+            &expected_set,
+            &validated,
+        );
         assert!(
             secret_check.is_err(),
             "Committed secret must fail validate_committed_tree"
@@ -8785,7 +8875,13 @@ git update-ref HEAD "$M"
         let expected_set: std::collections::HashSet<PathBuf> =
             [PathBuf::from("base.txt")].into_iter().collect();
         let validated = ValidatedBlobs::from_files(std::slice::from_ref(&base_file));
-        engine.validate_committed_tree(remote_repo.path(), &expected_set, &validated)
+        engine.validate_committed_tree(
+            remote_repo.path(),
+            &git.output(remote_repo.path(), &["rev-parse", "HEAD"]),
+            &git.output(remote_repo.path(), &["rev-parse", "HEAD~1"]),
+            &expected_set,
+            &validated,
+        )
     }
 
     #[test]
@@ -8857,7 +8953,13 @@ git update-ref HEAD "$M"
         git.run(remote_repo.path(), &["commit", "-m", "benign update"]);
         let validated = ValidatedBlobs::from_files(std::slice::from_ref(&base_file));
         assert_eq!(
-            engine.validate_committed_tree(remote_repo.path(), &expected_set, &validated),
+            engine.validate_committed_tree(
+                remote_repo.path(),
+                &git.output(remote_repo.path(), &["rev-parse", "HEAD"]),
+                &git.output(remote_repo.path(), &["rev-parse", "HEAD~1"]),
+                &expected_set,
+                &validated,
+            ),
             Ok(())
         );
 
@@ -8867,7 +8969,13 @@ git update-ref HEAD "$M"
         git.run(remote_repo.path(), &["commit", "-m", "injected token"]);
         let validated = ValidatedBlobs::from_files(std::slice::from_ref(&base_file));
         let err = engine
-            .validate_committed_tree(remote_repo.path(), &expected_set, &validated)
+            .validate_committed_tree(
+                remote_repo.path(),
+                &git.output(remote_repo.path(), &["rev-parse", "HEAD"]),
+                &git.output(remote_repo.path(), &["rev-parse", "HEAD~1"]),
+                &expected_set,
+                &validated,
+            )
             .expect_err("a committed Slack bot token must fail the gate");
         assert!(
             err.contains("secret detected in committed HEAD blob"),
