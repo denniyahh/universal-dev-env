@@ -3,6 +3,58 @@ phase: 02
 review: 02-REVIEW.md
 titles: json
 findings:
+  - id: CR-200
+    severity: critical
+    disposition: open
+    title: "A tree listing the managed path twice publishes unvalidated bytes, and consumers check them out"
+  - id: CR-201
+    severity: critical
+    disposition: open
+    title: "A hook can delete or revert a validated file and the push still returns Ok"
+  - id: WR-200
+    severity: warning
+    disposition: open
+    title: "A tree entry named `.` passes the allowlist and makes the remote unclonable"
+  - id: WR-201
+    severity: warning
+    disposition: open
+    title: "`rollback_commit` leaves the cache checkout wrong after a refusal, and no test checks it"
+  - id: WR-202
+    severity: warning
+    disposition: open
+    title: "`refuse_grafts_file` passes when the printed path is not one absolute path"
+  - id: WR-203
+    severity: warning
+    disposition: open
+    title: "A post-commit hook's background process can write grafts after the gate has passed"
+  - id: WR-204
+    severity: warning
+    disposition: open
+    title: "Tests named for inherited `GIT_TEST_*` variables never exercise inheritance"
+  - id: IN-200
+    severity: info
+    disposition: open
+    title: "A hook-written `push.pushOption` reaches the remote"
+  - id: IN-201
+    severity: info
+    disposition: open
+    title: "The push command and its comment block are written out twice"
+  - id: IN-202
+    severity: info
+    disposition: open
+    title: "`validate_committed_tree` is about 200 lines"
+  - id: IN-203
+    severity: info
+    disposition: open
+    title: "The `GIT_TEST_` prefix match is case-sensitive, and Windows environment names are not"
+  - id: IN-204
+    severity: info
+    disposition: open
+    title: "The `commit_command` doc comment says \"no hooks\""
+  - id: IN-205
+    severity: info
+    disposition: open
+    title: "Refusals print hook-chosen path names"
   - id: WR-01
     severity: warning
     disposition: open
@@ -59,20 +111,33 @@ findings:
     severity: info
     disposition: open
     title: "The vendored rule pin is enforced only under `cargo test`, and line-ending conversion would break it"
-open: 12
-total: 14
-recorded: 2026-10-28T00:43:52.184Z
+open: 25
+total: 27
+recorded: 2026-11-01T16:07:03.676Z
 ---
 
 # Phase 02: Code Review Disposition
 
 | Finding | Severity | Disposition | Source |
 |---------|----------|-------------|--------|
-| WR-01 | warning | open | - |
-| WR-02 | warning | open | - |
-| IN-01 | info | open | - |
-| IN-02 | info | open | - |
-| IN-03 | info | open | - |
+| CR-200 | critical | open | - |
+| CR-201 | critical | open | - |
+| WR-200 | warning | open | - |
+| WR-201 | warning | open | - |
+| WR-202 | warning | open | - |
+| WR-203 | warning | open | - |
+| WR-204 | warning | open | - |
+| IN-200 | info | open | - |
+| IN-201 | info | open | - |
+| IN-202 | info | open | - |
+| IN-203 | info | open | - |
+| IN-204 | info | open | - |
+| IN-205 | info | open | - |
+| WR-01 | warning | open | - (not in the current review) |
+| WR-02 | warning | open | - (not in the current review) |
+| IN-01 | info | open | - (not in the current review) |
+| IN-02 | info | open | - (not in the current review) |
+| IN-03 | info | open | - (not in the current review) |
 | CR-01 | critical | fixed | plan 02-09; confirmed fixed by re-review ed8dc0d (not in the current review) |
 | CR-02 | critical | fixed | plan 02-10; confirmed fixed by re-review ed8dc0d (not in the current review) |
 | IN-04 | info | open | - (not in the current review) |
