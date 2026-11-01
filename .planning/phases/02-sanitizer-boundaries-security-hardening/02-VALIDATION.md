@@ -4,7 +4,7 @@ slug: "sanitizer-boundaries-security-hardening"
 # status lifecycle: draft (seeded by plan-phase) → validated (set by validate-phase §6)
 # audit-milestone §5.5 distinguishes NOT-VALIDATED (draft) from PARTIAL (validated + nyquist_compliant: false) (#2117)
 status: validated
-nyquist_compliant: true
+nyquist_compliant: false
 wave_0_complete: true
 created: "2026-10-23"
 ---
@@ -108,14 +108,22 @@ Not tested, by operator decision of 2026-10-28 (T-02-52): a grafts file a pre-pu
 - [x] Wave 0 covers all MISSING references
 - [x] No watch-mode flags
 - [x] Feedback latency within quick-filter scope
-- [x] `nyquist_compliant: true` set in frontmatter
+- [ ] `nyquist_compliant: true` set in frontmatter
 
-**Approval:** validate-phase audit, 2026-11-01; no gaps found. This audit establishes that each requirement has automated tests that run green. It does not judge whether the phase goal is met; the phase verifier does that.
+**Approval:** PARTIAL. SEC-04 has channels no test covers (duplicate tree entries, deletion or revert of a validated file, a tree entry named `.`, grafts written after the gate; 02-VERIFICATION.md gaps), found after the audit below. Earlier audit, 2026-11-01: no gaps found against the test map. This audit establishes that each requirement has automated tests that run green. It does not judge whether the phase goal is met; the phase verifier does that.
 
 ## Validation Audit 2026-11-01
 
 | Metric | Count |
 |---|---|
 | Gaps found | 0 |
+| Resolved | 0 |
+| Escalated | 0 |
+
+## Validation Audit 2026-11-01
+
+| Metric | Count |
+|---|---|
+| Gaps found | 4 |
 | Resolved | 0 |
 | Escalated | 0 |
