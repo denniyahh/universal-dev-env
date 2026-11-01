@@ -1914,7 +1914,8 @@ impl SyncEngine {
 
     /// PR mode: commits on a fresh `ude-sync-<hash>-<epoch>` branch, pushes it and opens
     /// a PR against `branch`. Not subject to the upstream-moved abort (D-18 scope note),
-    /// but its commit must sit directly on `fetched_sha`, like a direct push's.
+    /// but its commit must sit directly on `fetched_sha`, like a direct push's. The push
+    /// reads no commit-graph or bitmap and sees no `GIT_TEST_*` variable.
     fn push_pr_branch(
         &self,
         remote_checkout: &Path,
@@ -1984,9 +1985,26 @@ impl SyncEngine {
         // The validated id, never the branch name: a hook can leave the branch on another
         // commit. `push.followTags` in the cache repository config (a hook can write it)
         // would also publish annotated tags pointing into the pushed history.
+        //
+        // Push's object walk would follow a hook-written commit-graph (local, split chain,
+        // or in an alternate object directory) or a bitmap (pack or multi-pack-index) built
+        // under a graft, sending objects outside the validated commit; both are disabled
+        // here. Every GIT_TEST_* variable is removed because GIT_TEST_COMMIT_GRAPH makes git
+        // load commit-graphs even under core.commitGraph=false (probed), and git's other
+        // test-suite variables have no place in a user's push.
         let refspec = format!("{commit}:refs/heads/{sync_branch}");
         let mut push = self.git(Some(remote_checkout));
-        push.args(["push", "--no-follow-tags", "origin", &refspec]);
+        push.args([
+            "-c",
+            "core.commitGraph=false",
+            "-c",
+            "pack.useBitmaps=false",
+            "push",
+            "--no-follow-tags",
+            "origin",
+            &refspec,
+        ]);
+        remove_git_test_env(&mut push, std::env::vars_os().map(|(key, _)| key));
         let push_out = self
             .run_network(push, "git push")
             .map_err(|e| format!("Failed to push sync branch: {e}"))?;
@@ -2033,7 +2051,8 @@ impl SyncEngine {
     /// commit id the committed gate validated, never a ref a hook can move, and no tags.
     /// It is a plain fast-forward push, never forced: when upstream moved after the fetch,
     /// the remote's fast-forward check rejects it, the cache commit is rolled back and the
-    /// result is [`PushRemoteError::UpstreamMoved`] (D-18).
+    /// result is [`PushRemoteError::UpstreamMoved`] (D-18). The push reads no commit-graph
+    /// or bitmap and sees no `GIT_TEST_*` variable.
     fn push_direct(
         &self,
         remote_checkout: &Path,
@@ -2080,15 +2099,27 @@ impl SyncEngine {
         // compare-and-swap that detects a concurrent publisher (D-18). `push.followTags`
         // in the cache repository config (a hook can write it) would also publish annotated
         // tags pointing into the pushed history.
+        //
+        // Push's object walk would follow a hook-written commit-graph (local, split chain,
+        // or in an alternate object directory) or a bitmap (pack or multi-pack-index) built
+        // under a graft, sending objects outside the validated commit; both are disabled
+        // here. Every GIT_TEST_* variable is removed because GIT_TEST_COMMIT_GRAPH makes git
+        // load commit-graphs even under core.commitGraph=false (probed), and git's other
+        // test-suite variables have no place in a user's push.
         let refspec = format!("{commit}:refs/heads/{branch}");
         let mut push = self.git(Some(remote_checkout));
         push.args([
+            "-c",
+            "core.commitGraph=false",
+            "-c",
+            "pack.useBitmaps=false",
             "push",
             "--porcelain",
             "--no-follow-tags",
             "origin",
             &refspec,
         ]);
+        remove_git_test_env(&mut push, std::env::vars_os().map(|(key, _)| key));
         let push_out = self
             .run_network(push, "git push")
             .map_err(|e| Failed(format!("Failed to push to remote: {e}")))?;
@@ -2174,6 +2205,41 @@ impl SyncEngine {
         }
     }
 
+    /// Refuses while the cache checkout `repo` has a grafts file. A probed channel: with a
+    /// graft adding a parent, `git push` sends the grafted commit and its blob while the
+    /// remote ref moves to the validated commit, and the push exits 0.
+    fn refuse_grafts_file(&self, repo: &Path) -> Result<(), String> {
+        const UNLOCATED: &str = "Post-commit publication gate violation: cannot locate the grafts file of the cache checkout";
+        let mut rev_parse = self.git(Some(repo));
+        rev_parse.args([
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-path",
+            "info/grafts",
+        ]);
+        let located = self
+            .run_local(rev_parse, "git rev-parse")
+            .map_err(|_| UNLOCATED.to_string())?;
+        if !located.status.success() {
+            return Err(UNLOCATED.to_string());
+        }
+        // Strict UTF-8: a lossy path could name another file and read as absent.
+        let located = std::str::from_utf8(&located.stdout).map_err(|_| UNLOCATED.to_string())?;
+        let path = located.trim_end_matches('\n');
+        if path.is_empty() {
+            return Err(UNLOCATED.to_string());
+        }
+        match fs::symlink_metadata(path) {
+            Ok(_) => Err(format!(
+                "Post-commit publication gate violation: the cache checkout has {path}, which can make git push send objects outside the validated commit; nothing was published"
+            )),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(_) => Err(format!(
+                "Post-commit publication gate violation: cannot inspect {path}"
+            )),
+        }
+    }
+
     /// Validates `commit` (a full object id) before pushing it, as the only commit the
     /// push adds on top of `base` (the fetched head): it has exactly one parent, `base`;
     /// its message is the sync commit message and its header is free of secrets; every
@@ -2193,6 +2259,11 @@ impl SyncEngine {
                     .to_string(),
             );
         }
+
+        // Push's object walk follows grafts, which change no raw object the gate reads, and
+        // git has no option to ignore them (GIT_GRAFT_FILE is removed by
+        // process::prepare_command), so the file's presence is refused.
+        self.refuse_grafts_file(repo)?;
 
         // A post-commit hook (it runs despite --no-verify) can amend, add commits or build
         // a merge, and a single-commit listing shows nothing for a merge. So the gate
@@ -2404,6 +2475,25 @@ fn raw_commit_parts(raw: &[u8]) -> Option<(&[u8], &[u8])> {
     raw.windows(2)
         .position(|pair| pair == b"\n\n")
         .map(|last_header_byte| (&raw[..=last_header_byte], &raw[last_header_byte + 2..]))
+}
+
+/// Removes every `GIT_TEST_*` variable from `command`'s environment: the keys of
+/// `inherited` (UDE's own environment at the call sites) and the keys already set on the
+/// command, matched on their raw bytes, case-sensitively. Only the spawned command changes,
+/// never UDE's process environment, which every thread shares.
+fn remove_git_test_env(command: &mut Command, inherited: impl IntoIterator<Item = OsString>) {
+    let own: Vec<OsString> = command
+        .get_envs()
+        .map(|(key, _)| key.to_os_string())
+        .collect();
+    let test_keys: Vec<OsString> = inherited
+        .into_iter()
+        .chain(own)
+        .filter(|key| key.as_encoded_bytes().starts_with(b"GIT_TEST_"))
+        .collect();
+    for key in test_keys {
+        command.env_remove(key);
+    }
 }
 
 /// Counts the `tree` records with no record below them in `ls-tree -r -t -z` output
@@ -8810,6 +8900,170 @@ byte() { printf "\\$(printf '%03o' "$1")"; }
         assert!(failures.is_empty(), "{failures:#?}");
     }
 
+    /// The grafts check's verdict when `git` is a shim that prints `printf_args` and exits 0,
+    /// which reaches the outcomes a real git does not produce.
+    #[cfg(unix)]
+    fn grafts_verdict_with_git_printing(git: &GitFixture, printf_args: &str) -> Result<(), String> {
+        use std::os::unix::fs::PermissionsExt;
+        let shim_dir = tempdir().unwrap();
+        let shim = shim_dir.path().join("git");
+        fs::write(&shim, format!("#!/bin/sh\nprintf {printf_args}\n")).unwrap();
+        fs::set_permissions(&shim, fs::Permissions::from_mode(0o755)).unwrap();
+        let inherited = std::env::var_os("PATH").unwrap();
+        let path = std::env::join_paths(
+            std::iter::once(shim_dir.path().to_path_buf()).chain(std::env::split_paths(&inherited)),
+        )
+        .unwrap();
+        let mut env = git.gitconfig_env();
+        env.push(("PATH".into(), path));
+        SyncEngine::new()
+            .with_extra_env(env)
+            .refuse_grafts_file(shim_dir.path())
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_refuse_grafts_file_outcomes() {
+        const PRESENT: &str = "which can make git push send objects outside the validated commit";
+        const UNLOCATED: &str = "cannot locate the grafts file";
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let new_repo = || {
+            let repo = tempdir().unwrap();
+            git.run(repo.path(), &["init", "-b", "main"]);
+            fs::create_dir_all(repo.path().join(".git/info")).unwrap();
+            repo
+        };
+        let grafts = |repo: &tempfile::TempDir| repo.path().join(".git/info/grafts");
+        let mut failures = Vec::new();
+        let mut check = |name: &str, verdict: Result<(), String>, expected: Option<&str>| {
+            let as_expected = match (&verdict, expected) {
+                (Ok(()), None) => true,
+                (Err(err), Some(text)) => err.contains(text),
+                _ => false,
+            };
+            if !as_expected {
+                failures.push(format!("{name}: {verdict:?}, expected {expected:?}"));
+            }
+        };
+
+        let absent = new_repo();
+        check("no file", engine.refuse_grafts_file(absent.path()), None);
+
+        let present = new_repo();
+        fs::write(grafts(&present), "").unwrap();
+        check(
+            "an empty file",
+            engine.refuse_grafts_file(present.path()),
+            Some(PRESENT),
+        );
+
+        let linked = new_repo();
+        let target = linked.path().join("target");
+        fs::write(&target, "").unwrap();
+        std::os::unix::fs::symlink(&target, grafts(&linked)).unwrap();
+        check(
+            "a symlink to a file",
+            engine.refuse_grafts_file(linked.path()),
+            Some(PRESENT),
+        );
+
+        // Git resolves the link before printing the path, and reads no graft through it.
+        let dangling = new_repo();
+        std::os::unix::fs::symlink("nowhere", grafts(&dangling)).unwrap();
+        check(
+            "a dangling symlink",
+            engine.refuse_grafts_file(dangling.path()),
+            None,
+        );
+
+        let info_is_file = new_repo();
+        let info = info_is_file.path().join(".git/info");
+        fs::remove_dir_all(&info).unwrap();
+        fs::write(&info, "").unwrap();
+        check(
+            "a file where the info directory belongs",
+            engine.refuse_grafts_file(info_is_file.path()),
+            Some(UNLOCATED),
+        );
+
+        let not_repo = tempdir().unwrap();
+        check(
+            "not a repository",
+            engine.refuse_grafts_file(not_repo.path()),
+            Some(UNLOCATED),
+        );
+
+        check(
+            "git prints nothing",
+            grafts_verdict_with_git_printing(&git, "''"),
+            Some(UNLOCATED),
+        );
+        check(
+            "git prints invalid UTF-8",
+            grafts_verdict_with_git_printing(&git, r"'\377\n'"),
+            Some(UNLOCATED),
+        );
+        let file = tempfile::NamedTempFile::new().unwrap();
+        check(
+            "the path cannot be inspected",
+            grafts_verdict_with_git_printing(
+                &git,
+                &format!("'%s\\n' '{}/grafts'", file.path().display()),
+            ),
+            Some("cannot inspect"),
+        );
+
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+
+    #[test]
+    fn test_remove_git_test_env() {
+        let mut cmd = Command::new("git");
+        cmd.env("GIT_TEST_FROM_EXTRA_ENV", "1")
+            .env("GIT_TESTY", "1");
+        let mut inherited: Vec<OsString> = [
+            "GIT_TEST_COMMIT_GRAPH",
+            "GIT_TEST_SPLIT_INDEX",
+            "PATH",
+            "GIT_TESTX",
+            "git_test_lower",
+        ]
+        .map(OsString::from)
+        .to_vec();
+        let mut removed = vec![
+            OsString::from("GIT_TEST_COMMIT_GRAPH"),
+            OsString::from("GIT_TEST_SPLIT_INDEX"),
+            OsString::from("GIT_TEST_FROM_EXTRA_ENV"),
+        ];
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            let non_utf8 = OsString::from_vec(b"GIT_TEST_\xFF".to_vec());
+            inherited.push(non_utf8.clone());
+            removed.push(non_utf8);
+        }
+
+        remove_git_test_env(&mut cmd, inherited);
+
+        let envs: HashMap<&OsStr, Option<&OsStr>> = cmd.get_envs().collect();
+        let mut failures = Vec::new();
+        for key in &removed {
+            if envs.get(key.as_os_str()) != Some(&None) {
+                failures.push(format!("{key:?} was not removed"));
+            }
+        }
+        if envs.get(OsStr::new("GIT_TESTY")) != Some(&Some(OsStr::new("1"))) {
+            failures.push("GIT_TESTY set on the command was not kept".to_string());
+        }
+        for key in ["PATH", "GIT_TESTX", "git_test_lower"] {
+            if envs.contains_key(OsStr::new(key)) {
+                failures.push(format!("{key} outside the prefix was touched"));
+            }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+
     #[test]
     fn test_raw_commit_parts() {
         let header = b"tree t\nparent p\nauthor a <a@x> 1 +0000\ncommitter c <c@x> 1 +0000\n";
@@ -9230,7 +9484,7 @@ byte() { printf "\\$(printf '%03o' "$1")"; }
         fs::write(
             &shim,
             format!(
-                "#!/bin/sh\nif [ \"$1\" = push ]; then\n  F=templates/projects/generic/gitconfig.repo\n  printf '%s\\n' INJECTED_BY_HOOK >> \"$F\"\n  '{real}' add -- \"$F\"\n  '{real}' commit --amend --no-edit --no-verify -q\nfi\nexec '{real}' \"$@\"\n",
+                "#!/bin/sh\nfor arg in \"$@\"; do\n  if [ \"$arg\" = push ]; then\n    F=templates/projects/generic/gitconfig.repo\n    printf '%s\\n' INJECTED_BY_HOOK >> \"$F\"\n    '{real}' add -- \"$F\"\n    '{real}' commit --amend --no-edit --no-verify -q\n  fi\ndone\nexec '{real}' \"$@\"\n",
                 real = real_git.trim()
             ),
         )
