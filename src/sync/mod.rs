@@ -8426,6 +8426,150 @@ git update-ref HEAD "$N"
         "printf '%s\\n' \"$N\" > .git/ude-test-emptydir-commit\n",
     );
 
+    /// See [`amend_inject_lines`].
+    #[cfg(unix)]
+    macro_rules! injected_commit_lines {
+        () => {
+            r#"IB=$(printf 'INJECTED_BY_HOOK\n' | git hash-object -w --stdin)
+IT=$(printf '100644 blob %s\tinjected.txt\n' "$IB" | git mktree)
+X=$(git commit-tree "$IT" -p "$(git rev-parse HEAD~1)" -m injected)
+printf '%s\n' "$IB" > .git/ude-test-injected-blob
+"#
+        };
+    }
+
+    /// See [`amend_inject_lines`].
+    #[cfg(unix)]
+    macro_rules! graft_lines {
+        () => {
+            concat!(
+                injected_commit_lines!(),
+                r#"printf '%s %s %s\n' "$(git rev-parse HEAD)" "$(git rev-parse HEAD~1)" "$X" >> .git/info/grafts
+"#
+            )
+        };
+    }
+
+    /// See [`amend_inject_lines`].
+    #[cfg(unix)]
+    macro_rules! forged_graph_lines {
+        () => {
+            concat!(
+                injected_commit_lines!(),
+                r#"git update-ref refs/ude-test/x "$X"
+git commit-graph write --reachable
+git update-ref -d refs/ude-test/x
+sh "$FORGE" .git/objects/info/commit-graph "$(git rev-parse HEAD)" parent "$X"
+"#
+            )
+        };
+    }
+
+    /// Hook tail: writes an injected commit and its blob into the object store, referenced
+    /// by nothing UDE's commit reaches.
+    #[cfg(unix)]
+    const HOOK_INJECTED_COMMIT: &str = injected_commit_lines!();
+
+    /// Hook tail: grafts the injected commit onto UDE's commit as a second parent.
+    #[cfg(unix)]
+    const HOOK_GRAFT: &str = graft_lines!();
+
+    /// Hook tail: writes a commit-graph holding the injected commit, then forges UDE's
+    /// commit in it to have the injected commit as a second parent. Needs a `FORGE` line.
+    #[cfg(unix)]
+    const HOOK_FORGED_COMMIT_GRAPH: &str = forged_graph_lines!();
+
+    /// Hook tail: [`HOOK_FORGED_COMMIT_GRAPH`] with the graph in a split chain.
+    #[cfg(unix)]
+    const HOOK_FORGED_SPLIT_COMMIT_GRAPH: &str = concat!(
+        injected_commit_lines!(),
+        r#"git update-ref refs/ude-test/x "$X"
+git commit-graph write --reachable --split
+git update-ref -d refs/ude-test/x
+sh "$FORGE" ".git/objects/info/commit-graphs/graph-$(tail -n 1 .git/objects/info/commit-graphs/commit-graph-chain).graph" "$(git rev-parse HEAD)" parent "$X"
+"#
+    );
+
+    /// Hook tail: [`HOOK_FORGED_COMMIT_GRAPH`] with the graph moved into an alternate
+    /// object directory.
+    #[cfg(unix)]
+    const HOOK_FORGED_ALTERNATE_COMMIT_GRAPH: &str = concat!(
+        forged_graph_lines!(),
+        r#"mkdir -p .git/ude-test-alt/objects/info
+mv .git/objects/info/commit-graph .git/ude-test-alt/objects/info/commit-graph
+printf '%s\n' "$(pwd)/.git/ude-test-alt/objects" > .git/objects/info/alternates
+"#
+    );
+
+    /// Hook tail: builds a pack bitmap while the graft exists, then removes the graft.
+    #[cfg(unix)]
+    const HOOK_BITMAP_AFTER_GRAFT: &str = concat!(
+        graft_lines!(),
+        "git repack -adb -q\n",
+        "rm -f .git/info/grafts\n",
+    );
+
+    /// Hook tail: builds a multi-pack-index bitmap while the graft exists, then removes
+    /// the graft.
+    #[cfg(unix)]
+    const HOOK_MIDX_BITMAP_AFTER_GRAFT: &str = concat!(
+        graft_lines!(),
+        "git repack -ad -q\n",
+        "git multi-pack-index write --bitmap\n",
+        "rm -f .git/info/grafts\n",
+    );
+
+    /// POSIX sh, arguments: graph file, commit C, the word `parent`, commit X. Sets C's
+    /// second parent to X in the graph file. Git does not verify the trailing checksum
+    /// when reading, so it is left as it is. Exits non-zero when a chunk or id is missing.
+    #[cfg(unix)]
+    const FORGE_COMMIT_GRAPH_SH: &str = r#"#!/bin/sh
+set -eu
+G=$1
+C=$2
+X=$4
+hex() { od -A n -t x1 -v -j "$1" -N "$2" "$G" | tr -d ' \n'; }
+num() { echo $((0x$(hex "$1" "$2"))); }
+chmod u+w "$G"
+case $(num 5 1) in
+  1) H=20 ;;
+  2) H=32 ;;
+  *) exit 1 ;;
+esac
+CHUNKS=$(num 6 1)
+chunk() {
+  I=0
+  while [ "$I" -lt "$CHUNKS" ]; do
+    E=$((8 + I * 12))
+    if [ "$(hex "$E" 4)" = "$1" ]; then
+      num $((E + 4)) 8
+      return 0
+    fi
+    I=$((I + 1))
+  done
+  exit 1
+}
+OIDF=$(chunk 4f494446)
+OIDL=$(chunk 4f49444c)
+CDAT=$(chunk 43444154)
+N=$(num $((OIDF + 255 * 4)) 4)
+pos() {
+  P=$(hex "$OIDL" $((N * H)) | fold -w $((2 * H)) | grep -n -x "$1" | cut -d: -f1)
+  [ -n "$P" ] || exit 1
+  echo $((P - 1))
+}
+PC=$(pos "$C")
+PX=$(pos "$X")
+OFF=$((CDAT + PC * (H + 16) + H + 4))
+byte() { printf "\\$(printf '%03o' "$1")"; }
+{
+  byte $((PX >> 24 & 255))
+  byte $((PX >> 16 & 255))
+  byte $((PX >> 8 & 255))
+  byte $((PX & 255))
+} | dd of="$G" bs=1 seek="$OFF" count=4 conv=notrunc 2>/dev/null
+"#;
+
     /// What a test inspects after [`push_with_hook`].
     #[cfg(unix)]
     struct HookedPush {
@@ -9429,6 +9573,401 @@ git update-ref HEAD "$N"
 
         let err = push_failure(pushed.res);
         assert!(err.contains("contains an empty directory"), "{err}");
+    }
+
+    /// The forge script in its own directory, outside the cache checkout, and the hook line
+    /// naming it. The directory must outlive the push.
+    #[cfg(unix)]
+    fn forge_script() -> (tempfile::TempDir, String) {
+        let dir = tempdir().unwrap();
+        let script = dir.path().join("forge.sh");
+        fs::write(&script, FORGE_COMMIT_GRAPH_SH).unwrap();
+        let line = format!("FORGE='{}'\n", script.display());
+        (dir, line)
+    }
+
+    /// The commit the push published: remote main, or the single `ude-sync-*` branch's.
+    #[cfg(unix)]
+    fn published_commit(git: &GitFixture, pushed: &HookedPush, open_pr: bool) -> String {
+        let refname = if open_pr {
+            single_sync_branch(git, pushed)
+        } else {
+            "refs/heads/main".to_string()
+        };
+        git.output(pushed.bare.path(), &["rev-parse", &refname])
+    }
+
+    /// Pushes `commit` from `checkout` to a new bare repository, with `global_opts` before
+    /// `push` and optionally `GIT_TEST_COMMIT_GRAPH=1` set on that command.
+    #[cfg(unix)]
+    fn push_to_fresh_bare(
+        git: &GitFixture,
+        checkout: &Path,
+        commit: &str,
+        global_opts: &[&str],
+        test_commit_graph: bool,
+    ) -> tempfile::TempDir {
+        let bare = tempdir().unwrap();
+        git.run(bare.path(), &["init", "--bare", "-b", "main"]);
+        let mut push = git.cmd(checkout);
+        push.args(global_opts).args([
+            "push",
+            "--no-follow-tags",
+            bare.path().to_str().unwrap(),
+            &format!("{commit}:refs/heads/control"),
+        ]);
+        if test_commit_graph {
+            push.env("GIT_TEST_COMMIT_GRAPH", "1");
+        }
+        let out = push.output().unwrap();
+        assert!(
+            out.status.success(),
+            "control push failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        bare
+    }
+
+    /// The repository holds the object `oid`.
+    #[cfg(unix)]
+    fn holds_object(git: &GitFixture, repo: &Path, oid: &str) -> bool {
+        git.cmd(repo)
+            .args(["cat-file", "-e", oid])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    }
+
+    /// `dir` holds a file whose name starts with `prefix` and ends with `suffix`.
+    #[cfg(unix)]
+    fn dir_has_file(dir: &Path, prefix: &str, suffix: &str) -> bool {
+        fs::read_dir(dir).unwrap().any(|entry| {
+            let name = entry.unwrap().file_name();
+            let name = name.to_string_lossy();
+            name.starts_with(prefix) && name.ends_with(suffix)
+        })
+    }
+
+    /// The hook ran, the push succeeded and the published commit holds exactly the
+    /// validated bytes. Returns that commit.
+    #[cfg(unix)]
+    fn assert_published_exact(git: &GitFixture, pushed: &HookedPush, open_pr: bool) -> String {
+        assert!(pushed.hook_ran, "the hook never ran");
+        assert!(pushed.res.is_ok(), "{:?}", pushed.res);
+        let published = published_commit(git, pushed, open_pr);
+        assert_ne!(published, pushed.fetched_sha, "nothing was published");
+        assert_eq!(
+            remote_managed_blob(git, pushed, &published),
+            HOOKED_TEMPLATE.as_bytes()
+        );
+        published
+    }
+
+    /// In the cache checkout the published commit reads as having two parents through the
+    /// forged graph and one in the raw object, so the forge was really in effect.
+    #[cfg(unix)]
+    fn assert_graph_forge_in_effect(git: &GitFixture, pushed: &HookedPush, published: &str) {
+        let walked = git.output(
+            &pushed.checkout,
+            &["rev-list", "--parents", "-1", published],
+        );
+        assert_eq!(walked.split_whitespace().count(), 3, "{walked}");
+        let raw = git.output(
+            &pushed.checkout,
+            &["--no-replace-objects", "cat-file", "commit", published],
+        );
+        let parents = raw
+            .lines()
+            .filter(|line| line.starts_with("parent "))
+            .count();
+        assert_eq!(parents, 1, "{raw}");
+    }
+
+    /// The injected blob reaches a fresh bare repository through a push with `control_opts`
+    /// (the opposite direction: the forged state really leaks) and did not reach the remote.
+    #[cfg(unix)]
+    fn assert_leak_blocked(
+        git: &GitFixture,
+        pushed: &HookedPush,
+        published: &str,
+        control_opts: &[&str],
+        control_test_commit_graph: bool,
+    ) {
+        let injected = hook_recorded_id(pushed, "ude-test-injected-blob");
+        let control = push_to_fresh_bare(
+            git,
+            &pushed.checkout,
+            published,
+            control_opts,
+            control_test_commit_graph,
+        );
+        assert!(
+            holds_object(git, control.path(), &injected),
+            "the control push did not send the injected blob, so the hook's state had no effect"
+        );
+        assert!(
+            !holds_object(git, pushed.bare.path(), &injected),
+            "the remote holds the injected blob"
+        );
+    }
+
+    /// A hook wrote a grafts file: nothing was published and the injected blob stayed home.
+    #[cfg(unix)]
+    fn assert_refused_for_grafts(git: &GitFixture, pushed: HookedPush) {
+        assert!(pushed.hook_ran, "the hook never ran");
+        assert_remote_unchanged(git, &pushed);
+        let injected = hook_recorded_id(&pushed, "ude-test-injected-blob");
+        assert!(!holds_object(git, pushed.bare.path(), &injected));
+        let err = push_failure(pushed.res);
+        assert!(
+            err.contains("which can make git push send objects outside the validated commit"),
+            "{err}"
+        );
+        assert!(err.contains("info/grafts"), "{err}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_direct_push_refuses_hook_grafts_file() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let pushed = push_with_post_commit_hook(&git, &engine, false, HOOK_GRAFT);
+        assert_refused_for_grafts(&git, pushed);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_pr_push_refuses_hook_grafts_file() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let pushed = push_with_post_commit_hook(&git, &engine, true, HOOK_GRAFT);
+        assert_refused_for_grafts(&git, pushed);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_direct_push_publishes_with_hook_commit_and_no_grafts_file() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let pushed = push_with_post_commit_hook(&git, &engine, false, HOOK_INJECTED_COMMIT);
+
+        assert_published_exact(&git, &pushed, false);
+        let injected = hook_recorded_id(&pushed, "ude-test-injected-blob");
+        assert!(!holds_object(&git, pushed.bare.path(), &injected));
+        assert!(!pushed.checkout.join(".git/info/grafts").exists());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_direct_push_sends_no_object_from_forged_commit_graph() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let (_forge_dir, forge) = forge_script();
+        let tail = format!("{forge}{HOOK_FORGED_COMMIT_GRAPH}");
+        let pushed = push_with_post_commit_hook(&git, &engine, false, &tail);
+
+        let published = assert_published_exact(&git, &pushed, false);
+        assert_graph_forge_in_effect(&git, &pushed, &published);
+        assert_leak_blocked(&git, &pushed, &published, &[], false);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_pr_push_sends_no_object_from_forged_commit_graph() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let (_forge_dir, forge) = forge_script();
+        let tail = format!("{forge}{HOOK_FORGED_COMMIT_GRAPH}");
+        let pushed = push_with_post_commit_hook(&git, &engine, true, &tail);
+
+        let published = assert_published_exact(&git, &pushed, true);
+        assert_graph_forge_in_effect(&git, &pushed, &published);
+        assert_leak_blocked(&git, &pushed, &published, &[], false);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_push_sends_no_object_from_forged_split_commit_graph() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let (_forge_dir, forge) = forge_script();
+        let tail = format!("{forge}{HOOK_FORGED_SPLIT_COMMIT_GRAPH}");
+        let pushed = push_with_post_commit_hook(&git, &engine, false, &tail);
+
+        let published = assert_published_exact(&git, &pushed, false);
+        let info = pushed.checkout.join(".git/objects/info");
+        assert!(info.join("commit-graphs/commit-graph-chain").exists());
+        assert!(!info.join("commit-graph").exists());
+        assert_graph_forge_in_effect(&git, &pushed, &published);
+        assert_leak_blocked(&git, &pushed, &published, &[], false);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_push_sends_no_object_from_forged_alternate_commit_graph() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let (_forge_dir, forge) = forge_script();
+        let tail = format!("{forge}{HOOK_FORGED_ALTERNATE_COMMIT_GRAPH}");
+        let pushed = push_with_post_commit_hook(&git, &engine, false, &tail);
+
+        let published = assert_published_exact(&git, &pushed, false);
+        let dot_git = pushed.checkout.join(".git");
+        assert!(dot_git.join("objects/info/alternates").exists());
+        assert!(!dot_git.join("objects/info/commit-graph").exists());
+        assert!(
+            dot_git
+                .join("ude-test-alt/objects/info/commit-graph")
+                .exists()
+        );
+        assert_graph_forge_in_effect(&git, &pushed, &published);
+        assert_leak_blocked(&git, &pushed, &published, &[], false);
+    }
+
+    /// A pack bitmap built under a graft is what is left in the cache checkout, and the
+    /// grafts file is gone, so neither the refusal nor a graft at push time explains the
+    /// result.
+    #[cfg(unix)]
+    fn assert_pack_bitmap_without_grafts(pushed: &HookedPush) {
+        let dot_git = pushed.checkout.join(".git");
+        assert!(!dot_git.join("info/grafts").exists());
+        assert!(dir_has_file(
+            &dot_git.join("objects/pack"),
+            "pack-",
+            ".bitmap"
+        ));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_direct_push_sends_no_object_from_graft_built_bitmap() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let pushed = push_with_post_commit_hook(&git, &engine, false, HOOK_BITMAP_AFTER_GRAFT);
+
+        let published = assert_published_exact(&git, &pushed, false);
+        assert_pack_bitmap_without_grafts(&pushed);
+        assert_leak_blocked(&git, &pushed, &published, &[], false);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_pr_push_sends_no_object_from_graft_built_bitmap() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let pushed = push_with_post_commit_hook(&git, &engine, true, HOOK_BITMAP_AFTER_GRAFT);
+
+        let published = assert_published_exact(&git, &pushed, true);
+        assert_pack_bitmap_without_grafts(&pushed);
+        assert_leak_blocked(&git, &pushed, &published, &[], false);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_push_sends_no_object_from_graft_built_multi_pack_index_bitmap() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let pushed = push_with_post_commit_hook(&git, &engine, false, HOOK_MIDX_BITMAP_AFTER_GRAFT);
+
+        let published = assert_published_exact(&git, &pushed, false);
+        let dot_git = pushed.checkout.join(".git");
+        assert!(!dot_git.join("info/grafts").exists());
+        let pack_dir = dot_git.join("objects/pack");
+        assert!(dir_has_file(&pack_dir, "multi-pack-index-", ".bitmap"));
+        assert!(!dir_has_file(&pack_dir, "pack-", ".bitmap"));
+        assert_leak_blocked(&git, &pushed, &published, &[], false);
+    }
+
+    /// The options the pushes run with, for the control that shows the variable overrides
+    /// them.
+    #[cfg(unix)]
+    const PUSH_HISTORY_OPTIONS: [&str; 4] = [
+        "-c",
+        "core.commitGraph=false",
+        "-c",
+        "pack.useBitmaps=false",
+    ];
+
+    /// An engine whose every git command inherits `GIT_TEST_COMMIT_GRAPH=1`.
+    #[cfg(unix)]
+    fn engine_with_test_commit_graph(git: &GitFixture) -> SyncEngine {
+        let mut env = git.gitconfig_env();
+        env.push(("GIT_TEST_COMMIT_GRAPH".into(), "1".into()));
+        SyncEngine::new().with_extra_env(env)
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_direct_push_ignores_inherited_git_test_commit_graph() {
+        let git = GitFixture::new();
+        let engine = engine_with_test_commit_graph(&git);
+        let (_forge_dir, forge) = forge_script();
+        let tail = format!("{forge}{HOOK_FORGED_COMMIT_GRAPH}");
+        let pushed = push_with_post_commit_hook(&git, &engine, false, &tail);
+
+        let published = assert_published_exact(&git, &pushed, false);
+        assert_leak_blocked(&git, &pushed, &published, &PUSH_HISTORY_OPTIONS, true);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_pr_push_ignores_inherited_git_test_commit_graph() {
+        let git = GitFixture::new();
+        let engine = engine_with_test_commit_graph(&git);
+        let (_forge_dir, forge) = forge_script();
+        let tail = format!("{forge}{HOOK_FORGED_COMMIT_GRAPH}");
+        let pushed = push_with_post_commit_hook(&git, &engine, true, &tail);
+
+        let published = assert_published_exact(&git, &pushed, true);
+        assert_leak_blocked(&git, &pushed, &published, &PUSH_HISTORY_OPTIONS, true);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_push_from_clone_of_gc_remote_publishes() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let bare = seeded_bare_remote(&git);
+        git.run(bare.path(), &["gc", "-q"]);
+        assert!(bare.path().join("objects/info/commit-graph").exists());
+        assert!(dir_has_file(
+            &bare.path().join("objects/pack"),
+            "",
+            ".bitmap"
+        ));
+
+        let cache = tempdir().unwrap();
+        let cached = engine
+            .ensure_remote_repo(bare.path().to_str().unwrap(), "main", cache.path())
+            .unwrap();
+        let dot_git = cached.checkout_dir.join(".git");
+        assert!(dot_git.join("objects/info/commit-graph").exists());
+        assert!(dir_has_file(&dot_git.join("objects/pack"), "", ".bitmap"));
+
+        let managed = cached.templates_dir.join("projects/generic/gitconfig.repo");
+        fs::write(&managed, HOOKED_TEMPLATE).unwrap();
+        let validated = ValidatedBlobs::from_files(std::slice::from_ref(&managed));
+        let res = engine.push_to_remote(
+            &cached.checkout_dir,
+            "main",
+            false,
+            std::slice::from_ref(&managed),
+            &validated,
+            &cached.fetched_sha,
+        );
+
+        assert!(res.is_ok(), "{res:?}");
+        let main = git.output(bare.path(), &["rev-parse", "refs/heads/main"]);
+        assert_ne!(main, cached.fetched_sha, "remote main did not advance");
+        let blob = git.checked(
+            bare.path(),
+            &[
+                "show",
+                "refs/heads/main:templates/projects/generic/gitconfig.repo",
+            ],
+        );
+        assert_eq!(blob.stdout, HOOKED_TEMPLATE.as_bytes());
     }
 
     #[test]
