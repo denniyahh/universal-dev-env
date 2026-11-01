@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 02
 current_phase_name: Sanitizer, Boundaries & Security Hardening
 status: executing
-stopped_at: Completed 02-10-PLAN.md
-last_updated: "2026-10-28T13:19:10.181Z"
-last_activity: 2026-10-27
+stopped_at: Completed 02-11-PLAN.md
+last_updated: "2026-11-01T15:09:34.943Z"
+last_activity: 2026-11-01
 last_activity_desc: Phase 02 execution started
-state_head: 4300bb5bc03328857ea667da8095cc898c441c9a
+state_head: 6a88d0dd61972d34a909e6ecb0cc03426c628d9e
 progress:
   total_phases: 4
   completed_phases: 1
   total_plans: 23
-  completed_plans: 21
+  completed_plans: 22
 ---
 
 # Project State
@@ -26,10 +26,10 @@ See: `.planning/PROJECT.md` (updated 2026-10-22)
 
 ## Current Position
 
-Phase: 02 (Sanitizer, Boundaries & Security Hardening) — READY TO EXECUTE
-Plan: 10 of 10
+Phase: 02 (Sanitizer, Boundaries & Security Hardening) — EXECUTING
+Plan: 12 of 12
 Status: Ready to execute
-Last activity: 2026-10-27 — Phase 02 execution started
+Last activity: 2026-11-01 — Phase 02 execution started
 
 Progress: [███░░░░░░░] 25%
 
@@ -79,6 +79,7 @@ Progress: [███░░░░░░░] 25%
 | Phase 02 P08 | 15 min | 3 tasks | 4 files |
 | Phase 02 P09 | 13min | 3 tasks | 4 files |
 | Phase 02 P10 | 14min | 3 tasks | 2 files |
+| Phase 02 P11 | 15 min | 3 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -142,6 +143,9 @@ Recent decisions affecting current work:
 - [Phase 02]: Gap closure fixes the non-.jinja placeholder push (verification gap 2 / review CR-02): push gate 2 uses template::should_render, not the .jinja extension; no SC4 override — Operator chose option A on 2026-10-27: init renders any template with {{ since 02-02, so push must protect the same set
 - [Phase 02]: 02-09: home and XDG config roots are normalized with sanitizer::normalize_root (trailing separators trimmed, a separator-only root kept) in push_updates, parameterize_paths and detect_for_project; src/main.rs and xdg_data unchanged
 - [Phase 02]: 02-10: push gate 2 (template_has_logic) uses template::should_render for UTF-8 templates (operator option A); a non-UTF-8 template keeps the previous answer (logic only when .jinja and a marker remains after placeholder removal, D-14); marker check on raw bytes with non-ASCII bytes read as NUL
+- [Phase 02]: 02-11: the committed gate requires exactly one parent equal to the fetched head in both push modes, read from the raw commit object, and lists changes with a two-tree diff-tree from that head; check_continuity is removed and its message text moved into the gate
+- [Phase 02]: 02-11: the gate's cat-file, diff-tree and show reads pass --no-replace-objects (the environment form is stripped by process::prepare_command); resolve_commit's rev-parse does not, because its id is what the gate reads raw and the push sends
+- [Phase 02]: 02-11: both pushes send the validated commit id with --no-follow-tags; the PR push no longer sets an upstream
 
 ### Pending Todos
 
@@ -181,6 +185,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-27T18:18:43.615Z
-Stopped at: Completed 02-10-PLAN.md
+Last session: 2026-11-01T15:09:34.751Z
+Stopped at: Completed 02-11-PLAN.md
 Resume file: None
