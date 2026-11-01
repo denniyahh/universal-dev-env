@@ -8270,7 +8270,65 @@ git tag -a ude-hook-tag -m INJECTED_TAG_MESSAGE HEAD
 git rev-parse ude-hook-tag > .git/ude-test-tag
 "#;
 
-    /// What a test inspects after [`push_with_post_commit_hook`].
+    /// See [`amend_inject_lines`].
+    #[cfg(unix)]
+    macro_rules! amend_message_lines {
+        () => {
+            r#"git commit --amend --no-verify -q -m "$(git log -1 --format=%B)" -m INJECTED_BY_HOOK
+"#
+        };
+    }
+
+    /// See [`amend_inject_lines`].
+    #[cfg(unix)]
+    macro_rules! empty_dir_lines {
+        () => {
+            r#"P=$(git rev-parse HEAD~1)
+git cat-file commit HEAD | sed '1,/^$/d' > .git/ude-test-msg
+E=$(git mktree </dev/null)
+R=$( { git ls-tree HEAD; printf '040000 tree %s\tINJECTED_DIR_NAME\n' "$E"; } | git mktree )
+N=$(git commit-tree "$R" -p "$P" -F .git/ude-test-msg)
+git update-ref HEAD "$N"
+"#
+        };
+    }
+
+    /// prepare-commit-msg tail: appends a line to the message file git passes as `$1`.
+    #[cfg(unix)]
+    const HOOK_PCM_APPEND: &str = r#"printf 'INJECTED_BY_HOOK\n' >> "$1"
+"#;
+
+    /// Hook tail: amends a second paragraph into UDE's commit message.
+    #[cfg(unix)]
+    const HOOK_AMEND_MESSAGE: &str = amend_message_lines!();
+
+    /// Hook tail: amends the message, then replaces the amended commit with UDE's commit,
+    /// so a reader honouring replace refs sees the sync message.
+    #[cfg(unix)]
+    const HOOK_REPLACE_MESSAGE: &str = concat!(
+        "O=$(git rev-parse HEAD)\n",
+        amend_message_lines!(),
+        "A=$(git rev-parse HEAD)\n",
+        "git replace -f \"$A\" \"$O\"\n",
+        "printf '%s\\n' \"$A\" > .git/ude-test-amended-message\n",
+    );
+
+    /// Hook tail: rebuilds UDE's commit (same parent, same message bytes, same managed
+    /// blob) with an empty directory added to its root tree.
+    #[cfg(unix)]
+    const HOOK_EMPTY_DIR: &str = empty_dir_lines!();
+
+    /// Hook tail: [`HOOK_EMPTY_DIR`], then replaces the new root tree with UDE's validated
+    /// root tree, so a listing honouring replace refs omits the directory.
+    #[cfg(unix)]
+    const HOOK_EMPTY_DIR_REPLACED: &str = concat!(
+        "V=$(git rev-parse 'HEAD^{tree}')\n",
+        empty_dir_lines!(),
+        "git replace -f \"$R\" \"$V\"\n",
+        "printf '%s\\n' \"$N\" > .git/ude-test-emptydir-commit\n",
+    );
+
+    /// What a test inspects after [`push_with_hook`].
     #[cfg(unix)]
     struct HookedPush {
         res: Result<String, PushRemoteError>,
@@ -8283,15 +8341,27 @@ git rev-parse ude-hook-tag > .git/ude-test-tag
         hook_ran: bool,
     }
 
-    /// Publishes [`HOOKED_TEMPLATE`] over the seeded template of a fresh bare remote with
-    /// a post-commit hook installed in the cache checkout. The hook runs its body once
-    /// (a marker stops an amend's own post-commit), with `F` set to the managed file's
-    /// checkout-relative path, then `hook_tail`.
+    /// [`push_with_hook`] with a post-commit hook.
     #[cfg(unix)]
     fn push_with_post_commit_hook(
         git: &GitFixture,
         engine: &SyncEngine,
         open_pr: bool,
+        hook_tail: &str,
+    ) -> HookedPush {
+        push_with_hook(git, engine, open_pr, "post-commit", hook_tail)
+    }
+
+    /// Publishes [`HOOKED_TEMPLATE`] over the seeded template of a fresh bare remote with
+    /// the hook `hook_name` installed in the cache checkout. The hook runs its body once
+    /// (a marker stops an amend's own post-commit), with `F` set to the managed file's
+    /// checkout-relative path, then `hook_tail`.
+    #[cfg(unix)]
+    fn push_with_hook(
+        git: &GitFixture,
+        engine: &SyncEngine,
+        open_pr: bool,
+        hook_name: &str,
         hook_tail: &str,
     ) -> HookedPush {
         use std::os::unix::fs::PermissionsExt;
@@ -8310,7 +8380,7 @@ git rev-parse ude-hook-tag > .git/ude-test-tag
         fs::write(&managed, HOOKED_TEMPLATE).unwrap();
         let validated = ValidatedBlobs::from_files(std::slice::from_ref(&managed));
 
-        let hook = checkout.join(".git/hooks/post-commit");
+        let hook = checkout.join(".git/hooks").join(hook_name);
         fs::create_dir_all(hook.parent().unwrap()).unwrap();
         fs::write(
             &hook,
@@ -8875,6 +8945,268 @@ git rev-parse ude-hook-tag > .git/ude-test-tag
             remote_managed_blob(&git, &pushed, &sync),
             HOOKED_TEMPLATE.as_bytes()
         );
+    }
+
+    /// The commit message bytes of a raw `cat-file commit` output, as UTF-8 text.
+    #[cfg(unix)]
+    fn message_of_raw_commit(raw: Vec<u8>) -> String {
+        let text = String::from_utf8(raw).unwrap();
+        let (_, message) = text.split_once("\n\n").expect("a commit has an empty line");
+        message.to_string()
+    }
+
+    /// A hook that writes commit text was refused with the message naming the likely
+    /// cause, nothing was published and the error does not print the hook's text.
+    #[cfg(unix)]
+    fn assert_refused_as_foreign_message(git: &GitFixture, pushed: HookedPush) {
+        assert!(pushed.hook_ran, "the hook never ran");
+        assert_remote_unchanged(git, &pushed);
+        let err = push_failure(pushed.res);
+        assert!(err.contains("is not the sync commit message"), "{err}");
+        assert!(
+            err.contains("prepare-commit-msg or post-commit hook"),
+            "{err}"
+        );
+        assert!(!err.contains("INJECTED_BY_HOOK"), "{err}");
+    }
+
+    #[test]
+    fn test_committed_gate_requires_exact_sync_message() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let repo = tempdir().unwrap();
+        git.run(repo.path(), &["init", "-b", "main"]);
+        let base_file = repo.path().join("base.txt");
+        fs::write(&base_file, "initial").unwrap();
+        git.run(repo.path(), &["add", "-A"]);
+        git.run(repo.path(), &["commit", "-m", "base commit"]);
+        let base = git.output(repo.path(), &["rev-parse", "HEAD"]);
+        fs::write(&base_file, "updated\n").unwrap();
+        git.run(repo.path(), &["add", "base.txt"]);
+        git.run(repo.path(), &["commit", "-m", SYNC_COMMIT_MESSAGE]);
+        let tree = git.output(repo.path(), &["rev-parse", "HEAD^{tree}"]);
+        let expected_set: HashSet<PathBuf> = [PathBuf::from("base.txt")].into_iter().collect();
+        let validated = ValidatedBlobs::from_files(std::slice::from_ref(&base_file));
+        let message_dir = tempdir().unwrap();
+        let message_file = message_dir.path().join("message");
+
+        let refusal = "is not the sync commit message";
+        let rows: [(&str, String, Option<&str>); 4] = [
+            ("one LF", format!("{SYNC_COMMIT_MESSAGE}\n"), None),
+            ("no LF", SYNC_COMMIT_MESSAGE.to_string(), Some(refusal)),
+            (
+                "two LFs",
+                format!("{SYNC_COMMIT_MESSAGE}\n\n"),
+                Some(refusal),
+            ),
+            (
+                "a line added",
+                format!("{SYNC_COMMIT_MESSAGE}\nINJECTED_BY_HOOK\n"),
+                Some(refusal),
+            ),
+        ];
+        let mut failures = Vec::new();
+        for (name, message, expected) in rows {
+            fs::write(&message_file, &message).unwrap();
+            let commit = git.output(
+                repo.path(),
+                &[
+                    "commit-tree",
+                    &tree,
+                    "-p",
+                    &base,
+                    "-F",
+                    message_file.to_str().unwrap(),
+                ],
+            );
+            let verdict = engine.validate_committed_tree(
+                repo.path(),
+                &commit,
+                &base,
+                &expected_set,
+                &validated,
+            );
+            let as_expected = match (&verdict, expected) {
+                (Ok(()), None) => true,
+                (Err(err), Some(text)) => err.contains(text) && !err.contains("INJECTED_BY_HOOK"),
+                _ => false,
+            };
+            if !as_expected {
+                failures.push(format!("{name}: {verdict:?}, expected {expected:?}"));
+            }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_direct_push_refuses_prepare_commit_msg_hook_text() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let pushed = push_with_hook(&git, &engine, false, "prepare-commit-msg", HOOK_PCM_APPEND);
+        assert_refused_as_foreign_message(&git, pushed);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_pr_push_refuses_prepare_commit_msg_hook_text() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let pushed = push_with_hook(&git, &engine, true, "prepare-commit-msg", HOOK_PCM_APPEND);
+        assert_refused_as_foreign_message(&git, pushed);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_direct_push_refuses_hook_amended_message() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let pushed = push_with_post_commit_hook(&git, &engine, false, HOOK_AMEND_MESSAGE);
+        assert_refused_as_foreign_message(&git, pushed);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_pr_push_refuses_hook_amended_message() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let pushed = push_with_post_commit_hook(&git, &engine, true, HOOK_AMEND_MESSAGE);
+        assert_refused_as_foreign_message(&git, pushed);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_direct_push_publishes_with_benign_prepare_commit_msg_hook() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let pushed = push_with_hook(&git, &engine, false, "prepare-commit-msg", "");
+
+        assert!(pushed.hook_ran, "the hook never ran");
+        assert!(pushed.res.is_ok(), "{:?}", pushed.res);
+        let main = git.output(pushed.bare.path(), &["rev-parse", "refs/heads/main"]);
+        assert_ne!(main, pushed.fetched_sha, "remote main did not advance");
+        assert_eq!(
+            remote_managed_blob(&git, &pushed, "refs/heads/main"),
+            HOOKED_TEMPLATE.as_bytes()
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_pr_push_publishes_with_benign_prepare_commit_msg_hook() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let pushed = push_with_hook(&git, &engine, true, "prepare-commit-msg", "");
+
+        assert!(pushed.hook_ran, "the hook never ran");
+        assert!(pushed.res.is_ok(), "{:?}", pushed.res);
+        let sync = single_sync_branch(&git, &pushed);
+        assert_eq!(
+            remote_managed_blob(&git, &pushed, &sync),
+            HOOKED_TEMPLATE.as_bytes()
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_push_refuses_hook_replaced_message() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let pushed = push_with_post_commit_hook(&git, &engine, false, HOOK_REPLACE_MESSAGE);
+
+        assert!(pushed.hook_ran, "the hook never ran");
+        assert_remote_unchanged(&git, &pushed);
+
+        // Opposite direction: a default read shows the sync message, a raw read the hook's.
+        let amended = hook_recorded_id(&pushed, "ude-test-amended-message");
+        let default_read = git.checked(&pushed.checkout, &["cat-file", "commit", &amended]);
+        assert_eq!(
+            message_of_raw_commit(default_read.stdout),
+            format!("{SYNC_COMMIT_MESSAGE}\n")
+        );
+        let raw_read = git.checked(
+            &pushed.checkout,
+            &["--no-replace-objects", "cat-file", "commit", &amended],
+        );
+        let raw_message = message_of_raw_commit(raw_read.stdout);
+        assert!(raw_message.contains("INJECTED_BY_HOOK"), "{raw_message}");
+
+        let err = push_failure(pushed.res);
+        assert!(err.contains("is not the sync commit message"), "{err}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_push_refuses_hook_secret_in_commit_header() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let prefix = "ghp_";
+        let body = "111122223333444455556666777788889999";
+        let tail = format!(
+            "git commit --amend --no-edit --no-verify -q --author=\"{prefix}{body} <hook@example.com>\"\n"
+        );
+        let pushed = push_with_post_commit_hook(&git, &engine, false, &tail);
+
+        assert!(pushed.hook_ran, "the hook never ran");
+        assert_remote_unchanged(&git, &pushed);
+        let err = push_failure(pushed.res);
+        assert!(
+            err.contains("secret detected in the header of the commit to publish"),
+            "{err}"
+        );
+        assert!(err.contains("GitHub Personal Access Token"), "{err}");
+        assert!(!err.contains(body), "gate error leaked the token body");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_push_refuses_hook_empty_directory() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let pushed = push_with_post_commit_hook(&git, &engine, false, HOOK_EMPTY_DIR);
+
+        assert!(pushed.hook_ran, "the hook never ran");
+        assert_remote_unchanged(&git, &pushed);
+        let err = push_failure(pushed.res);
+        assert!(err.contains("contains an empty directory"), "{err}");
+        assert!(!err.contains("INJECTED_DIR_NAME"), "{err}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_push_refuses_hook_replaced_tree_hiding_empty_directory() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let pushed = push_with_post_commit_hook(&git, &engine, false, HOOK_EMPTY_DIR_REPLACED);
+
+        assert!(pushed.hook_ran, "the hook never ran");
+        assert_remote_unchanged(&git, &pushed);
+
+        // Opposite direction: a default listing omits the directory, a raw listing has it.
+        let commit = hook_recorded_id(&pushed, "ude-test-emptydir-commit");
+        let default_listing = git.output(
+            &pushed.checkout,
+            &["ls-tree", "-r", "-t", "--name-only", &commit],
+        );
+        assert!(
+            !default_listing.contains("INJECTED_DIR_NAME"),
+            "{default_listing}"
+        );
+        let raw_listing = git.output(
+            &pushed.checkout,
+            &[
+                "--no-replace-objects",
+                "ls-tree",
+                "-r",
+                "-t",
+                "--name-only",
+                &commit,
+            ],
+        );
+        assert!(raw_listing.contains("INJECTED_DIR_NAME"), "{raw_listing}");
+
+        let err = push_failure(pushed.res);
+        assert!(err.contains("contains an empty directory"), "{err}");
     }
 
     #[test]
