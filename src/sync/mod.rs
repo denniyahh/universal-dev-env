@@ -9753,6 +9753,7 @@ byte() { printf "\\$(printf '%03o' "$1")"; }
 
         let err = push_failure(pushed.res);
         assert!(err.contains("is not the sync commit message"), "{err}");
+        assert!(!err.contains("INJECTED_BY_HOOK"), "{err}");
     }
 
     #[test]
@@ -9827,6 +9828,7 @@ byte() { printf "\\$(printf '%03o' "$1")"; }
 
         let err = push_failure(pushed.res);
         assert!(err.contains("contains an empty directory"), "{err}");
+        assert!(!err.contains("INJECTED_DIR_NAME"), "{err}");
     }
 
     /// The forge script in its own directory, outside the cache checkout, and the hook line
