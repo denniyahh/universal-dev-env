@@ -8152,12 +8152,31 @@ mod tests {
     #[cfg(unix)]
     const HOOKED_TEMPLATE: &str = "[core]\n\tx = 1\n";
 
-    /// Hook tail: appends a line to the managed file and amends UDE's commit.
+    /// Shell lines shared by the hook tails below, as literals so `concat!` can use them.
     #[cfg(unix)]
-    const HOOK_AMEND_INJECT: &str = r#"printf '%s\n' INJECTED_BY_HOOK >> "$F"
+    macro_rules! amend_inject_lines {
+        () => {
+            r#"printf '%s\n' INJECTED_BY_HOOK >> "$F"
 git add -- "$F"
 git commit --amend --no-edit --no-verify -q
-"#;
+"#
+        };
+    }
+
+    /// See [`amend_inject_lines`].
+    #[cfg(unix)]
+    macro_rules! add_file_lines {
+        () => {
+            r#"printf '%s\n' INJECTED_BY_HOOK > templates/hook-extra.txt
+git add -- templates/hook-extra.txt
+git commit --amend --no-edit --no-verify -q
+"#
+        };
+    }
+
+    /// Hook tail: appends a line to the managed file and amends UDE's commit.
+    #[cfg(unix)]
+    const HOOK_AMEND_INJECT: &str = amend_inject_lines!();
 
     /// Hook tail: makes HEAD a merge whose first parent is HEAD's parent and whose second
     /// parent is HEAD, with HEAD's tree.
@@ -8178,9 +8197,57 @@ git update-ref HEAD "$R"
 
     /// Hook tail: amends a file nobody validated into UDE's commit.
     #[cfg(unix)]
-    const HOOK_ADD_FILE: &str = r#"printf '%s\n' INJECTED_BY_HOOK > templates/hook-extra.txt
-git add -- templates/hook-extra.txt
-git commit --amend --no-edit --no-verify -q
+    const HOOK_ADD_FILE: &str = add_file_lines!();
+
+    /// Hook tail: amends injected bytes in, then replaces the injected blob with UDE's
+    /// validated blob, so a reader honouring replace refs sees the validated bytes.
+    #[cfg(unix)]
+    const HOOK_REPLACE_BLOB: &str = concat!(
+        "V=$(git rev-parse \"HEAD:$F\")\n",
+        amend_inject_lines!(),
+        "I=$(git rev-parse \"HEAD:$F\")\n",
+        "git replace -f \"$I\" \"$V\"\n",
+        "printf '%s\\n' \"$I\" > .git/ude-test-injected-blob\n",
+    );
+
+    /// Hook tail: makes HEAD a merge holding the amended commit as its second parent, then
+    /// replaces that merge with UDE's validated single-parent commit.
+    #[cfg(unix)]
+    const HOOK_REPLACE_MERGE: &str = concat!(
+        "O=$(git rev-parse HEAD)\n",
+        amend_inject_lines!(),
+        "M=$(git commit-tree \"$(git rev-parse \"$O^{tree}\")\" -p \"$(git rev-parse HEAD~1)\" -p \"$(git rev-parse HEAD)\" -m merge)\n",
+        "git update-ref HEAD \"$M\"\n",
+        "git replace -f \"$M\" \"$O\"\n",
+        "printf '%s\\n' \"$M\" > .git/ude-test-merge\n",
+    );
+
+    /// Hook tail: amends an unvalidated file in, then replaces the amended root tree with
+    /// UDE's validated root tree, so a listing honouring replace refs omits that file.
+    #[cfg(unix)]
+    const HOOK_REPLACE_TREE: &str = concat!(
+        "V=$(git rev-parse 'HEAD^{tree}')\n",
+        add_file_lines!(),
+        "I=$(git rev-parse 'HEAD^{tree}')\n",
+        "git replace -f \"$I\" \"$V\"\n",
+        "git rev-parse HEAD > .git/ude-test-amended\n",
+    );
+
+    /// Hook tail: amends the branch with injected bytes, then detaches HEAD back on UDE's
+    /// validated commit, leaving the branch on the amended one.
+    #[cfg(unix)]
+    const HOOK_DETACH_TO_VALIDATED: &str = concat!(
+        "O=$(git rev-parse HEAD)\n",
+        amend_inject_lines!(),
+        "git update-ref --no-deref HEAD \"$O\"\n",
+    );
+
+    /// Hook tail: turns on tag following in the cache repository config and creates an
+    /// annotated tag on UDE's commit.
+    #[cfg(unix)]
+    const HOOK_TAG_FOLLOW: &str = r#"git config push.followTags true
+git tag -a ude-hook-tag -m INJECTED_TAG_MESSAGE HEAD
+git rev-parse ude-hook-tag > .git/ude-test-tag
 "#;
 
     /// What a test inspects after [`push_with_post_commit_hook`].
@@ -8189,6 +8256,7 @@ git commit --amend --no-edit --no-verify -q
         res: Result<String, PushRemoteError>,
         bare: tempfile::TempDir,
         _cache: tempfile::TempDir,
+        checkout: PathBuf,
         fetched_sha: String,
         managed_rel: String,
         /// The hook's marker exists: a refusal or a publish without it proves nothing.
@@ -8248,6 +8316,7 @@ git commit --amend --no-edit --no-verify -q
             res,
             bare,
             _cache: cache,
+            checkout,
             fetched_sha,
             managed_rel,
             hook_ran,
@@ -8521,6 +8590,207 @@ git commit --amend --no-edit --no-verify -q
             remote_managed_blob(&git, &pushed, "refs/heads/main"),
             HOOKED_TEMPLATE.as_bytes()
         );
+    }
+
+    /// A hook artifact holding one object id, from `.git/` of the cache checkout.
+    #[cfg(unix)]
+    fn hook_recorded_id(pushed: &HookedPush, name: &str) -> String {
+        fs::read_to_string(pushed.checkout.join(".git").join(name))
+            .unwrap()
+            .trim()
+            .to_string()
+    }
+
+    /// Nothing of `ude-hook-tag` reached the remote though the hook asked for tag
+    /// following; the same push without `--no-follow-tags` publishes it to a second bare
+    /// repository, so the hook's config and tag were really in effect.
+    #[cfg(unix)]
+    fn assert_hook_tag_not_published(git: &GitFixture, pushed: &HookedPush, published: &str) {
+        let bare = pushed.bare.path();
+        assert_eq!(git.output(bare, &["for-each-ref", "refs/tags"]), "");
+        let tag = hook_recorded_id(pushed, "ude-test-tag");
+        let tag_object = git
+            .cmd(bare)
+            .args(["cat-file", "-e", &tag])
+            .output()
+            .unwrap();
+        assert!(!tag_object.status.success(), "the tag object was sent");
+
+        let second = tempdir().unwrap();
+        git.run(second.path(), &["init", "--bare", "-b", "main"]);
+        git.run(
+            &pushed.checkout,
+            &[
+                "push",
+                second.path().to_str().unwrap(),
+                &format!("{published}:refs/heads/control"),
+            ],
+        );
+        assert_eq!(
+            git.output(
+                second.path(),
+                &["for-each-ref", "--format=%(refname)", "refs/tags"]
+            ),
+            "refs/tags/ude-hook-tag"
+        );
+        let message = git.output(second.path(), &["cat-file", "tag", "ude-hook-tag"]);
+        assert!(message.contains("INJECTED_TAG_MESSAGE"), "{message}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_push_refuses_hook_replaced_blob() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let pushed = push_with_post_commit_hook(&git, &engine, false, HOOK_REPLACE_BLOB);
+
+        assert!(pushed.hook_ran, "the post-commit hook never ran");
+        assert_remote_unchanged(&git, &pushed);
+
+        // Opposite direction: a default read is fooled, a raw read sees the hook's blob.
+        let injected = hook_recorded_id(&pushed, "ude-test-injected-blob");
+        let default_read = git.checked(&pushed.checkout, &["cat-file", "blob", &injected]);
+        assert_eq!(default_read.stdout, HOOKED_TEMPLATE.as_bytes());
+        let raw_read = git.output(
+            &pushed.checkout,
+            &["--no-replace-objects", "cat-file", "blob", &injected],
+        );
+        assert!(raw_read.contains("INJECTED_BY_HOOK"), "{raw_read}");
+
+        let err = push_failure(pushed.res);
+        assert!(
+            err.contains("Post-commit publication gate violation: committed HEAD blob"),
+            "{err}"
+        );
+        assert!(err.contains("differs from the validated content"), "{err}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_push_refuses_hook_merge_replaced_by_validated_commit() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let pushed = push_with_post_commit_hook(&git, &engine, false, HOOK_REPLACE_MERGE);
+
+        assert!(pushed.hook_ran, "the post-commit hook never ran");
+        assert_remote_unchanged(&git, &pushed);
+
+        // Opposite direction: a default read shows one parent, a raw read shows the merge.
+        let merge = hook_recorded_id(&pushed, "ude-test-merge");
+        let parent_lines = |args: &[&str]| {
+            git.output(&pushed.checkout, args)
+                .lines()
+                .filter(|line| line.starts_with("parent "))
+                .count()
+        };
+        assert_eq!(parent_lines(&["cat-file", "commit", &merge]), 1);
+        assert_eq!(
+            parent_lines(&["--no-replace-objects", "cat-file", "commit", &merge]),
+            2
+        );
+
+        let err = push_failure(pushed.res);
+        assert!(err.contains("has 2 parents"), "{err}");
+        assert!(err.contains("exactly one parent"), "{err}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_push_refuses_hook_replaced_tree() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let pushed = push_with_post_commit_hook(&git, &engine, false, HOOK_REPLACE_TREE);
+
+        assert!(pushed.hook_ran, "the post-commit hook never ran");
+        assert_remote_unchanged(&git, &pushed);
+
+        // Opposite direction: a default listing omits the added file, a raw listing has it.
+        let amended = hook_recorded_id(&pushed, "ude-test-amended");
+        let listing = |prefix: &[&str]| {
+            let mut args: Vec<&str> = prefix.to_vec();
+            args.extend([
+                "diff-tree",
+                "-r",
+                "--name-only",
+                &pushed.fetched_sha,
+                &amended,
+            ]);
+            git.output(&pushed.checkout, &args)
+        };
+        let default_listing = listing(&[]);
+        assert!(
+            !default_listing.contains("templates/hook-extra.txt"),
+            "{default_listing}"
+        );
+        let raw_listing = listing(&["--no-replace-objects"]);
+        assert!(
+            raw_listing.contains("templates/hook-extra.txt"),
+            "{raw_listing}"
+        );
+
+        let err = push_failure(pushed.res);
+        assert!(
+            err.contains("unvalidated file committed in HEAD: templates/hook-extra.txt"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_pr_push_publishes_the_validated_commit_not_the_branch_tip() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let pushed = push_with_post_commit_hook(&git, &engine, true, HOOK_DETACH_TO_VALIDATED);
+
+        assert!(pushed.hook_ran, "the post-commit hook never ran");
+        assert!(pushed.res.is_ok(), "{:?}", pushed.res);
+        let sync = single_sync_branch(&git, &pushed);
+        assert_eq!(
+            remote_managed_blob(&git, &pushed, &sync),
+            HOOKED_TEMPLATE.as_bytes()
+        );
+        // Opposite direction: the branch a push by name would send holds the hook's bytes.
+        let local_blob = git.output(
+            &pushed.checkout,
+            &["show", &format!("{sync}:{}", pushed.managed_rel)],
+        );
+        assert!(local_blob.contains("INJECTED_BY_HOOK"), "{local_blob}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_direct_push_does_not_publish_hook_tag() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let pushed = push_with_post_commit_hook(&git, &engine, false, HOOK_TAG_FOLLOW);
+
+        assert!(pushed.hook_ran, "the post-commit hook never ran");
+        assert!(pushed.res.is_ok(), "{:?}", pushed.res);
+        let main = git.output(pushed.bare.path(), &["rev-parse", "refs/heads/main"]);
+        assert_ne!(main, pushed.fetched_sha, "remote main did not advance");
+        assert_eq!(
+            remote_managed_blob(&git, &pushed, "refs/heads/main"),
+            HOOKED_TEMPLATE.as_bytes()
+        );
+        assert_hook_tag_not_published(&git, &pushed, &main);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_pr_push_does_not_publish_hook_tag() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let pushed = push_with_post_commit_hook(&git, &engine, true, HOOK_TAG_FOLLOW);
+
+        assert!(pushed.hook_ran, "the post-commit hook never ran");
+        assert!(pushed.res.is_ok(), "{:?}", pushed.res);
+        let sync = single_sync_branch(&git, &pushed);
+        assert_eq!(
+            remote_managed_blob(&git, &pushed, &sync),
+            HOOKED_TEMPLATE.as_bytes()
+        );
+        let published = git.output(pushed.bare.path(), &["rev-parse", &sync]);
+        assert_hook_tag_not_published(&git, &pushed, &published);
     }
 
     #[test]
