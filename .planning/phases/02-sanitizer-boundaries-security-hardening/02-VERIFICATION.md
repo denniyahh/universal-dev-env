@@ -1,8 +1,8 @@
 ---
 phase: 02-sanitizer-boundaries-security-hardening
-verified: 2026-10-28T00:52:24Z
+verified: 2026-11-01T16:28:16Z
 status: gaps_found
-score: 32/33 must-haves verified
+score: 38/44 must-haves verified
 covered_files:
   - ".planning/phases/02-sanitizer-boundaries-security-hardening/02-01-PLAN.md"
   - ".planning/phases/02-sanitizer-boundaries-security-hardening/02-01-SUMMARY.md"
@@ -24,8 +24,13 @@ covered_files:
   - ".planning/phases/02-sanitizer-boundaries-security-hardening/02-09-SUMMARY.md"
   - ".planning/phases/02-sanitizer-boundaries-security-hardening/02-10-PLAN.md"
   - ".planning/phases/02-sanitizer-boundaries-security-hardening/02-10-SUMMARY.md"
+  - ".planning/phases/02-sanitizer-boundaries-security-hardening/02-11-PLAN.md"
+  - ".planning/phases/02-sanitizer-boundaries-security-hardening/02-11-SUMMARY.md"
+  - ".planning/phases/02-sanitizer-boundaries-security-hardening/02-12-PLAN.md"
+  - ".planning/phases/02-sanitizer-boundaries-security-hardening/02-12-SUMMARY.md"
   - "docs/ARCHITECTURE.md"
   - "src/main.rs"
+  - "src/process.rs"
   - "src/sanitizer/entropy.rs"
   - "src/sanitizer/gitleaks.rs"
   - "src/sanitizer/mod.rs"
@@ -34,216 +39,307 @@ covered_files:
   - "src/sync/mod.rs"
   - "src/template/mod.rs"
   - "tests/e2e_lifecycle.rs"
-covered_digest: "v4:sha256:e40ef58b8e47a9e5267c4ce1f015832e8882ea96adc55404c00e46b66c19e6cb"
+covered_digest: "v4:sha256:0b4b6a102dfac5ee1cccb46156ca502113c6e85f03c3cb88b17dce6ad64ba554"
 behavior_unverified: 0
 overrides_applied: 0
 re_verification:
   previous_status: gaps_found
-  previous_score: 23/26
+  previous_score: 32/33
   gaps_closed:
-    - "02-07 prohibition (SEC-03): MUST NOT publish a boundary-delimited occurrence of the pusher's home or XDG config path in a shared template (trailing-separator HOME, review CR-01)"
-    - "ROADMAP SC4: Sanitizer round-tripping verifies that templated tokens substitute back cleanly to local machine environments on initialization (non-.jinja template with a non-path placeholder, review CR-02)"
-  gaps_remaining: []
+    - "The merge-HEAD and PR-mode stacked-commit channels of the 02-08 prohibition (review WR-102): the hook from the previous report is refused in both modes"
+  gaps_remaining:
+    - "02-08 prohibition (SEC-04): MUST NOT publish a blob whose content differs, beyond CRLF/LF line endings of UTF-8 text, from the bytes push_updates validated, whatever git clean filter or commit hook produced it. It still fails, through two other channels: a duplicate tree entry and a grafts file written after the gate by a process a hook left running"
   regressions: []
 gaps:
-  - truth: "02-08 prohibition (SEC-04): MUST NOT publish a blob whose content differs, beyond CRLF/LF line endings of UTF-8 text, from the bytes push_updates validated, whatever git clean filter or commit hook produced it"
+  - truth: "02-08 prohibition, restated in full by 02-12 (SEC-04): MUST NOT publish a blob whose content differs, beyond CRLF/LF line endings of UTF-8 text, from the bytes push_updates validated, whatever git clean filter or commit hook produced it. Also fails the 02-11 prohibition on a commit reachable from the published ref, and the 02-11 truth that every blob the push adds is allowlist-checked, secret-scanned and compared"
     status: failed
-    reason: "Previously UNCERTAIN (reproduced only at the git level); now reproduced through SyncEngine::push_to_remote in direct mode. A post-commit hook in the cache checkout that amends ude's commit and then makes HEAD a merge whose first parent is the fetched head gets its content to the remote: push_to_remote returns Ok, remote main moves, and the remote blob holds the hook's injected line. `git diff-tree -r HEAD` lists nothing for a merge, so validate_committed_tree checks no blob (no binding check, no secret scan), and check_continuity passes because HEAD~1 is the fetched head. Control: the same hook without the merge step is refused (the existing test_post_commit_hook_rewrite_is_refused case). PR mode has no continuity check, so an amend plus an extra empty commit should pass the same way there (reasoned from code, not run). This is review WR-102 (first review WR-02), still open in the disposition ledger. Trigger requires a user-configured post-commit hook (global core.hooksPath or the cache checkout's .git/hooks) that rewrites commits; such a hook already runs with the user's privileges."
+    reason: "Review CR-200, reproduced through SyncEngine::push_to_remote in direct and PR mode and through the CLI. A post-commit hook rebuilds UDE's commit, keeping its parent and message bytes, with the managed file listed twice in one tree: the validated blob first, an injected blob second. diff-tree lists both, both paths pass the allowlist, and `git show <commit>:<path>` returns the first entry both times, so the second blob is never scanned or compared. push_to_remote returns Ok, the bare remote holds the injected blob, and a fresh ensure_remote_repo and a consumer's `ude sync pull` both get the injected bytes. Controls: a benign hook and the same rebuild with one validated entry publish with no injected blob on the remote; the same rebuild with one injected entry is refused with `differs from the validated content`. So the duplicate entry is the channel. A bare remote with receive.fsckObjects=true refused this tree in a plain git push."
     artifacts:
       - path: "src/sync/mod.rs"
-        issue: "validate_committed_tree (line 2137) inspects `git diff-tree --root -r HEAD` (line 2145), which is empty for a merge commit or an empty commit, so nothing is scanned or compared with ValidatedBlobs"
-      - path: "src/sync/mod.rs"
-        issue: "check_continuity (line 2070) checks only HEAD~1 (the first parent); push_pr_branch (line 1909) has no ancestry check at all"
+        issue: "validate_committed_tree reads each listed blob by path (line 2369), which returns the first of two entries with the same name; count_empty_directories (line 2435) checks only for empty directories, so nothing refuses a repeated path"
     missing:
-      - "Bind the committed tree to the pre-commit base, not to HEAD's own parent: refuse unless HEAD has exactly one parent equal to the base (fetched head in direct mode, the branch tip in PR mode), or diff the base against HEAD (`git diff-tree -r <base> HEAD`) so every changed blob is scanned and compared"
-      - "Alternatively or additionally, run the cache-checkout commit with hooks disabled (`-c core.hooksPath=/dev/null`), which removes the whole post-commit hook class"
-      - "Regression test: post-commit hook that amends and wraps HEAD in a merge (and a PR-mode variant with an extra empty commit) is refused and the remote ref is unchanged; control: the plain amend case stays refused and a hook-free push still publishes"
+      - "Refuse a tree whose raw `ls-tree -r -t -z` listing repeats a path, including a repeated directory name (a duplicate directory holding injected bytes also passed), never printing the name"
+      - "Read each listed blob by its own object id (`diff-tree -r -z --raw`, then `cat-file blob <oid>`) so a path lookup cannot hide an entry"
+      - "Hook tests in both modes asserting the refusal and that the remote does not hold the injected blob, with a control showing a push without the check delivers it, and a clean-push control"
+  - truth: "ROADMAP SC2: Outbound commit inspection catches all Gitleaks secret categories across committed blobs and auto-rolls back commits on detection"
+    status: failed
+    reason: "Same root cause as the gap above. The second entry of a duplicate tree held a GitHub PAT-shaped value built at runtime; push_to_remote returned Ok in direct and PR mode with no rollback, the remote held the blob, and a fresh ensure_remote_repo left that value in the managed file. SC2 holds for every commit UDE builds and for every other hook shape tested; the suite's gate tests all pass. It does not hold for a committed blob behind a duplicate tree entry."
+    artifacts:
+      - path: "src/sync/mod.rs"
+        issue: "scan_bytes runs on the bytes `git show` returned by path (lines 2369-2389), so the second entry is never scanned"
+    missing:
+      - "Closed by the same change as the gap above; add a hook test with a token-shaped second entry"
+  - truth: "02-08 prohibition, restated in full by 02-12 (SEC-04), whose one accepted exception (T-02-52) names only a pre-push hook: it also covers a grafts file written after the gate by a process a post-commit hook left running"
+    status: failed
+    reason: "Review WR-203, reproduced through push_to_remote. A post-commit hook leaves a background process that waits for UDE's `git push` to start, then writes `.git/info/grafts`. 60 runs (30 direct, 30 PR): all 60 returned Ok; the remote held the injected blob in 5 (2 direct, 3 PR), with the ref on the validated commit. Controls: the same background process without the grafts write delivered it in 0 of 20; a grafts file written inside the hook was refused 3 of 3. The window between the gate's check (line 2266) and push's object walk is unprotected, and the exception's wording does not reach this case."
+    artifacts:
+      - path: "src/sync/mod.rs"
+        issue: "refuse_grafts_file runs once before the push; both push commands run without GIT_GRAFT_FILE set to the null device"
+      - path: "src/process.rs"
+        issue: "prepare_command removes GIT_GRAFT_FILE, so the push cannot set it without a carve-out"
+    missing:
+      - "Either run both pushes with GIT_GRAFT_FILE set to the null device (needs a carve-out in process::prepare_command; a plain-git check here, with a grafts file present at push time, sent the injected blob without the variable and did not send it with the variable; that check does not cover the race), with a hook test"
+      - "Or an operator decision extending the T-02-52 acceptance to any process a hook started, recorded in plan and SECURITY docs"
+  - truth: "A push that returns Ok has published the validated content (validate_committed_tree's documented contract: every changed file is identical to what `validated` recorded). Derived in this re-verification from review CR-201; distinct from the blob prohibition, because no unvalidated bytes are sent"
+    status: partial
+    reason: "Review CR-201, reproduced through push_to_remote in direct and PR mode (delete and revert, 4 of 4 Ok) and through the CLI in direct mode. Delete: `git rm --cached` plus amend; remote loses the template, CLI prints the push as done, exit 0, ancestor advances. With another managed template on the remote, the pusher's and a consumer's next `ude sync pull` both remove mise.toml; with no other managed template, every later sync fails with `not a ude template repository`. Revert: `git checkout HEAD~1 -- <file>` plus amend; remote keeps the old bytes, CLI prints the push as done, exit 0, ancestor advances, status then says Upstream Updated, and the pusher's next pull discards the pusher's own edit. Control: the same amend with content kept publishes the validated bytes."
+    artifacts:
+      - path: "src/sync/mod.rs"
+        issue: "the D entry is skipped for every allowlisted path (lines 2365-2367), including one `validated` holds a digest for; nothing checks that validated paths hold their recorded content in the commit, and a revert leaves nothing in the listing to check"
+    missing:
+      - "Refuse a deletion of a path that has a validated record (real deletions have no record), and after the loop require every validated path to hold its recorded content in the commit"
+      - "Hook tests for delete and revert in both modes, with the no-op amend as control"
+  - truth: "A hook cannot add an unbound name to the published tree. T-02-46 in plan 02-12 claims other tree names are bound because a new name always contains a blob, which the allowlist refuses. Derived in this re-verification from review WR-200"
+    status: partial
+    reason: "Review WR-200, reproduced through push_to_remote in direct and PR mode: a subtree named `.` holding the validated blob returns Ok, because PathBuf equality ignores the `.` component. `git clone` of the remote and a fresh ensure_remote_repo then fail with exit 128, `invalid path`, so one hook breaks later clones of the shared repository. No unvalidated bytes: the same subtree holding the injected blob is refused, and a subtree named `sub` is refused as unvalidated."
+    artifacts:
+      - path: "src/sync/mod.rs"
+        issue: "`paths.contains(&p)` (line 2358) compares PathBuf values built at line 2456, which treat `a/./b` as `a/b`"
+    missing:
+      - "Compare listed paths as raw bytes, or refuse any path component that is empty, `.` or `..`, in the same listing pass as the duplicate check; add a hook test"
 ---
 
 # Phase 2: Sanitizer, Boundaries & Security Hardening Verification Report
 
 **Phase Goal:** Screen and redact all confidential tokens, raw credentials, and user-specific paths before any remote git staging or push.
-**Verified:** 2026-10-28T00:52:24Z
+**Verified:** 2026-11-01T16:28:16Z
 **Status:** gaps_found
-**Re-verification:** Yes, after gap closure (plans 02-09, 02-10)
+**Re-verification:** Yes, after gap closure (plans 02-11, 02-12)
 
 ## Bottom line
 
-Both prior gaps are closed and hold up under probes the plans' own tests do not cover, each with a
-negative control on the pre-fix binary (49591e4) that shows the probe detects the old failure.
+The prohibition plan 02-12 records as `status: resolved` does not hold. A post-commit hook can still
+publish bytes nothing validated, and a token shape nothing scanned, and `push_to_remote` returns Ok in
+direct and PR mode. Through the real CLI a consumer's `ude sync pull` then writes the injected bytes
+into a project.
 
-One must-have that the previous report left UNCERTAIN is now FAILED on reproduced evidence: the
-post-commit binding gate passes when a commit hook turns HEAD into a merge, and the hook's content
-is pushed without being scanned. The code is unchanged since the first review (WR-102). It only fires
-with a user-configured post-commit hook that rewrites commits, so it is a real hole in a stated
-prohibition but an unusual trigger. Operator choice: fix it (small), or accept it with an override.
+Every test the plans wrote passes, and they are not wrong: they cover the channels they name, and
+this report re-ran their controls and mutation run, which also pass. The holes are in channels no test
+exercises. A clean 49 of 49 mutation score sits next to a reproduced bypass, so it says nothing about
+those channels.
+
+What the plans did close: the merge-HEAD and stacked-commit hook from the previous report, replace
+refs, tag following, hook-written commit text, forged commit-graphs and bitmaps, and a grafts file
+present when the gate runs.
+
+All of this needs a hook in the cache checkout or a global `core.hooksPath`, which runs with the
+user's privileges. The operator accepted one such case on that reasoning (T-02-52), and did not accept
+these.
 
 ## Goal Achievement
+
+### Focus items
+
+| Item | Reproduced? | Outcome for the prohibition | What was observed |
+|------|-------------|-----------------------------|-------------------|
+| Review CR-200, duplicate tree entry | Yes, direct and PR, engine and CLI | **FAILED** | Ok; remote `ls-tree -r` lists both blobs under one path; injected blob on remote; `git show` returns the validated bytes; fresh `ensure_remote_repo` file = `INJECTED_BY_HOOK`; consumer pull writes it to `mise.toml` |
+| Review CR-201, delete or revert | Yes, 4 of 4 through the engine, plus CLI | Blob prohibition's letter holds: no unvalidated bytes are sent. Separate gap, partial | Ok and a success message while the validated file is absent or old; ancestor advances; later pull removes the file or discards the pusher's edit |
+| Review WR-200, entry named `.` | Yes, direct and PR | Blob prohibition's letter holds: bytes are the validated ones. Separate gap, partial | Ok; `git clone` exit 128 `invalid path`; variant with injected blob and control named `sub` both refused |
+| Review WR-203, grafts after the gate | Yes, 5 of 60 | **FAILED**: the exception names only a pre-push hook | All 60 Ok; injected blob on the remote in 2 of 30 direct and 3 of 30 PR; background process with no grafts write: 0 of 20; synchronous grafts: refused 3 of 3 |
 
 ### Roadmap Success Criteria
 
 | # | Truth | Status | Evidence |
 |---|-------|--------|----------|
-| SC1 | High-entropy strings and raw Base64 tokens without prefixes are flagged before staging | VERIFIED | Regression: full `cargo test` exit 0; R11 seeded-rate, corpus and push tests pass. Previous CLI probe (random Base64 token refused, lowercase control pushes) not re-run; code under src/sanitizer/entropy.rs unchanged since then (`git diff 49591e4 HEAD` touches only sanitizer/mod.rs, sync, template, e2e). |
-| SC2 | Outbound commit inspection catches gitleaks categories across committed blobs and rolls back | VERIFIED | Regression: `test_push_refuses_gitleaks_categories_without_printing_value`, `test_post_commit_gate_blocks_gitleaks_only_category`, `test_post_commit_hook_rewrite_is_refused` pass. Holds for the commit ude makes and for an amending hook. A hook-built merge HEAD escapes inspection: tracked as the gap below, not double-counted here. |
-| SC3 | Path parameterization matches only full word / punctuation boundaries | VERIFIED | `test_path_boundary_table` now runs every row over three root spellings; both properties pass. CLI: `d = <fake>2/y` left byte-identical in every probe. |
-| SC4 | Templated tokens substitute back cleanly on initialization | VERIFIED (was FAILED) | CLI probe D: `email = {{ git_email }}` in `gitconfig.repo`, local edit, `sync status` says "push skips it: its template has logic", push exit 1 with the skip line, template bytes unchanged, a consumer init with `consumer@example.com` gets its own email. Pre-fix binary: push exit 0, template rewritten with `tester@example.com`, consumer gets the pusher's email. Variants not in the plan's tests: `{{git_email}}` with no spaces, and `{{ user.home }}` mixed with `{% if %}`: both skipped, template unchanged (pre-fix: both overwritten). Control G: placeholder-only template still publishes, placeholder kept, no raw home. |
+| SC1 | High-entropy strings and raw Base64 tokens without prefixes flagged before staging | VERIFIED | Regression: full `cargo test` exit 0. No file under src/sanitizer has changed since the review base ed8dc0d (`git diff --stat ed8dc0d HEAD -- src tests docs` lists only src/sync/mod.rs). The previous independent CLI probe was not re-run |
+| SC2 | Outbound commit inspection catches gitleaks categories across committed blobs and rolls back | **FAILED** (was VERIFIED with a caveat) | A PAT-shaped second entry of a duplicate tree: Ok in both modes, no rollback, value on the remote. Holds for commits UDE builds and every other hook shape tested. See gap 2 |
+| SC3 | Path parameterization matches only full word and punctuation boundaries | VERIFIED | Regression: full suite; `src/sanitizer/mod.rs` unchanged since ed8dc0d |
+| SC4 | Templated tokens substitute back cleanly on initialization | VERIFIED | Regression: full suite; template code unchanged since ed8dc0d; CLI control with no hook: push, then a consumer's pull gets the pusher's edit |
 
 ### Plan must-have groups
 
 | Plan | Truths (summary) | Status | Evidence |
 |------|------------------|--------|----------|
-| 02-01 | single `scan_bytes`; raw + NUL-stripped views; non-UTF-8/UTF-16 at staging and both gates | VERIFIED | regression: named tests pass in the full run |
-| 02-02 | shared `should_render`; init renders `{{` templates, byte-copies the rest | VERIFIED | regression: e2e byte-identical controls and kept-ancestor tests pass |
-| 02-03 | R11 tokenizer/entropy, D-02 exemptions, seeded rates, corpus control | VERIFIED | regression: `sanitizer::entropy::tests` pass |
-| 02-04 | `ude:allow-entropy` per line, entropy only | VERIFIED | regression: four marker tests pass |
-| 02-05 | vendored pinned rules, load failure is an error | VERIFIED | regression: loader and error tests pass; `cargo deny check advisories bans sources` ok |
-| 02-06 | per-category CLI refusal, `--force`, parity | VERIFIED | regression: e2e category tests pass |
-| 02-07 | boundary predicates, degenerate-home guard, properties, doc placeholders | VERIFIED | regression; table extended in 02-09 |
-| 02-08 | render-back gate 5, no engine detail, validated-blob binding | VERIFIED (truths) | gate-5 and binding tests pass; the binding prohibition fails on a hook-built merge HEAD (gap) |
-| 02-09 | `normalize_root`; push, `parameterize_paths` and `detect_for_project` normalize both roots; separator-only roots stay rejected; mutation check | VERIFIED | Code: `normalize_root` at src/sanitizer/mod.rs:159 (trims `is_separator`, returns input when empty), shadowed at the top of push_updates (src/sync/mod.rs:1421-1422) before scan, gate 3 and the gate 5 context, inside parameterize_paths (:284-285), in detect_for_project (src/template/mod.rs:53, :59). CLI probe A (HOME=`<fake>/`, XDG=`<fake>/.config/`): exit 0, 0 raw home occurrences, `({{ user.home }})`, `{{ user.home }}/x`, `{{ user.xdg_config }}/app`, status In Sync, template byte-identical to the plain-HOME push (C). Probe B (HOME=`<fake>//`, XDG unset, so `directories` derives `<fake>//.config`; not in the plan's tests): exit 0, 0 raw occurrences. Pre-fix binary: A and B each publish 3 raw home occurrences with exit 0. Mutation re-run: 8 mutants, 8 caught, 0 missed. |
-| 02-10 | gate 2 decides with `should_render`; non-UTF-8 unchanged; edit skipped, deletion refused, controls publish; mutation check; phase gates | VERIFIED | Code: `template_has_logic` (src/sync/mod.rs:2459) uses `template::should_render` for UTF-8, `.jinja` for non-UTF-8, removes the two placeholders, then looks for `{{`/`{%`/`{#`; called by gate 2 for LocallyModified and LocalDeleted (:1494-1511, Err -> IoFailed). CLI probe F: local deletion over a `{{ git_email }}` template: push exit 1, template still exists (pre-fix: template deleted, exit 0). Mutation re-run: 7 mutants, 7 caught, 0 missed. Gates re-run: fmt, clippy `-D warnings`, `cargo machete`, `cargo deny` all exit 0; decoy-GIT_DIR `cargo test --bin ude sync::` 138 passed, decoy repo has 0 refs and 0 objects afterwards. |
+| 02-01..02-10 | As in the previous report | VERIFIED | Regression: the full suite passes and their code outside src/sync/mod.rs is unchanged since ed8dc0d |
+| 02-11 | Bound to the fetched head in both modes; raw reads; validated id pushed; no tags; continuity helper gone | **FAILED** on one clause | Code read at src/sync/mod.rs:2276-2300, 2328-2338, 1995, 2109, and named tests pass. The clause "every blob the push adds to the remote is allowlist-checked, secret-scanned and compared" is false under a duplicate entry |
+| 02-12 | Message bound; header scanned; empty directories refused; raw reads; grafts refused at the gate; graphs and bitmaps disabled; GIT_TEST_* removed; gc'd remote publishes; controls and mutation | VERIFIED as written | Code read at src/sync/mod.rs:2266, 2302-2326, 2412-2444, 1997-2007, 2111-2122; named tests pass. Controls re-run here: all 8 removals failed exactly the expected tests, the 2 unmodified rows failed none, sha256 restored. Mutation re-run here: 49 caught, 0 missed, 0 timeouts, exit 0. WR-200 and WR-203 sit in what the truths' wording leaves open; they are carried by gaps 3 and 5 |
 
-### Prohibitions (all 19 test-tier)
+### Prohibitions
 
 | Plan | Prohibition | Status | Evidence |
 |------|-------------|--------|----------|
-| 02-01 | No lossy decode / skipped non-UTF-8 before the scan | VERIFIED | regression tests pass |
-| 02-01 | No matched value printed | VERIFIED | regression; probe D: pusher email count in push output = 0 |
-| 02-02 | Init never changes bytes of a no-`{{` or non-UTF-8 template | VERIFIED | regression |
-| 02-03 | Refusal names rule, file, line | VERIFIED | regression |
-| 02-04 | Marker never silences named or gitleaks rules | VERIFIED | regression |
-| 02-05 | Unloadable rule set never treated as clean | VERIFIED | regression |
-| 02-06 | No inline suppression except `ude:allow-entropy` | VERIFIED | regression |
-| 02-06 | `--force` never skips the scan | VERIFIED | regression |
-| 02-07 | Never publish a boundary-delimited home/XDG path | VERIFIED (was FAILED) | probes A/B: 0 raw occurrences; pre-fix: 3 |
-| 02-07 | Never rewrite a path that is not the pusher's own | VERIFIED | `<fake>2/y` untouched in A, B, C |
-| 02-08 | Never publish a template that does not render back | VERIFIED | regression gate-5 tests |
-| 02-08 | Never publish a blob differing from the validated bytes, whatever hook produced it | **FAILED** (was UNCERTAIN) | Reproduced through `push_to_remote`; see gap and spot-checks |
-| 02-08 | Never print engine detail or content in a reversibility refusal | VERIFIED | regression |
-| 02-09 | Never publish a home/XDG path whatever trailing separators the roots carry | VERIFIED | probes A, B; test_push_parameterizes_home_with_trailing_separator, e2e test_cli_push_parameterizes_trailing_separator_home |
-| 02-09 | Never rewrite text when a root is only separators | VERIFIED | test_normalize_root rows `/`, `//`, `///`; test_push_does_not_parameterize_root_home; mutants of normalize_root caught |
-| 02-09 | Never render placeholders with a different root spelling than push uses | VERIFIED | probe A status In Sync after push; e2e test_trailing_separator_home_renders_and_reads_in_sync |
-| 02-10 | Never publish rendered text over a template with non-path logic | VERIFIED | probes D, E, E2 |
-| 02-10 | Never delete such a template, nor a non-UTF-8 `.jinja` template with logic | VERIFIED | probe F; test_push_never_deletes_non_utf8_jinja_template_with_logic with its negative control |
-| 02-10 | Never skip an edit over a non-rendered or placeholder-only template | VERIFIED | probe G; commit-msg hook and `{% if %}`-without-`{{` rows in test_template_has_logic |
+| 02-01..02-10, except the row below (18) | As in the previous report | VERIFIED | Regression: full suite |
+| 02-08, restated by 02-12 | Never publish a blob differing from the validated bytes, whatever hook produced it, except T-02-52 | **FAILED** (carried forward) | CR-200 and WR-203 |
+| 02-11 | Never publish a commit reachable from the published ref carrying a differing blob | **FAILED** | CR-200: the commit is the published ref's tip |
+| 02-11 | Never push a commit other than the validated one | VERIFIED | test_pr_push_publishes_the_validated_commit_not_the_branch_tip; refspecs at :1995, :2109 |
+| 02-11 | Never read committed objects through replacement refs | VERIFIED | Three replace-ref tests; per-read control for `cat-file` re-run here |
+| 02-11 | No ref beyond the refspec's branch update | VERIFIED | test_direct_push_does_not_publish_hook_tag and PR twin; `--no-follow-tags` at both pushes |
+| 02-11 | Never refuse only because a hook ran | VERIFIED | Benign hook controls in both modes, repeated in these probes |
+| 02-12 | Never publish hook-written commit text: message bound, header scanned, no empty directory | VERIFIED as written | Named tests pass; per-read control for `ls-tree` re-run here. The statement does not cover a non-empty directory named `.`, see gap 5 |
+| 02-12 | Never refuse because a hook ran or git maintains the object store | VERIFIED | Benign prepare-commit-msg controls; test_push_from_clone_of_gc_remote_publishes |
 
-**Score:** 32/33 verified (4 SC + 10 plan groups + 19 prohibitions); 1 FAILED; 0 present-but-behavior-unverified.
+All 26 are test-tier with wired tests, except that the two FAILED rows are contradicted by the probes
+below.
+
+### Derived in this re-verification
+
+| Truth | Status | Evidence |
+|-------|--------|----------|
+| A push that returns Ok has published the validated content | **FAILED** (partial) | CR-201, gap 4 |
+| A hook cannot add an unbound name to the published tree | **FAILED** (partial) | WR-200, gap 5 |
+
+**Score:** 38/44 verified (SC 3/4; plan groups 11/12; prohibitions 24/26; derived 0/2); 0 present but behavior-unverified.
+
+SC2 was graded VERIFIED with a caveat last time and is FAILED now. That is a stricter reading on new
+evidence, not a code regression: the same text covers committed blobs, and a blob now reproduces past it.
+
+### Advisory (New Scope, Unevidenced)
+
+None.
 
 ### Required Artifacts
 
 | Artifact | Status | Details |
 |----------|--------|---------|
-| 02-01..02-08 artifacts | VERIFIED | `verify.artifacts` 20/20 (2+3+2+1+3+2+3+4) |
-| `src/sanitizer/mod.rs` (02-09) | VERIFIED | `pub fn normalize_root`, used in parameterize_paths |
-| `src/sync/mod.rs` (02-09, 02-10) | VERIFIED | `test_push_parameterizes_home_with_trailing_separator`, `test_push_skips_static_template_with_logic` |
-| `src/template/mod.rs` (02-09) | VERIFIED | `normalize_root(` in detect_for_project |
-| `tests/e2e_lifecycle.rs` (02-09, 02-10) | VERIFIED | `test_cli_push_parameterizes_trailing_separator_home`, `test_push_skips_edit_over_static_template_with_logic` |
-
-`verify.artifacts`: 02-09 4/4, 02-10 2/2 (exit 0).
+| 02-01..02-10 artifacts | VERIFIED | `verify.artifacts` 26/26 (each plan exit 0) |
+| `src/sync/mod.rs` (02-11) | VERIFIED | `verify.artifacts` 3/3 |
+| `src/sync/mod.rs` (02-12) | VERIFIED | `verify.artifacts` 7/7 |
 
 ### Key Link Verification
 
-| From | To | Via | Status |
-|------|----|-----|--------|
-| src/sync/mod.rs | src/sanitizer/mod.rs | push_updates shadows both roots with `normalize_root(` | WIRED (tool + code read :1421-1422) |
-| src/template/mod.rs | src/sanitizer/mod.rs | detect_for_project normalizes both roots | WIRED (:53, :59) |
-| src/main.rs | src/sync/mod.rs | Sync command passes BaseDirs roots to `push_updates(` | WIRED (main.rs:724-731, :1151) |
-| src/sync/mod.rs | src/template/mod.rs | `template::should_render(` in template_has_logic | WIRED |
-| src/main.rs | src/sync/mod.rs | `template_has_logic(` in locally_modified_hint and logic_template | WIRED (main.rs:1404, :1426); CLI status line in probe D confirms |
+`verify.key-links` exits 1 with 0/4 and 0/5 for plans 02-11 and 02-12, with the detail "Source file not
+found". That is the tool rejecting the plans' `from:` wording (a path plus a symbol), not missing wiring,
+so each link's pattern was checked by hand over the non-test, non-comment code.
 
-`verify.key-links`: 02-09 3/3, 02-10 2/2 (exit 0). Pattern presence does not prove call order; order
-is shown by the CLI probes (status hint before push, skip at push).
+| From | To | Status | Details |
+|------|----|--------|---------|
+| validate_committed_tree | raw_commit_parents, raw_commit_parts | WIRED | Definition and call each, :2287, :2302 |
+| push_to_remote | push_pr_branch, push_direct with fetched_sha | WIRED | Call at :1743-1749 spans lines, so the plan's one-line pattern matches nothing; read directly |
+| push_direct, push_pr_branch | push of the validated id, no tags | WIRED | Refspecs at :1995, :2109; `"--no-follow-tags"` 2 lines |
+| validate_committed_tree | count_empty_directories | WIRED | :2435 |
+| validate_committed_tree | refuse_grafts_file | WIRED | :2266 |
+| both pushes | `-c core.commitGraph=false`, `-c pack.useBitmaps=false` | WIRED | 2 lines each |
+| both pushes | remove_git_test_env | WIRED | 2 calls, :2007, :2122 |
+
+Presence does not prove behaviour here; the per-option controls do.
 
 ### Behavioral Spot-Checks
 
-Independent CLI probe script, run against `target/debug/ude` (built by the full test run at HEAD) and
-against a pre-fix binary built from `git archive 49591e4` in a scratch directory. Synthetic home under
-a scratch root; host config isolated (HOME, XDG_*, GIT_CONFIG_GLOBAL, GIT_CONFIG_NOSYSTEM, ceiling).
+Scratch copy of HEAD (403b86b) with temporary tests added inside `mod tests`, driving the real
+`push_to_remote` on local bare remotes. Every case asserts the hook's marker exists.
 
-| Behavior | HEAD | Pre-fix (negative control) | Status |
-|----------|------|----------------------------|--------|
-| A: HOME and XDG end in `/` | exit 0, 0 raw, placeholders, In Sync | exit 0, 3 raw | PASS |
-| B: HOME ends in `//`, XDG unset | exit 0, 0 raw | exit 0, 3 raw | PASS |
-| C: plain HOME, byte-compare with A | identical | differ | PASS |
-| D: `{{ git_email }}` edit, push, consumer init | skip, exit 1, unchanged, consumer email | exit 0, overwritten, pusher email | PASS |
-| E/E2: `{{git_email}}`; `{{ user.home }}` + `{% if %}` | skipped, unchanged | overwritten | PASS |
-| F: local deletion over logic template | template kept | template deleted | PASS |
-| G: placeholder-only template (control) | publishes, placeholder kept | same | PASS |
-| Merge-HEAD post-commit hook via `push_to_remote` (scratch copy of HEAD with an added probe test) | Ok, remote moved, remote blob holds `INJECTED_BY_HOOK` | control (amend only): refused, remote unchanged | FAIL (gap) |
+| Case | Mode | push_to_remote | Remote holds injected blob | Fresh ensure_remote_repo reads | `git clone` |
+|------|------|----------------|----------------------------|--------------------------------|-------------|
+| Benign hook (control) | direct, PR | Ok | n/a | validated bytes | exit 0 |
+| Rebuild, one validated entry (control) | direct, PR | Ok | no | validated bytes | exit 0 |
+| Rebuild, one injected entry (control) | direct, PR | Refused, `differs from the validated content` | no | n/a | n/a |
+| Duplicate entry | direct, PR | **Ok** | **yes** | **`INJECTED_BY_HOOK`** | exit 0 |
+| Duplicate entry, PAT shape built at runtime | direct, PR | **Ok** | **yes** | **the token shape** | exit 0 |
+| Duplicate directory (not in the review) | direct | **Ok** | **yes** | **`INJECTED_BY_HOOK`** | exit 0 |
+| Amend, content kept (control) | direct, PR | Ok | n/a | validated bytes | exit 0 |
+| Delete | direct, PR | **Ok** | n/a | error, `not a ude template repository` | exit 0 |
+| Revert | direct, PR | **Ok** | n/a | old bytes | exit 0 |
+| `.` subtree, validated blob | direct, PR | **Ok** | no | error, `invalid path` | **exit 128** |
+| `.` subtree, injected blob (variant) | direct | Refused, `differs from the validated content` | no | n/a | n/a |
+| `sub` subtree, validated blob (control) | direct | Refused, `unvalidated file committed` | no | n/a | n/a |
 
-Probe hook for the gap (post-commit, runs once): append a line to the managed file, `git add`,
-`git commit --amend --no-edit --no-verify -q`, then
-`M=$(git commit-tree "$(git rev-parse 'HEAD^{tree}')" -p "$(git rev-parse HEAD~1)" -p "$(git rev-parse HEAD)" -m merge); git update-ref HEAD "$M"`.
-Then `engine.push_to_remote(checkout, "main", false, ...)` on a `seeded_bare_remote`, as in
-`test_post_commit_hook_rewrite_is_refused`.
+Duplicate-entry commit, plain `git push` to a new bare remote: exit 1 with `duplicateEntries` under
+`receive.fsckObjects=true`; exit 0 without it. `git fsck` on the remote that accepted it: exit 1,
+`duplicateEntries`. On the `.` remote: exit 0 with a `hasDot` warning.
 
-Full suite run once: `cargo test` exit 0, 218 unit passed (1 ignored), 88 e2e passed. Repo working
-tree clean and `git config --local --list` unchanged after every run.
+Real CLI, direct mode, hook reached through `core.hooksPath` in the fake user's global git config:
+
+| Case | `ude sync push` | Remote | Pusher's next status and pull | Consumer's pull |
+|------|-----------------|--------|-------------------------------|-----------------|
+| No hook (control) | exit 0, ancestor advances | edit | In Sync; nothing to pull | gets the edit |
+| Benign hook (control) | exit 0, ancestor advances | edit | In Sync; nothing to pull | gets the edit |
+| Duplicate entry | exit 0, ancestor advances | **both blobs** | Upstream Updated; **pull replaces the edit with `INJECTED_BY_HOOK`** | **`INJECTED_BY_HOOK`** |
+| Delete, no other managed template | exit 0, ancestor advances | **template gone** | status and pull exit 2 `not a ude template repository` | same error |
+| Delete, another managed template kept | exit 0, ancestor advances | **template gone** | Deleted upstream; **pull removes mise.toml** | **pull removes mise.toml** |
+| Revert | exit 0, ancestor advances | **old bytes** | Upstream Updated; **pull discards the pusher's edit** | no update |
+
+Grafts race, post-commit hook with a background process that polls for the push and then writes the
+grafts file: see the focus table. `GIT_GRAFT_FILE=/dev/null` on a plain push with a grafts file present:
+injected blob absent; same push without the variable: present.
+
+Gates, one run each in a scratch copy of HEAD with a fresh target directory:
+
+| Gate | Result |
+|------|--------|
+| `cargo fmt --check` | exit 0 |
+| `cargo clippy --workspace --all-targets -- -D warnings` | exit 0 |
+| `cargo test` | exit 0; 263 unit passed, 1 ignored; 88 e2e passed |
+| `cargo deny check advisories bans sources` | exit 0 |
+| `cargo machete` | exit 0 |
+| Decoy GIT_DIR, `cargo test --bin ude sync::` | exit 0, 183 passed; decoy has 0 objects and 0 refs |
+| Per-option and per-read controls | all 8 removals exact; 2 unmodified rows failing none |
+| Scoped mutation run | 49 caught, 0 missed, 0 timeouts, exit 0, plan's test list plus test_refuse_grafts_file_outcomes, as the SUMMARY recorded |
 
 ### Probe Execution
 
-No `scripts/*/tests/probe-*.sh` declared or present for this phase. Step 7c: not applicable.
+No `scripts/*/tests/probe-*.sh` exists or is declared for plans 02-11 and 02-12. Step 7c: not applicable.
 
 ### Requirements Coverage
 
 | Requirement | Source Plans | Status | Evidence |
 |-------------|--------------|--------|----------|
-| SEC-01 entropy / raw Base64 | 02-03, 02-04, 02-06 | SATISFIED | SC1 |
-| SEC-02 gitleaks categories before staging | 02-01, 02-05, 02-06 | SATISFIED | SC2 (staging gate scans every published blob; the hook-merge hole is after staging) |
-| SEC-03 strict boundaries | 02-07, 02-09 | SATISFIED | SC3, probes A-C |
-| SEC-04 placeholder reversibility | 02-02, 02-07, 02-08, 02-09, 02-10 | PARTIAL | SC4 satisfied; 02-08's binding prohibition (filed under SEC-04) fails, see gap |
+| SEC-01 entropy and raw Base64 | 02-03, 02-04, 02-06 | SATISFIED | SC1 |
+| SEC-02 gitleaks categories before staging | 02-01, 02-05, 02-06 | SATISFIED as worded | The staging gate scans every file; the hole in SC2 is after staging |
+| SEC-03 strict boundaries | 02-07, 02-09 | SATISFIED | SC3 |
+| SEC-04 placeholder reversibility | 02-02, 02-07, 02-08, 02-09, 02-10, 02-11, 02-12 | PARTIAL | SC4 satisfied; the binding prohibition filed under SEC-04 fails |
 
-All four IDs are claimed by plans; none orphaned. REQUIREMENTS.md currently shows all four as "Gaps Found".
+All four IDs are claimed by plans and all exist in REQUIREMENTS.md; none is orphaned. REQUIREMENTS.md and
+02-SECURITY.md no longer match this report: REQUIREMENTS.md marks SEC-04 Complete and SEC-01..03 Gaps
+Found, and 02-SECURITY.md says `threats_open: 0`, `status: verified`, with T-02-38 and T-02-42 closed.
+Neither was edited here.
 
 ### Anti-Patterns Found
 
-No `TBD`/`FIXME`/`XXX`/`TODO`/`HACK`/`todo!`/`unimplemented!` in the five touched source files, and
-none in added lines of `git diff 49591e4 HEAD` (negative control: a planted `FIXME` line counts 1).
+No `TBD`, `FIXME`, `XXX`, `TODO`, `HACK`, `todo!` or `unimplemented!` in src/sync/mod.rs or src/process.rs
+(negative control: a planted `FIXME` line counts 1).
 
-### Review findings, judged against the goal
+The other findings in 02-REVIEW.md were not reproduced here and are not goal gaps:
 
 | Item | Verdict |
 |------|---------|
-| CR-01, CR-02 (first review) | Closed, reproduced closed at the CLI with pre-fix controls |
-| WR-102 merge HEAD / PR mode binding | Gap (reproduced through push_to_remote in direct mode) |
-| WR-101 raw home left after parameterization (`-I<home>`, alias spellings, non-UTF-8) | Not a gap: accepted risk T-02-21 / T-02-33. Note: alias spelling covers `/home/<user>` while HOME is `/var/home/<user>`, the layout of this Fedora Atomic host |
-| WR-01 (re-review) `sync resolve` promises a publish gate 2 refuses | Not a goal gap: a wrong message, nothing is published or leaked |
-| WR-02 (re-review) placeholder-only unit test passes on a lossy publish | Not a goal gap: the e2e test and probe G show the placeholder survives in the real CLI path, where scan and push roots agree |
-| IN-01 (re-review) `xdg_data` and derived `config_dir` inner `//` | Cosmetic; probe B shows no raw home is published in that case |
-| IN-02, IN-03, IN-101..103, IN-04, IN-05 | Info, not goal gaps |
+| WR-201 rollback leaves the cache wrong after a refusal | Warning. The reviewer's run shows nothing published and the next ensure restoring it |
+| WR-202 grafts path check with older git | Warning. Shim only in the review; no old git was run |
+| WR-204 the inherited-variable tests use the engine's extra environment | Warning. Test strength only; 02-SECURITY records the setup |
+| IN-200 hook-written `push.pushOption` | Info. Not stored in the repository |
+| IN-201..IN-205 | Info. Not goal gaps |
 
 ### Human Verification Required
 
-None. The remaining item is a decision, not a check: see Gaps Summary.
+None. What is left is a fix or an operator decision, not a check a person must perform.
 
 ### Gaps Summary
 
-One gap, one root cause: the post-commit gate binds HEAD to its own first parent instead of to the
-pre-commit base, so a hook that wraps the commit in a merge (direct mode) or adds a commit on top
-(PR mode, reasoned) publishes unvalidated, unscanned content. The prohibition text says "whatever git
-clean filter or commit hook produced it", so the letter is violated. No later phase (3, 4) names it.
+Five gaps, three causes.
 
-If the operator judges a commit-rewriting hook out of scope (it is user-authored code that could push
-on its own), accept it instead with:
+1. **The gate reads blobs by path (gaps 1, 2).** A duplicate tree entry shows it the validated blob while
+   the push sends both. This is the serious one: unvalidated and unscanned bytes reach consumers.
+2. **The gate checks only what changed, one way (gaps 4, 5).** Nothing requires validated content to be in
+   the commit, and PathBuf equality accepts `.`. No unvalidated bytes, but a false success, lost edits,
+   and a shared repository that cannot be cloned. Same listing pass as cause 1.
+3. **The grafts refusal runs once, before the push (gap 3).** A process a hook left running can write
+   the file after it. The prohibition's exception does not cover this.
 
-```yaml
-overrides:
-  - must_have: "MUST NOT publish a blob whose content differs, beyond CRLF/LF line endings of UTF-8 text, from the bytes push_updates validated, whatever git clean filter or commit hook produced it"
-    reason: "Bypass needs a user-configured post-commit hook that builds a merge or extra commit; such a hook already runs with the user's privileges. Tracked as WR-102."
-    accepted_by: "<operator>"
-    accepted_at: "<ISO timestamp>"
-```
+None is covered by later phases (3 is doctor and CLI, 4 is templates and manifests), so nothing is deferred.
+
+Decision for the operator on gap 3 only: fix it with `GIT_GRAFT_FILE` on both pushes, or extend the T-02-52
+acceptance to any process a hook started. The fix is recommended if the carve-out in
+`process::prepare_command` stays small, since it also targets the pre-push grafts residual; that wider
+effect was not run. An override is not suggested for gaps 1 and 2: they are incomplete implementation,
+not an intentional deviation.
 
 ### What these checks do not establish
 
-- The merge-HEAD reproduction ran in direct mode only; the PR-mode variant is inferred from code (no continuity check in push_pr_branch).
-- Each CLI probe is one run of one spelling; the boundary table and properties carry the general claim.
-- Mutation runs use cargo-mutants' function-level mutants (8 and 7); they do not cover every expression inside the functions.
-- SC1/SC2 rest on the regression suite this round; the earlier independent CLI and gitleaks-binary parity probes were not repeated (their code is unchanged).
-- Windows path and separator behaviour is unverified (backlog Phase 999.1).
+- Local bare remotes only, on git 2.56.0 on Linux. **No hosted remote was tried.** A remote that runs fsck on
+  receive refused the duplicate-entry tree in a plain git push, so whether CR-200 publishes on GitHub or
+  another host is unverified; pushing a malformed tree there is an outward-facing action no run here took.
+  A rejected push should make `ude sync push` fail, not publish (reasoned from the code, not run). Whether such a host accepts the `.` entry,
+  which `git fsck` only warns about, was not run either.
+- 5 of 60 is a weak bound on the race: roughly 4% to 18% for this harness at 95%, local paths, one polling
+  hook. It shows the race happens, not its rate over a network or for another hook.
+- CLI runs were direct mode. PR mode was driven through `push_to_remote`, including checks of the remote branch,
+  not through `ude sync push --pr`.
+- The proposed fixes were not applied or tested in UDE; only the `GIT_GRAFT_FILE` plain-git check ran.
+- Gaps 1 to 5 are the channels probed, not a proven complete list. The passing regression suite covers the
+  cases it names, and the earlier CLI and gitleaks-binary parity probes behind SC1 to SC4 were not repeated.
+- Mutation runs use function-level mutants; they do not show that a channel is covered.
+- Windows is unverified (backlog Phase 999.1).
 
 ---
 
-_Verified: 2026-10-28T00:52:24Z_
+_Verified: 2026-11-01T16:28:16Z_
 _Verifier: Claude (gsd-verifier)_
