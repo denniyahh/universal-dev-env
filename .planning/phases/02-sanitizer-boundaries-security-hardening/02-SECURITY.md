@@ -79,6 +79,22 @@ Register authored at plan time across plans 02-01 to 02-10. Mitigations verified
 | T-02-35 | D | an over-broad gate 2 blocking legitimate edits: the shipped commit-msg hook (`${#FIRST_LINE}`: a `{#` with no `{{`), placeholder-only templates, non-UTF-8 non-`.jinja` templates | medium | mitigate | A UTF-8 template the render rule does not render, and a non-UTF-8 non-`.jinja` template, has no logic; the two path placeholders are removed before the marker check; logic-table false rows, test_push_publishes_over_placeholder_only_static_template, e2e test_push_publishes_edit_over_placeholder_only_static_template, test_push_refuses_unrenderable_parameterized_hook's commit-msg control (plan 02-10-PLA) | closed |
 | T-02-36 | T | template_has_logic now reads every mapped upstream template, not only `.jinja` ones | low | accept | scan_project already reads every mapped template and fails the scan on any read error other than NotFound before gate 2 runs; template_has_logic keeps returning Err (IoFailed, exit 2) instead of guessing, so the change fails closed (plan 02-10-PLA) | closed |
 | T-02-37 | T | push gate 2 for a non-UTF-8 `.jinja` template holding template logic: one project's local deletion would delete the shared logic for every project (Phase 01 D-14), which a "non-UTF-8 has no logic" rule would allow | medium | mitigate | template_has_logic keeps HEAD's answer for every non-UTF-8 template (`.jinja` with a marker left after placeholder removal on the raw bytes is logic); test_push_never_deletes_non_utf8_jinja_template_with_logic with its negative control test_push_deletes_non_utf8_jinja_template_without_logic, the non-UTF-8 logic-table rows, the mutation check. No such template ships today (every tracked template is UTF-8) (plan 02-10-PLA) | closed |
+| T-02-38 | T | a post-commit hook wraps UDE's commit in a merge, stacks a commit on it or replaces it with a parentless commit | high | mitigate | validate_committed_tree reads the raw commit (raw_commit_parents) and requires exactly one parent, the fetched head, in both push modes; test_direct_push_refuses_hook_merge_over_amended_commit, test_pr_push_refuses_hook_merge_over_amended_commit, test_pr_push_refuses_hook_parentless_commit, test_pr_push_refuses_hook_added_commit (plan 02-11-PLA) | closed |
+| T-02-39 | T | committed gate reading through `refs/replace/*` a hook created | high | mitigate | `--no-replace-objects` on each object read; test_push_refuses_hook_replaced_blob, test_push_refuses_hook_merge_replaced_by_validated_commit, test_push_refuses_hook_replaced_tree; per-read control recorded in the summaries (plan 02-11-PLA, 02-12-PLA) | closed |
+| T-02-40 | T | PR mode pushing the sync branch by name, which a hook can move after validation | high | mitigate | Both modes push `<validated id>:refs/heads/<name>`; test_pr_push_publishes_the_validated_commit_not_the_branch_tip, test_direct_push_publishes_the_validated_commit_after_head_moves (plan 02-11-PLA) | closed |
+| T-02-41 | D | a post-commit hook that legitimately adds commits or merges can no longer push (fail closed) | low | accept | Benign hooks still publish in both modes; see the Accepted Risks Log (plan 02-11-PLA) | closed |
+| T-02-42 | I | what `git push` can send beyond the validated commit | high | mitigate | Closed for the probed channels by T-02-43 and T-02-47..T-02-51; this is the probed list, not a proven complete one; T-02-52 is the accepted exception (plan 02-12-PLA) | closed |
+| T-02-43 | I | a hook-set `push.followTags` publishing an annotated tag and its unscanned message | high | mitigate | `--no-follow-tags` on both pushes; test_direct_push_does_not_publish_hook_tag, test_pr_push_does_not_publish_hook_tag (plan 02-11-PLA) | closed |
+| T-02-44 | I | commit message written by a prepare-commit-msg or post-commit hook | high | mitigate | Message must equal SYNC_COMMIT_MESSAGE plus one LF, byte for byte (raw_commit_parts); test_committed_gate_requires_exact_sync_message and the hook tests in both modes (plan 02-12-PLA) | closed |
+| T-02-45 | I | the rest of the commit header a hook can write | medium | mitigate | Header bytes go through scan_bytes; test_push_refuses_hook_secret_in_commit_header. A scan, not a bind: text the scanner does not flag still publishes (plan 02-12-PLA) | closed |
+| T-02-46 | I | an empty directory whose name `diff-tree -r` never lists | medium | mitigate | Raw `ls-tree -r -t -z --full-tree` and count_empty_directories; test_push_refuses_hook_empty_directory, test_push_refuses_hook_replaced_tree_hiding_empty_directory (plan 02-12-PLA) | closed |
+| T-02-47 | T | `.git/info/grafts` written by a commit hook making push send grafted objects | high | mitigate | refuse_grafts_file refuses while the file exists after the commit and hooks; test_direct_push_refuses_hook_grafts_file, test_pr_push_refuses_hook_grafts_file, test_refuse_grafts_file_outcomes (plan 02-12-PLA) | closed |
+| T-02-48 | T | forged commit-graph (local, split chain, alternate object directory) | high | mitigate | `-c core.commitGraph=false` on both pushes; test_direct_push_sends_no_object_from_forged_commit_graph, test_pr_push_sends_no_object_from_forged_commit_graph, test_push_sends_no_object_from_forged_split_commit_graph, test_push_sends_no_object_from_forged_alternate_commit_graph (plan 02-12-PLA) | closed |
+| T-02-49 | T | pack or multi-pack-index bitmap built while a graft existed | high | mitigate | `-c pack.useBitmaps=false` on both pushes; test_direct_push_sends_no_object_from_graft_built_bitmap, test_pr_push_sends_no_object_from_graft_built_bitmap, test_push_sends_no_object_from_graft_built_multi_pack_index_bitmap (plan 02-12-PLA) | closed |
+| T-02-50 | D | refusing on the presence of files git itself writes would refuse legitimate caches | medium | mitigate | Disable on push instead (operator decision 2026-10-28); test_push_from_clone_of_gc_remote_publishes (plan 02-12-PLA) | closed |
+| T-02-51 | T | inherited GIT_TEST_* variables re-enabling commit-graphs | medium | mitigate | remove_git_test_env on both pushes; test_remove_git_test_env, test_direct_push_ignores_inherited_git_test_commit_graph, test_pr_push_ignores_inherited_git_test_commit_graph. These tests set the variable through the engine's extra environment, not the real process environment (plan 02-12-PLA) | closed |
+| T-02-52 | I | a pre-push hook writing a grafts file during `git push`, after the gate | low | accept | Not mitigated and not tested; operator-accepted residual, see the Accepted Risks Log (plan 02-12-PLA) | closed |
+| T-02-53 | D | a user hook that rewrites every commit message makes every push refuse | medium | accept | Fail closed kept; the refusal names the likely hook; see the Accepted Risks Log (plan 02-12-PLA) | closed |
 | T-02-SC | T | dependency installs | high | mitigate | No package is installed or changed: `regex` 1.13.1 is already in Cargo.lock; `git diff --exit-code -- Cargo.toml Cargo.lock` gates Task 2; `cargo deny check` stays green (plan 02-01-PLA, 02-02-PLA, 02-03-PLA, 02-04-PLA, 02-05-PLA, 02-06-PLA, 02-07-PLA, 02-08-PLA, 02-09-PLA, 02-10-PLA) | closed |
 
 *Status: open · closed · open — below high threshold (non-blocking)*
@@ -99,6 +115,9 @@ Register authored at plan time across plans 02-01 to 02-10. Mitigations verified
 | AR-02-06 | T-02-29 | Review concern 13, host decision: keep 15 behavioural rows; test_report_rules_without_positive_fixture prints the uncovered count and the SUMMARY records it as residual risk. The loader test (222 rules, 0 errors) and the semantics tests in plan 02-05 cover the shared matcher, not each rule's regex; a vendored rule whose regex never matches real tokens would not be noticed | plan 02-06-PLA threat model (operator-reviewed plan) | 2026-10-27 |
 | AR-02-07 | T-02-33 | Not part of verification gap 1 (trailing separators only). Alias spellings are already accepted as T-02-21; Windows runtime is unverified for the whole phase (backlog Phase 999.1); a raw home left after parameterization (review WR-01) and the silent skip of a root like HOME=`/` (review IN-01) are not in the verification gaps | plan 02-09-PLA threat model (operator-reviewed plan) | 2026-10-27 |
 | AR-02-08 | T-02-36 | scan_project already reads every mapped template and fails the scan on any read error other than NotFound before gate 2 runs; template_has_logic keeps returning Err (IoFailed, exit 2) instead of guessing, so the change fails closed | plan 02-10-PLA threat model (operator-reviewed plan) | 2026-10-27 |
+| AR-02-09 | T-02-41 | The cache checkout is UDE-managed and such a hook rewrites what UDE validated; hooks that leave UDE's commit as it is still publish (benign controls in both modes) | plan 02-11-PLA threat model | 2026-10-28 |
+| AR-02-10 | T-02-52 | A hostile pre-push hook can already push anything to the same remote with the user's credentials, so this gives it no new capability; `push --no-verify` would disable every user's pre-push hooks. Reproduced on git 2.56.0 at plan time. The 02-08 prohibition carries this as its explicit exception | operator | 2026-10-28 |
+| AR-02-11 | T-02-53 | Cost of the operator's decision to bind the message: a hook that rewrites messages makes every push refuse, with a refusal that names the likely hook. commit-msg hooks are skipped by `--no-verify` and are not affected | orchestrator, within the operator's decision | 2026-10-28 |
 
 *Accepted risks do not resurface in future audit runs.*
 
@@ -109,6 +128,7 @@ Register authored at plan time across plans 02-01 to 02-10. Mitigations verified
 | Audit Date | Threats Total | Closed | Open | Run By |
 |------------|---------------|--------|------|--------|
 | 2026-10-27 | 38 | 38 | 0 | /gsd-secure-phase 02 orchestrator (ASVS L1 short-circuit, grep depth; no auditor spawned) |
+| 2026-11-01 | 54 | 54 | 0 | /gsd-secure-phase 02 orchestrator (ASVS L1 short-circuit, grep depth; no auditor spawned; 16 threats added from plans 02-11 and 02-12) |
 
 ---
 
@@ -119,5 +139,12 @@ Register authored at plan time across plans 02-01 to 02-10. Mitigations verified
 - [x] `threats_open: 0` confirmed
 - [x] `status: verified` set in frontmatter
 
-**Approval:** verified 2026-10-27 (ASVS L1 grep depth; does not establish that each mitigation is correct, only that its named tests and mechanisms exist and the suite passes)
+**Approval:** re-verified 2026-11-01 after plans 02-11 and 02-12 (ASVS L1 grep depth; does not establish that each mitigation is correct, only that its named tests and mechanisms exist and the suite passes)
 
+## Security Audit 2026-11-01
+
+| Metric | Count |
+|---|---|
+| Threats found | 54 |
+| Closed | 54 |
+| Open | 0 |
