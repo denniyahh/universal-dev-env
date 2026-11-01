@@ -1981,8 +1981,12 @@ impl SyncEngine {
             return Err(err);
         }
 
+        // The validated id, never the branch name: a hook can leave the branch on another
+        // commit. `push.followTags` in the cache repository config (a hook can write it)
+        // would also publish annotated tags pointing into the pushed history.
+        let refspec = format!("{commit}:refs/heads/{sync_branch}");
         let mut push = self.git(Some(remote_checkout));
-        push.args(["push", "-u", "origin", &sync_branch]);
+        push.args(["push", "--no-follow-tags", "origin", &refspec]);
         let push_out = self
             .run_network(push, "git push")
             .map_err(|e| format!("Failed to push sync branch: {e}"))?;
@@ -2025,10 +2029,11 @@ impl SyncEngine {
 
     /// Direct mode: commits in the cache checkout and pushes the commit to `branch`.
     ///
-    /// The commit must build on `fetched_sha` (branch continuity). The push is a plain
-    /// fast-forward push, never forced: when upstream moved after the fetch, the remote's
-    /// fast-forward check rejects it, the cache commit is rolled back and the result is
-    /// [`PushRemoteError::UpstreamMoved`] (D-18).
+    /// The commit must build on `fetched_sha` (branch continuity). The push sends the
+    /// commit id the committed gate validated, never a ref a hook can move, and no tags.
+    /// It is a plain fast-forward push, never forced: when upstream moved after the fetch,
+    /// the remote's fast-forward check rejects it, the cache commit is rolled back and the
+    /// result is [`PushRemoteError::UpstreamMoved`] (D-18).
     fn push_direct(
         &self,
         remote_checkout: &Path,
@@ -2072,10 +2077,18 @@ impl SyncEngine {
         }
 
         // No force or lease option, ever: the server's fast-forward check is the
-        // compare-and-swap that detects a concurrent publisher (D-18).
-        let refspec = format!("HEAD:refs/heads/{branch}");
+        // compare-and-swap that detects a concurrent publisher (D-18). `push.followTags`
+        // in the cache repository config (a hook can write it) would also publish annotated
+        // tags pointing into the pushed history.
+        let refspec = format!("{commit}:refs/heads/{branch}");
         let mut push = self.git(Some(remote_checkout));
-        push.args(["push", "--porcelain", "origin", &refspec]);
+        push.args([
+            "push",
+            "--porcelain",
+            "--no-follow-tags",
+            "origin",
+            &refspec,
+        ]);
         let push_out = self
             .run_network(push, "git push")
             .map_err(|e| Failed(format!("Failed to push to remote: {e}")))?;
@@ -2105,6 +2118,8 @@ impl SyncEngine {
         const REFUSAL: &str =
             "Post-commit publication gate violation: cannot resolve the commit to publish";
         let spec = format!("{rev}^{{commit}}");
+        // Honouring replace refs is harmless here: the id returned is the id the gate reads
+        // raw and the push sends, so a replace ref cannot separate the two.
         let mut rev_parse = self.git(Some(repo));
         rev_parse.args(["rev-parse", "--verify", &spec]);
         let out = self
@@ -2182,8 +2197,12 @@ impl SyncEngine {
         // a merge, and a single-commit listing shows nothing for a merge. So the gate
         // requires exactly one new commit on the fetched head and lists everything that
         // commit changes.
+        //
+        // Push sends the original objects (pack-objects ignores replace refs), so the gate
+        // must read them raw. The GIT_NO_REPLACE_OBJECTS variable would be removed by
+        // process::prepare_command, hence the option on each read.
         let mut cat_file = self.git(Some(repo));
-        cat_file.args(["cat-file", "commit", commit]);
+        cat_file.args(["--no-replace-objects", "cat-file", "commit", commit]);
         let raw_commit = self.run_local(cat_file, "git cat-file").map_err(|e| {
             format!("Post-commit publication gate violation: failed to read commit {commit}: {e}")
         })?;
@@ -2210,6 +2229,7 @@ impl SyncEngine {
 
         let mut diff_tree = self.git(Some(repo));
         diff_tree.args([
+            "--no-replace-objects",
             "diff-tree",
             "-r",
             "--no-commit-id",
@@ -2250,7 +2270,7 @@ impl SyncEngine {
 
             let show_arg = format!("{commit}:{}", p.to_string_lossy());
             let mut show = self.git(Some(repo));
-            show.args(["show", &show_arg]);
+            show.args(["--no-replace-objects", "show", &show_arg]);
             let blob_res = self
                 .run_local(show, "git show")
                 .map_err(|e| format!("Failed to read committed blob for {}: {e}", p.display()))?;
