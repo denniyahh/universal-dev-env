@@ -374,8 +374,9 @@ struct StagedPublication {
 /// Why [`SyncEngine::push_to_remote`] published nothing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PushRemoteError {
-    /// The remote branch moved after UDE fetched it, so its fast-forward check rejected
-    /// the push. The cache commit was rolled back; the user should pull first (D-18).
+    /// The push was refused as not a fast-forward and the remote branch is not confirmed at
+    /// the commit UDE fetched, so it most likely moved after the fetch. The cache commit was
+    /// rolled back; the user should pull first (D-18).
     UpstreamMoved {
         /// The remote branch that moved.
         branch: String,
@@ -390,8 +391,9 @@ pub enum PushRemoteError {
 pub enum PushPorcelain {
     /// No ref was flagged `!`.
     Accepted,
-    /// A ref was flagged `!` with a `[rejected]` summary: the remote's fast-forward
-    /// check refused it because the branch moved (`fetch first` / `non-fast-forward`).
+    /// A ref was flagged `!` with a `[rejected]` summary (`fetch first` /
+    /// `non-fast-forward`): the fast-forward check refused it. Usually the branch moved, but
+    /// local state can make git see the commit as not building on the fetched head.
     RejectedNonFastForward,
     /// A ref was flagged `!` for another reason, for example `[remote rejected]` from a
     /// remote hook.
@@ -520,6 +522,22 @@ impl SyncEngine {
     /// `label` must not contain argv (remote URLs).
     fn run_push(&self, cmd: Command, label: &str) -> Result<RunOutput, String> {
         process::run_bounded_ignoring_grafts(cmd, label, self.limits.network)
+    }
+
+    /// Whether `git ls-remote` reports `refs/heads/<branch>` on `origin` at exactly `sha`;
+    /// false when that cannot be read or the output is anything else.
+    ///
+    /// The read goes through the checkout's remote config, which a hook can write, so true
+    /// means what `git ls-remote` printed, not what the remote holds. That is why only a
+    /// refusal's wording may depend on it.
+    fn remote_branch_is_at(&self, repo: &Path, branch: &str, sha: &str) -> bool {
+        let refname = format!("refs/heads/{branch}");
+        let mut ls_remote = self.git(Some(repo));
+        ls_remote.args(["ls-remote", "--refs", "origin", &refname]);
+        self.run_network(ls_remote, "git ls-remote")
+            .is_ok_and(|out| {
+                out.status.success() && out.stdout == format!("{sha}\t{refname}\n").into_bytes()
+            })
     }
 
     /// Computes the sha256 checksum of a byte slice
@@ -2094,8 +2112,10 @@ impl SyncEngine {
     /// commit id the committed gate validated, never a ref a hook can move, and no tags.
     /// It is a plain fast-forward push, never forced: when upstream moved after the fetch,
     /// the remote's fast-forward check rejects it, the cache commit is rolled back and the
-    /// result is [`PushRemoteError::UpstreamMoved`] (D-18). The push reads no commit-graph,
-    /// bitmap or grafts file and sees no `GIT_TEST_*` variable.
+    /// result is [`PushRemoteError::UpstreamMoved`] (D-18). When `git ls-remote` instead
+    /// reports the branch still at `fetched_sha`, the result is [`PushRemoteError::Failed`].
+    /// The push reads no commit-graph, bitmap or grafts file and sees no `GIT_TEST_*`
+    /// variable.
     fn push_direct(
         &self,
         remote_checkout: &Path,
@@ -2184,6 +2204,15 @@ impl SyncEngine {
             let stdout = String::from_utf8_lossy(&push_out.stdout);
             if classify_push_porcelain(&stdout) == PushPorcelain::RejectedNonFastForward {
                 self.rollback_commit(remote_checkout);
+                // A shallow file or a replace ref can make git see the validated commit as
+                // not building on the fetched head, so the rejection alone does not mean
+                // upstream moved (probed). This read runs only on this failure path, so a
+                // successful push makes no extra network call.
+                if self.remote_branch_is_at(remote_checkout, branch, fetched_sha) {
+                    return Err(Failed(format!(
+                        "git push origin {branch} was refused as not a fast-forward, but git ls-remote reports the remote branch still at the commit UDE fetched; a hook in the cache checkout most likely caused this"
+                    )));
+                }
                 return Err(PushRemoteError::UpstreamMoved {
                     branch: branch.to_string(),
                 });
@@ -11114,6 +11143,38 @@ byte() { printf "\\$(printf '%03o' "$1")"; }
         assert_remote_unchanged(&git, &pushed);
         let err = push_failure(pushed.res);
         assert!(err.contains("git push failed for branch"), "{err}");
+    }
+
+    #[test]
+    fn test_remote_branch_is_at() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let bare = seeded_bare_remote(&git);
+        let clone = tempdir().unwrap();
+        git.run(clone.path(), &["clone", bare.path().to_str().unwrap(), "."]);
+        let head = git.output(bare.path(), &["rev-parse", "refs/heads/main"]);
+        let zeros = "0".repeat(head.len());
+
+        let mut failures = Vec::new();
+        let mut check = |row: &str, branch: &str, sha: &str, expected: bool| {
+            let got = engine.remote_branch_is_at(clone.path(), branch, sha);
+            if got != expected {
+                failures.push(format!("{row}: got {got}, expected {expected}"));
+            }
+        };
+        check("the fetched head", "main", &head, true);
+        check("a prefix of the id", "main", &head[..12], false);
+        check("another id of the same length", "main", &zeros, false);
+        check("a branch that does not exist", "ude-absent", &head, false);
+
+        let missing = clone.path().join("no-such-remote");
+        git.run(
+            clone.path(),
+            &["remote", "set-url", "origin", missing.to_str().unwrap()],
+        );
+        check("an unreachable remote", "main", &head, false);
+
+        assert!(failures.is_empty(), "{failures:?}");
     }
 
     #[test]
