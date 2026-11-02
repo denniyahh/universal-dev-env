@@ -1,303 +1,265 @@
 ---
 phase: 02-sanitizer-boundaries-security-hardening
-reviewed: 2026-11-01T16:05:22Z
+reviewed: 2026-11-02T19:29:42Z
 depth: deep
-files_reviewed: 1
+files_reviewed: 3
 files_reviewed_list:
   - src/sync/mod.rs
+  - src/process.rs
+  - tests/e2e_lifecycle.rs
 findings:
   critical: 2
-  warning: 5
-  info: 6
-  total: 13
+  warning: 3
+  info: 2
+  total: 7
 status: issues_found
 ---
 
 # Phase 02: Code Review Report
 
-**Reviewed:** 2026-11-01T16:05:22Z
+**Reviewed:** 2026-11-02T19:29:42Z
 **Depth:** deep
-**Files Reviewed:** 1
+**Files Reviewed:** 3
 **Status:** issues_found
 
 ## Narrative Findings (AI reviewer)
 
 ## Summary
 
-Scope: `git diff ed8dc0d6 HEAD -- src/sync/mod.rs` (plans 02-11 and 02-12), at HEAD 392b82b. The
-call chains were traced through `src/process.rs` and the caller in `src/main.rs`.
+Scope: `git diff 07ff152 HEAD -- src tests` (plans 02-13 to 02-15), at HEAD efc4117, with call chains
+traced through `src/sanitizer/mod.rs` and `src/main.rs`.
 
-**The gate's main claim is still false.** A post-commit hook can publish unvalidated bytes through
-`push_to_remote`, and the call returns Ok in both modes. The gate looks a blob up by path, so a tree
-listing the same path twice shows it the first entry. Git's checkout writes the last one. A fresh
-`ensure_remote_repo` on the remote then held `INJECTED_BY_HOOK` in the managed file (CR-200). A hook
-can also delete or revert a validated file and still get Ok (CR-201).
+**The gate's main claim is still false.** Two separate hooks published a blob holding a fake `ghp_`
+token through the real `push_to_remote`, which returned Ok in direct and PR mode. Both blobs were on
+the remote afterwards.
+- CR-300: a ref named after the commit id makes `git push` send that ref's commit, not the commit the
+  gate validated.
+- CR-301: the "fetched head" is read from a local ref a hook can move, so an injected commit passes
+  as the base and goes out underneath the validated one.
+
+**What argues against these two findings:** both need a hostile hook, and a hostile hook can run
+`git push` itself with the user's credentials. AR-02-10 used that argument to accept T-02-52. They are
+still reported as critical because the code documents the opposite (`src/sync/mod.rs:2112` "never a
+ref a hook can move"), phase 02 treats hook rewrites of refs as in scope, and each is a bypass that
+returns Ok. If the operator applies AR-02-10's reasoning to them, that is a decision to narrow what
+the gate promises, and the doc comments must change with it.
 
 How the claims were tested: each `reproduced` below comes from a run in a scratch copy of HEAD, with
-probe tests added to `mod tests` and driving the real `push_to_remote` against local bare remotes on
-git 2.56.0.
+probe tests added to `mod tests` and driving the real `ensure_remote_repo` and `push_to_remote`
+against local bare remotes on git 2.56.0, using the existing `push_with_post_commit_hook` fixture or
+hooks installed the same way. The scratch copy has been removed.
 
 What those runs do not show:
-- No hosted remote was tried. A bare remote with `receive.fsckObjects=true` rejected the duplicate
-  tree in a plain-git probe, so CR-200 and WR-200 depend on the host. Whether GitHub or another host
-  refuses these trees is unverified.
-- WR-203 is a race, seen in 1 of 10 runs on a local-path remote. That shows it can happen, not how
-  often it would happen over a network.
-- WR-202 was reproduced with a shim printing the output expected from git older than 2.31. No real
-  old git was run.
-- 96 existing gate and hook tests pass on the unmodified gate (filtered run, not the full suite).
-  They do not cover any channel reported here, so passing says nothing about these findings.
+- No hosted remote and no https or ssh transport was tried, so whether a host's own checks would
+  stop a blob is unverified. A host's secret scanning might refuse these tokens; a token shape it
+  does not know would pass.
+- `ude sync push` was not run end to end for any finding. The effect on `src/main.rs` is from reading
+  the code.
+- `GIT_GRAFT_FILE` reaching `pack-objects` under `git-remote-https` was not run. It is reasoned from
+  environment inheritance only. The local-path case is what the existing tests cover.
+- The list of channels below is what was tried, not a proof that no other exists.
+- The full test suite was not run. 127 tests matching `push` ran only against the CR-300 fix (see
+  there), not against unmodified HEAD.
 
 ### Standing findings
 
-- **WR-102 (merge HEAD gate, and no ancestry check in PR mode) is fixed.** The gate now requires
-  exactly one raw parent equal to the fetched head in both modes and lists changes from that head.
-  `test_direct_push_refuses_hook_merge_over_amended_commit`, its PR twin and
-  `test_pr_push_refuses_hook_added_commit` passed in this run. The separate defects below are not
-  part of WR-102.
-- WR-01, WR-02, WR-101, IN-01..IN-05 and IN-101..IN-103 are outside this diff, stayed out of scope
-  by operator decision, and were not re-examined.
-- T-02-52 and T-02-53 are accepted and not re-reported. File mode and type changes are also out of
-  scope (orchestrator decision in plan 02-11).
+CR-200, CR-201, WR-200 and the other findings in `02-REVIEW-DISPOSITION.md` were not re-run. Reading
+the code, the repeated-path, component and record checks are present as plans 02-13 describe. Their
+disposition is the orchestrator's to record. IN-200 to IN-205 were not re-examined and are not
+repeated here. T-02-45 (the commit header is scanned, not bound) is a recorded risk and is not
+re-reported.
 
 ### Checked and found sound
 
-- Header scan false positives: 9 ordinary idents, including domains holding `key`, `token`, `secret`,
-  `auth` and `api`, were not flagged. A PAT-shaped author, the control, was flagged.
-- An empty directory already in the fetched head does not refuse a push: UDE's `git commit` rebuilds
-  the tree from the index and drops it. The push returned Ok.
-- Hook-written `remote.origin.mirror` makes the push fail, and hook-written `remote.origin.push` is
-  ignored in favour of the explicit refspec. Both were plain-git probes.
-- `raw_commit_parents` counts every `parent ` header line, a superset of git's parser, so a
-  disagreement refuses. This comes from reading the code and git's parser as recalled; it was not
-  run against a crafted object.
+Read from the code and from git's behaviour as recalled, not run, unless marked:
+- `raw_commit_parents` is a superset of git's parser. A `parent` line after `author` counts for the
+  gate but not for git; the tree binding still holds the content, so no new bytes go out.
+- A tree entry with a non-canonical mode is canonicalized the same way by `ls-tree` and the object
+  walk, and an unknown mode reads as a gitlink in both, so neither follows it.
+- `ls-tree` fails on a tag or commit listed as a tree, so that form is refused.
+- A loose object or pack rewritten after validation hashes to a different id on the remote, whose
+  connectivity check should reject it.
+- `Finding::reason` prints the rule name and line, never the value (read in `src/sanitizer/mod.rs:25`).
+- A forced replace ref to a tag does not divert a `^{commit}` source (plain-git run: push refused
+  without `--no-replace-objects`, validated commit sent with it).
 
 ## Critical Issues
 
-### CR-200: A tree listing the managed path twice publishes unvalidated bytes, and consumers check them out
+### CR-300: A ref named after the commit id makes git push send another commit
 
-**File:** `src/sync/mod.rs:2349-2408` (the per-entry loop), `src/sync/mod.rs:2369` (`show` by path)
+**File:** `src/sync/mod.rs:2054` (PR), `src/sync/mod.rs:2182` (direct); false doc claims at `:2035` and `:2112`
 **Reproduced:** yes, direct and PR mode.
-**Issue:** A post-commit hook rebuilds UDE's commit, keeping the parent and message bytes, so that the
-leaf tree holds the managed file twice: the validated blob first, the injected blob second
-(`git mktree` accepts this). `diff-tree` lists `M <path>` and `A <path>`. Both pass the allowlist, and
-`git show <commit>:<path>` returns the first entry both times, so both compare equal to the record.
-`count_empty_directories` sees nothing wrong.
+**Issue:** `git push` resolves a refspec's source against local ref names first and treats it as an
+object name only when no ref matches, so `refs/tags/<id>` or `refs/heads/<id>` takes precedence over
+the id `<id>`. Both pushes use `{commit}:refs/heads/...`. A post-commit hook that creates such a ref
+leaves HEAD, the tree, the message and the parent as validated, so every gate check passes. The ref
+is not inspected, and it can be created after the gate has run.
 
-Observed results:
-- `push_to_remote` returned Ok in both modes.
-- The remote's `ls-tree -r` listed both blobs under the same path, and `cat-file blob` on the injected
-  id returned `INJECTED_BY_HOOK`.
-- `git show` on the remote returned the validated bytes.
-- A fresh `ensure_remote_repo` on that remote left `INJECTED_BY_HOOK` in the managed file with
-  `status` reporting `M`. The pusher's own cache held the same bytes after its next ensure. So the
-  bytes reach what `ude sync pull` reads as the upstream template.
+Hook tail, in the existing fixture:
+```sh
+C=$(git rev-parse HEAD)
+I=$(printf '<fake ghp_ token line>\n' | git hash-object -w --stdin)
+export GIT_INDEX_FILE=.git/ude-probe-idx
+git read-tree HEAD
+git update-index --add --cacheinfo 100644,"$I","$F"
+T=$(git write-tree)
+unset GIT_INDEX_FILE
+N=$(git commit-tree "$T" -p "$C" -m injected)
+git update-ref "refs/tags/$C" "$N"
+```
+Output:
+```
+direct: res=Ok("Directly pushed changes to remote branch 'main'.")
+        refs/heads/main managed file: <the fake token line>
+PR:     res=Ok("Pushed changes to branch 'ude-sync-14f11ae4-...'. Create a PR on GitHub to merge into 'main'.")
+        refs/heads/ude-sync-... managed file: <the fake token line>
+```
+Plain-git porcelain output for the same refspec shows the substitution:
+`refs/tags/e059...:refs/heads/main fd344ce..7a7f829`. Control: with no such ref, the same plain-git
+command leaves the remote at the validated commit and without the injected blob.
 
-This breaks plan 02-08's prohibition, which plan 02-12 records as `status: resolved` with one
-exception (T-02-52). It also breaks T-02-38. No secret scan runs on the second blob, so an injected
-secret publishes the same way.
-
-**Fix:** Refuse a tree whose raw listing repeats a path. UDE's own commit comes from the index, which
-cannot hold duplicates, so a clean push should never trip this (inferred from how the index works; a
-clean push was not run with this fix). Add hook tests in both modes that assert the refusal, that the
-remote does not hold the injected blob, and a control that a push without the check delivers it.
+**Fix:** Make the source something no ref can be named, and read it past replace refs:
 
 ```rust
-// In the ls-tree -r -t -z pass (count_empty_directories generalised):
-let mut seen = HashSet::new();
-for record in listing.split_inclusive(|byte| *byte == 0) {
-    // ...parse meta and path as today...
-    if !seen.insert(path) {
-        return Err(TreeDefect::DuplicateEntry); // never print the name
-    }
-}
+let refspec = format!("{commit}^{{commit}}:refs/heads/{branch}"); // same for sync_branch
+push.args(["--no-replace-objects", "-c", "core.commitGraph=false", /* as today */]);
 ```
+Applied in the scratch copy to both pushes: the shadow probes then found no injected blob on the
+remote, in either mode. 126 of 127 tests matching `push` passed. The failure is
+`test_direct_push_replaced_commit_refusal_does_not_say_upstream_moved`, which expects a replace ref
+to get the push refused; with the flag the validated commit publishes, which is the safer outcome,
+but that test and the comment at `:2207` need rewriting. Add hook tests in both modes that assert the
+injected blob is absent from the remote, with a control that a plain-id refspec delivers it.
 
-Reading each listed blob by its own object id (`diff-tree -r -z --raw`, then `cat-file blob <oid>`)
-would also stop the path lookup from hiding an entry. It is worth doing as well as the check above.
+### CR-301: A hook can move the fetched head, and the injected commit goes out as the base
 
-### CR-201: A hook can delete or revert a validated file and the push still returns Ok
+**File:** `src/sync/mod.rs:1092-1108` (`fetched_head`), `src/sync/mod.rs:1036-1064` (hooks run before it is read), `src/sync/mod.rs:2374-2375` (the parent check trusts it)
+**Reproduced:** yes, direct and PR mode.
+**Issue:** `fetched_sha` is whatever `refs/remotes/origin/<branch>` holds when `ensure_remote_repo`
+ends, after `git checkout -B` has run the post-checkout hook. Nothing compares it with the remote. A
+hook that moves that ref onto an injected commit makes `reset --hard` and `fetched_head` both land
+there. UDE's commit then sits on the injected commit, its only parent equals the "fetched head", and
+`diff-tree base commit` lists only the validated file. The push is a real fast-forward and carries
+the injected commit and every object in it. No check reads what lies between the remote's head and
+`base`, so the gate's "only commit the push adds on top of `base`" holds while it does not describe
+what the push adds to the remote.
 
-**File:** `src/sync/mod.rs:2364-2367` (the `D` skip), `src/sync/mod.rs:2349-2408` (no check that validated content is present)
-**Reproduced:** deletion in direct and PR mode; revert in direct mode.
-**Issue:** The gate checks only what the diff lists, and it skips every `D` entry on the allowlist,
-including a path that `validated` holds a digest for. Its doc comment says every changed file is
-"identical to what `validated` recorded".
-- Hook `git rm --cached "$F"` plus `git commit --amend --no-edit`: Ok, and the remote's tree no longer
-  holds the template.
-- Hook `git checkout HEAD~1 -- "$F"` plus `git commit --amend --allow-empty`: Ok and the success
-  message, with the remote blob still the old bytes. Nothing the user validated was published.
-
-Consequences, read from the code and not run end to end:
-- After Ok in direct mode, `src/main.rs:1266-1285` records the validated hash as the new ancestor, so
-  local state claims a publish that did not happen.
-- `SyncStatus::UpstreamDeleted` (`src/sync/mod.rs:27`) makes pull delete an unchanged local copy, so a
-  hook's deletion spreads to other machines.
-
-**Fix:** Bind the commit to the record in both directions. A real deletion has no record
-(`deleted_templates` are added to `staged_files` at line 1707 without a `record` call), so the
-distinction already exists.
-
-```rust
-if status.starts_with('D') {
-    if validated_rel.contains_key(&p) {
-        return Err(format!(
-            "Post-commit publication gate violation: the commit deletes validated file {}",
-            p.display()
-        ));
-    }
-    continue;
-}
-// After the loop: every validated path must hold its recorded content in `commit`.
-for (rel, digest) in validated_rel.iter().filter(|(rel, _)| paths.contains(*rel)) {
-    // `git --no-replace-objects show {commit}:{rel}`; refuse when missing or
-    // when Self::fingerprint(&bytes) != *digest.
-}
+Hook, installed after a first `ensure_remote_repo` and run by the second:
+```sh
+I=$(printf '<fake ghp_ token line>\n' | git hash-object -w --stdin)
+export GIT_INDEX_FILE=.git/ude-probe-idx
+git read-tree refs/remotes/origin/main
+git update-index --add --cacheinfo 100644,"$I",templates/leak.txt
+T=$(git write-tree)
+unset GIT_INDEX_FILE
+N=$(git commit-tree "$T" -p refs/remotes/origin/main -m injected-base)
+git update-ref refs/remotes/origin/main "$N"
 ```
+Output (the first `ensure_remote_repo` in the same run reported the real head, which is the control):
+```
+real head c8f6f47..., fetched_sha reported 162d7f7...
+direct: res=Ok("Directly pushed changes to remote branch 'main'.")
+        refs/heads/main tree: templates/leak.txt, templates/projects/generic/gitconfig.repo
+PR:     res=Ok("Pushed changes to branch 'ude-sync-14f11ae4-...'. ...")
+        refs/heads/ude-sync-... tree: templates/leak.txt, templates/projects/generic/gitconfig.repo
+```
+A global `core.hooksPath` hook should do the same on the clone path, and a hook-written
+`remote.origin.fetch` should reach the same ref. Both are reasoned, not run.
+
+**Fix:** Take the base from the remote, not from a ref in the checkout. Before the fetch, run
+`git ls-remote <remote_url> refs/heads/<branch>` with the caller's URL, from a directory outside the
+checkout so hook-written config cannot redirect it. After the fetch, refuse when `fetched_head`
+differs, with the "pull first" wording if the remote simply moved. This fix was not run. Note what it
+leaves open: `url.*.insteadOf` in global config still applies. `-c core.hooksPath=/dev/null` is not
+enough alone, since 02-11-PLAN records that config-defined hooks still run under it. Add tests in both
+modes that assert `templates/leak.txt` and its blob are absent from the remote.
 
 ## Warnings
 
-### WR-200: A tree entry named `.` passes the allowlist and makes the remote unclonable
+### WR-300: An index flag makes the push return Ok with nothing published
 
-**File:** `src/sync/mod.rs:2358` (`paths.contains(&p)`), `src/sync/mod.rs:2456` (`PathBuf::from`)
-**Reproduced:** yes, direct mode.
-**Issue:** `PathBuf` equality ignores a `.` component in the middle of a path, so
-`templates/projects/generic/./gitconfig.repo` equals the allowlisted path. A hook adds a subtree named
-`.` holding the validated blob. The listed path is allowed, `git show` reads that entry, and the bytes
-match. `push_to_remote` returned Ok. `git clone` of the remote then failed with exit 128,
-`invalid path 'templates/projects/generic/./gitconfig.repo'`, so one hook breaks every later clone of
-the shared repository. No unvalidated bytes are involved, which is why this is a warning.
-**Fix:** Compare listed paths as raw bytes, not through `PathBuf`, or refuse any path component that
-is empty, `.` or `..` in the same listing pass as CR-200. Add a hook test.
-
-### WR-201: `rollback_commit` leaves the cache checkout wrong after a refusal, and no test checks it
-
-**File:** `src/sync/mod.rs:2191-2206`, callers at `src/sync/mod.rs:1967`, `1980`, `2082`, `2094`, `2131`
-**Reproduced:** yes, each state below.
-**Issue:** Rollback moves relative to `HEAD~1`, and it ignores the `fetched_sha` the gate just bound to.
-After a refusal in direct mode:
-- Hook-added commit: HEAD and `main` stay on the hook's amended commit, and the managed file holds
-  `INJECTED_BY_HOOK` with a clean `status`.
-- Parentless commit, or a hook that reset to a root base: `refs/heads/main` is deleted and the managed
-  file is gone from the working tree.
-- Hook detached HEAD and amended: HEAD stays detached, and `main` stays on UDE's commit.
-
-The `.unwrap_or(false)` at line 2197 also takes the destructive branch (delete the ref, then
-`clean -fd`) when the `rev-parse` itself fails to run. That was read from the code and not run.
-
-Limit on the impact: in all six cases tried, the next `ensure_remote_repo` restored HEAD to the fetched
-head, and nothing was published. So this leaves unvalidated bytes on disk until the next run; it is not
-a publication path. The refusal tests call `assert_remote_unchanged` but never check the checkout. Only
-the stray-commit test checks HEAD, and that asserts the relative behaviour.
-**Fix:** Pass `fetched_sha` and `branch` to rollback and run `checkout -f -B <branch> <fetched_sha>`,
-then `clean -fd`. Add a helper asserting HEAD, branch and managed file bytes after each refusal, and
-call it from the hook tests.
-
-### WR-202: `refuse_grafts_file` passes when the printed path is not one absolute path
-
-**File:** `src/sync/mod.rs:2227-2236`
-**Reproduced:** with a shim, on a repository that really holds `.git/info/grafts`. Real git older than
-2.31 was not run, so what it prints is unverified.
-**Issue:** `rev-parse --path-format=absolute` was added in git 2.31. An older `rev-parse` is expected to
-echo the unknown flag and print a relative path. The code uses that whole output as one path, and the
-lookup is against UDE's working directory, not the repository. The result is NotFound, then `Ok(())`.
-Control: the same repository with one absolute line was refused. `test_refuse_grafts_file_outcomes` has
-no row for this, and the project states no minimum git version that I could find.
-**Fix:** Fail closed unless the output is a single line and the path is absolute.
-
-```rust
-let path = Path::new(located.trim_end_matches('\n'));
-if located.trim_end_matches('\n').contains('\n') || !path.is_absolute() {
-    return Err(UNLOCATED.to_string());
-}
+**File:** `src/sync/mod.rs:1812-1814`, `src/main.rs:1266-1295`
+**Reproduced:** yes for `push_to_remote` (direct mode). The state write in `main.rs` is reasoned.
+**Issue:** `git status --porcelain` printing nothing returns `Ok(None)` before any check of the
+record, and `require_validated_content` never runs. `require_validated_content`'s doc says a push
+returning Ok has published each recorded path. A post-index-change hook that sets `assume-unchanged`
+on the managed file empties `status`:
 ```
+hook_ran=true res=Ok("No changes to push to remote repository.")
+before=c8f6f47... remote heads: [("refs/heads/main", "c8f6f47...")]
+control (no index hook): res=Ok("Directly pushed changes to remote branch 'main'."), head moved to 8d32ea7...
+```
+In direct mode `main.rs` then records the validated hash as the new ancestor for each file, so local
+state claims a publish that did not happen, and later syncs compare against it.
 
-### WR-203: A post-commit hook's background process can write grafts after the gate has passed
+**Fix:** On an empty status, when `validated` is not empty, read the tree of `HEAD` and run
+`require_validated_content` against it. Identical content still returns "No changes"; anything else
+is refused. Also confirm no path in `deleted` is still in that tree.
 
-**File:** `src/sync/mod.rs:2266`, push sites at `src/sync/mod.rs:2009` and `2124`
-**Reproduced:** 1 of 10 runs on a local-path remote. All 10 returned Ok; one delivered the injected blob
-to the remote. A one-in-ten race on a local path is a weak bound, and a network handshake before the
-object walk may widen the window (not measured).
-**Issue:** The check runs once, before the push. A post-commit hook can leave a process running that
-waits for the push and then writes `.git/info/grafts`. This is not T-02-52: that accepted exception is
-worded as a pre-push hook, and the prohibition names only that case. The operator's reason for accepting
-T-02-52 (a hostile hook can already push with the user's credentials) may well apply here too, but the
-acceptance does not currently cover it.
+### WR-301: A hook-written pushurl sends the commit elsewhere and the push returns Ok
 
-The comment at lines 2263-2265 treats the variable as unusable only because `prepare_command` removes
-it. In a plain-git probe, `GIT_GRAFT_FILE=/dev/null git push` sent no injected blob with a grafts file
-present, while the control without the variable did send it.
-**Fix:** Either let the two pushes set `GIT_GRAFT_FILE` to the null device, which needs a carve-out in
-`process::prepare_command` (the probe covers a file present at push time, not this race), or extend the
-T-02-52 wording to any hook-started process and record that acceptance.
+**File:** `src/sync/mod.rs:2065`, `src/sync/mod.rs:2194`, `src/main.rs:1266-1295`
+**Reproduced:** yes for `push_to_remote` (direct mode). The state write in `main.rs` is reasoned.
+**Issue:** Both pushes name `origin`, so they use the checkout's config, which a hook can write. The
+`remote_branch_is_at` doc already says this config cannot be trusted, but Ok depends on it. A
+post-commit hook running `git config remote.origin.pushurl <other bare>`:
+```
+hook_ran=true res=Ok("Directly pushed changes to remote branch 'main'.")
+origin heads: [("refs/heads/main", "1a5704b...")] fetched=1a5704b...
+other heads: [("refs/heads/main", "134dc1c...")]
+```
+Origin never moved, and the validated commit plus the objects under it went to the other repository.
+Direct mode still advances the ancestor state. PR mode should behave the same; that is reasoned.
 
-### WR-204: Tests named for inherited `GIT_TEST_*` variables never exercise inheritance
+**Fix:** Pass the URL from `ensure_remote_repo` through `RemoteCache` and push to it rather than to
+`origin`, then confirm with `git ls-remote <url> refs/heads/<target>` that the ref is at `commit`
+before returning Ok. Repository-level `url.*.pushInsteadOf` still needs a test or a refusal. Neither
+part was run.
 
-**File:** `src/sync/mod.rs:2007`, `src/sync/mod.rs:2122`, tests at `src/sync/mod.rs:10150-10180`
-**Reproduced:** yes, by mutation.
-**Issue:** `test_direct_push_ignores_inherited_git_test_commit_graph` and its PR twin set the variable
-through the engine's extra environment, which `Command::get_envs()` also finds. Replacing
-`std::env::vars_os().map(|(key, _)| key)` with an empty iterator at both pushes left those two tests and
-`test_remove_git_test_env` passing. With the real process variable set, the forged-graph tests failed
-under that mutation (`the remote holds the injected blob`) and passed without it. So the code works
-today, but the argument that makes it work is unpinned. `02-SECURITY.md` T-02-51 notes the extra-env
-setup; it does not say the call-site argument can be removed unnoticed.
-**Fix:** Add one test that spawns the built binary or a child test process with the variable in its real
-environment. Alternatively, build the push command in one function with the key source injected, and
-test that function.
+### WR-302: A refusal prints hook-chosen bytes from a `parent` header, including terminal escapes
+
+**File:** `src/sync/mod.rs:2376-2379`, `src/sync/mod.rs:2630-2637`
+**Reproduced:** yes, direct mode.
+**Issue:** `raw_commit_parents` returns the raw text after `parent `, and the continuity refusal prints
+it. Git's parser reads only `parent` lines directly after `tree`, so a later `parent` line resolves
+fine and reaches this message. The text can hold any bytes except a newline, and
+`src/main.rs:1306` prints it to the terminal unescaped. The comment at `:2437` says hook-chosen bytes
+are not printed, and plan 02-12 says the same of the hook's text. A hook holding a secret could write
+it here, or send terminal control sequences:
+```
+hook_ran=true res=Err(Failed("Branch continuity check failed: cache commit parent HOOK_CHOSEN_TEXT_\u{1b}[31m is not the fetched head c8f6f47..."))
+```
+Nothing reaches the remote through this. The exposure is the terminal and any log capturing it.
+
+**Fix:** Drop `{parent}` from the message, and name only the fetched head. Add a test that asserts the
+hook's text is absent from the refusal.
 
 ## Info
 
-### IN-200: A hook-written `push.pushOption` reaches the remote
+### IN-300: Some push failure paths leave the cache commit or the sync branch behind
 
-**File:** `src/sync/mod.rs:1997-2006`, `src/sync/mod.rs:2111-2121`
-**Reproduced:** plain git. A remote's pre-receive hook saw `INJECTED_OPTION_TEXT` in `GIT_PUSH_OPTION_0`.
-On a remote that does not advertise push options, the push fails instead. The text is not stored in the
-repository, but it is hook-written text sent beyond the commit, and some hosts act on push options
-(not tested). It belongs on the T-02-42 list.
-**Fix:** Add `-c push.pushOption=` to both pushes. Probed: the pre-receive hook then saw no option, and
-the control without it still did.
+**File:** `src/sync/mod.rs:2069-2071`, `src/sync/mod.rs:2076-2081`, `src/sync/mod.rs:2198-2200`, `src/sync/mod.rs:2220-2223`
+**Reasoned.**
+**Issue:** A push timeout or a failure other than non-fast-forward returns without `rollback_commit`
+or `abandon_sync_branch`. On a timeout, PR mode also stays on the sync branch. The next
+`ensure_remote_repo` runs `checkout -B` and `reset --hard`, so nothing wrong is published, but local
+`ude-sync-*` branches accumulate and hold their commits.
+**Fix:** Run the same cleanup on these paths.
 
-### IN-201: The push command and its comment block are written out twice
+### IN-301: The new e2e helper runs `ude init` with the host's HOME
 
-**File:** `src/sync/mod.rs:1985-2007`, `src/sync/mod.rs:2098-2122`
-**Issue:** Plan 02-12's per-option matrix exists because each option must be pinned at each of two sites.
-A security option added to one site can be missed at the other. IN-200's fix would be a third such option.
-**Fix:** Add one `fn publication_push(&self, repo, refspec, extra_args) -> Command`.
-
-### IN-202: `validate_committed_tree` is about 200 lines
-
-**File:** `src/sync/mod.rs:2248-2445`
-**Issue:** It runs five separate checks, and CR-200, CR-201 and WR-200 add more. The project rule is about
-40 lines per function.
-**Fix:** Split it into parent and message binding, the changed-blob loop, and the tree listing check.
-
-### IN-203: The `GIT_TEST_` prefix match is case-sensitive, and Windows environment names are not
-
-**File:** `src/sync/mod.rs:2492`
-**Reproduced:** no, unverified; no Windows host was available. `src/process.rs:121` has a Windows path, and
-`test_remove_git_test_env` pins `git_test_lower` as kept. On Windows that key would probably be the same
-variable git reads.
-**Fix:** Compare with `eq_ignore_ascii_case` under `cfg(windows)`.
-
-### IN-204: The `commit_command` doc comment says "no hooks"
-
-**File:** `src/sync/mod.rs:2165`
-**Issue:** `--no-verify` skips only pre-commit and commit-msg. Both plans rest on post-commit and
-prepare-commit-msg still running. This comment predates the diff.
-**Fix:** Reword it to say which hooks still run.
-
-### IN-205: Refusals print hook-chosen path names
-
-**File:** `src/sync/mod.rs:2355`, `src/sync/mod.rs:2360`
-**Issue:** The gate's comment at line 2411 says a hook-chosen directory name "is never printed", yet the
-unvalidated-file and unparseable-entry refusals print the name unredacted, and
-`test_push_refuses_hook_added_file` asserts it. A secret-shaped filename would reach the terminal or CI log.
-It is not published. Read from the code; not run with a secret-shaped name.
-**Fix:** Pass the name through the sanitizer before printing, or print a count.
+**File:** `tests/e2e_lifecycle.rs:913`
+**Reasoned.**
+**Issue:** The push in `push_logging_git_graft_file` sets `HOME`, `XDG_CONFIG_HOME` and
+`GIT_CONFIG_GLOBAL` to fixture paths, but the `ude init` before it does not, so its result can depend
+on the host's config. `src/main.rs:726` reads the home directory. The same pattern appears at other
+`ude init` calls in this file, so this helper follows an existing habit and is not a new class of
+problem. Its limit is the same as any env-only assertion: the helper shows what the top-level `git`
+process saw, not that git ignored a grafts file. Other tests in `mod tests` cover that.
+**Fix:** Set the fixture variables on the init command as well.
 
 ---
 
-_Reviewed: 2026-11-01T16:05:22Z_
+_Reviewed: 2026-11-02T19:29:42Z_
 _Reviewer: Claude (gsd-code-reviewer)_
 _Depth: deep_
