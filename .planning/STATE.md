@@ -4,10 +4,10 @@ current_phase: 02
 current_phase_name: Sanitizer, Boundaries & Security Hardening
 status: executing
 stopped_at: Completed 02-14-PLAN.md
-last_updated: "2026-11-02T17:02:48.437Z"
+last_updated: "2026-11-02T19:10:57.875Z"
 last_activity: 2026-11-02
 last_activity_desc: Phase 02 execution started
-state_head: 21a65baf4b638da1e12e4e4d8dec1bd444ac3c3e
+state_head: 3aeb1d2245b3e906990fe39cfcc5f126d6acf9a3
 progress:
   total_phases: 4
   completed_phases: 1
@@ -165,7 +165,6 @@ Recent decisions affecting current work:
 
 - [2026-10-19] [general] Home-path placeholders leak the pusher's home path into shared templates — [todo file](.planning/todos/pending/2026-10-19-home-path-placeholders-leak-the-pusher-s-home-path-into-shar.md)
 - [2026-10-19] [general] Never publish files that init kept over the shared template — [todo file](.planning/todos/pending/2026-10-19-never-publish-files-that-init-kept-over-the-shared-template.md)
-- [2026-10-19] [general] Template-logic push guard only checks .jinja files — [todo file](.planning/todos/pending/2026-10-19-template-logic-push-guard-only-checks-jinja-files.md)
 - [2026-10-20] [general] Classify a symlinked managed file per file instead of aborting sync — [todo file](.planning/todos/pending/2026-10-20-classify-a-symlinked-managed-file-per-file-instead-of-aborti.md) — Needs Test-first:.
 - [2026-10-20] [tooling] Make generated projects' secret-scan hook self-sufficient — [todo file](.planning/todos/pending/2026-10-20-make-generated-projects-secret-scan-hook-self-sufficient.md) — Needs Test-first:.
 - [2026-10-21] [general] Make init and sync writes refuse a symlink created mid-run — [todo file](.planning/todos/pending/2026-10-21-make-init-and-sync-writes-refuse-a-symlink-created-mid-run.md)
@@ -174,6 +173,11 @@ Recent decisions affecting current work:
 - [2026-10-21] [general] Register hooks and gitconfig when init runs in a monorepo subdirectory — [todo file](.planning/todos/pending/2026-10-21-register-hooks-and-gitconfig-when-init-runs-in-a-monorepo-su.md)
 - [2026-10-21] [general] Triage the five info findings from the first phase 01 code review — [todo file](.planning/todos/pending/2026-10-21-triage-the-five-info-findings-from-the-first-phase-01-code-r.md)
 - [2026-10-22] [testing] Close two push test gaps from the phase 01 verification — [todo file](.planning/todos/pending/2026-10-22-close-two-push-test-gaps-from-the-phase-01-verification.md)
+- [2026-10-23] [security] Recalibrate the entropy rule for 64-char base36 tokens — [todo file](.planning/todos/pending/2026-10-23-recalibrate-entropy-rule-for-64-char-base36-tokens.md)
+- [2026-10-25] [tooling] Add a clean PR-branch cutter for phase work — [todo file](.planning/todos/pending/2026-10-25-add-a-clean-pr-branch-cutter-for-phase-work.md)
+- [2026-10-25] [sync] Auto-escape literal template syntax on push instead of refusing — [todo file](.planning/todos/pending/2026-10-25-auto-escape-literal-template-syntax-on-push.md)
+- [2026-10-25] [sync] push_updates scans with the host home, not its user_home argument — [todo file](.planning/todos/pending/2026-10-25-push-scan-uses-host-home-not-user-home-argument.md)
+- [2026-11-02] [planning] Hand edits owed for phase 02 after re-verification — [todo file](.planning/todos/pending/2026-11-01-hand-edits-owed-for-phase-02-after-re-verification.md)
 
 ### Blockers/Concerns
 
@@ -183,6 +187,7 @@ Recent decisions affecting current work:
 - ⚠️ [Phase 01] Four info findings from the first code review (97fe52a, IN-02..IN-05) are tracked in a todo; IN-01 was decided and fixed (65b9931)
 - ⚠️ [Phase 01] Final re-verification (2026-10-22, 18/18): two push test gaps backlogged as a todo (operator); the leaked TypeSafe API key is to be rotated by the operator
 - ⚠️ [Phase 01] Second code review (2026-10-21): 3 critical, 3 warnings, 7 info — 12 fixed, 2 deferred (remote-vs-local template root to Phase 4; CI needs a push); re-verification found and fixed a foreign-remote deletion and the TypeSafe key in curl argv
+- [Phase 02] Hand edits owed after re-verification, and any risk still pending an operator answer: see .planning/todos/pending/2026-11-01-hand-edits-owed-for-phase-02-after-re-verification.md
 
 ### Roadmap Evolution
 
