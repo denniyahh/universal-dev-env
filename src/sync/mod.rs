@@ -8683,6 +8683,77 @@ git rev-parse HEAD > .git/ude-test-rebuilt-commit
     #[cfg(unix)]
     const HOOK_CHECKOUT_REMOVE: &str = "git rm -q --cached \"$F\"\n";
 
+    /// Opens a post-index-change rewrite of the index: `V` is the staged validated blob and
+    /// `I` an injected one, whose id is left for the test.
+    #[cfg(unix)]
+    macro_rules! index_start_lines {
+        () => {
+            r#"V=$(git rev-parse ":$F")
+I=$(printf 'INJECTED_BY_HOOK\n' | git hash-object -w --stdin)
+printf '%s\n' "$I" > .git/ude-test-injected-blob
+"#
+        };
+    }
+
+    /// Closes a post-index-change rewrite: wraps `G` (the tree of `generic/`) up to a root
+    /// tree and reads it into the index, which primes the cache tree `git write-tree` uses.
+    #[cfg(unix)]
+    macro_rules! read_tree_lines {
+        () => {
+            concat!(
+                one_generic_line!(),
+                r#"T2=$(printf '040000 tree %s\tprojects\n' "$T1" | git mktree)
+R=$(printf '040000 tree %s\ttemplates\n' "$T2" | git mktree)
+git read-tree "$R"
+"#
+            )
+        };
+    }
+
+    /// post-index-change tail: lists the managed file three times, the injected blob
+    /// between two validated ones, so a read by path returns the validated bytes.
+    #[cfg(unix)]
+    const HOOK_INDEX_HIDDEN_BLOB: &str = concat!(
+        index_start_lines!(),
+        r#"G=$(printf '100644 blob %s\tgitconfig.repo\n100644 blob %s\tgitconfig.repo\n100644 blob %s\tgitconfig.repo\n' "$V" "$I" "$V" | git mktree)
+"#,
+        read_tree_lines!(),
+    );
+
+    /// post-index-change tail: lists the managed file twice, both the validated blob.
+    #[cfg(unix)]
+    const HOOK_INDEX_REPEATED_SAME_BLOB: &str = concat!(
+        index_start_lines!(),
+        r#"G=$(printf '100644 blob %s\tgitconfig.repo\n100644 blob %s\tgitconfig.repo\n' "$V" "$V" | git mktree)
+"#,
+        read_tree_lines!(),
+    );
+
+    /// post-index-change tail: adds an empty directory next to the managed file.
+    #[cfg(unix)]
+    const HOOK_INDEX_EMPTY_DIRECTORY: &str = concat!(
+        index_start_lines!(),
+        r#"E=$(git mktree </dev/null)
+G=$(printf '100644 blob %s\tgitconfig.repo\n040000 tree %s\tINJECTED_DIR_NAME\n' "$V" "$E" | git mktree)
+"#,
+        read_tree_lines!(),
+    );
+
+    /// post-index-change tail: removes the managed file from the index.
+    #[cfg(unix)]
+    const HOOK_INDEX_REMOVE: &str = "git rm -q --cached \"$F\"\n";
+
+    /// post-index-change tail: makes the managed file a symlink entry holding the validated
+    /// blob.
+    #[cfg(unix)]
+    const HOOK_INDEX_SYMLINK: &str = r#"V=$(git rev-parse ":$F")
+git update-index --add --cacheinfo 120000,"$V","$F"
+"#;
+
+    /// post-index-change tail: sets the exec bit of the managed file in the index.
+    #[cfg(unix)]
+    const HOOK_INDEX_EXEC_FLIP: &str = "git update-index --chmod=+x \"$F\"\n";
+
     /// See [`amend_inject_lines`].
     #[cfg(unix)]
     macro_rules! injected_commit_lines {
@@ -8851,16 +8922,48 @@ byte() { printf "\\$(printf '%03o' "$1")"; }
         push_with_hook(git, engine, open_pr, "post-commit", hook_tail)
     }
 
-    /// Publishes [`HOOKED_TEMPLATE`] over the seeded template of a fresh bare remote with
-    /// the hook `hook_name` installed in the cache checkout. The hook runs its body once
-    /// (a marker stops an amend's own post-commit), with `F` set to the managed file's
-    /// checkout-relative path, then `hook_tail`.
+    /// [`push_with_guarded_hook`] with no guard.
     #[cfg(unix)]
     fn push_with_hook(
         git: &GitFixture,
         engine: &SyncEngine,
         open_pr: bool,
         hook_name: &str,
+        hook_tail: &str,
+    ) -> HookedPush {
+        push_with_guarded_hook(git, engine, open_pr, hook_name, "", hook_tail)
+    }
+
+    /// [`push_with_guarded_hook`] with a post-index-change hook that acts once something is
+    /// staged: the hook also fires on `git status`, before anything is.
+    #[cfg(unix)]
+    fn push_with_index_hook(
+        git: &GitFixture,
+        engine: &SyncEngine,
+        open_pr: bool,
+        hook_tail: &str,
+    ) -> HookedPush {
+        push_with_guarded_hook(
+            git,
+            engine,
+            open_pr,
+            "post-index-change",
+            "git diff --cached --quiet && exit 0",
+            hook_tail,
+        )
+    }
+
+    /// Publishes [`HOOKED_TEMPLATE`] over the seeded template of a fresh bare remote with
+    /// the hook `hook_name` installed in the cache checkout. The hook runs `guard`, then
+    /// its body once (a marker stops an amend's own post-commit), with `F` set to the
+    /// managed file's checkout-relative path, then `hook_tail`.
+    #[cfg(unix)]
+    fn push_with_guarded_hook(
+        git: &GitFixture,
+        engine: &SyncEngine,
+        open_pr: bool,
+        hook_name: &str,
+        guard: &str,
         hook_tail: &str,
     ) -> HookedPush {
         use std::os::unix::fs::PermissionsExt;
@@ -8884,7 +8987,7 @@ byte() { printf "\\$(printf '%03o' "$1")"; }
         fs::write(
             &hook,
             format!(
-                "#!/bin/sh\n[ -e .git/ude-test-hook-ran ] && exit 0\n: > .git/ude-test-hook-ran\nF='{managed_rel}'\n{hook_tail}"
+                "#!/bin/sh\n{guard}\n[ -e .git/ude-test-hook-ran ] && exit 0\n: > .git/ude-test-hook-ran\nF='{managed_rel}'\n{hook_tail}"
             ),
         )
         .unwrap();
@@ -9447,10 +9550,8 @@ byte() { printf "\\$(printf '%03o' "$1")"; }
         assert!(pushed.hook_ran, "the post-commit hook never ran");
         assert_remote_unchanged(&git, &pushed);
         let err = push_failure(pushed.res);
-        assert!(
-            err.contains("unvalidated file committed in HEAD: templates/hook-extra.txt"),
-            "{err}"
-        );
+        assert!(err.contains("unvalidated file committed in HEAD"), "{err}");
+        assert!(!err.contains("hook-extra"), "{err}");
     }
 
     #[test]
@@ -9607,10 +9708,8 @@ byte() { printf "\\$(printf '%03o' "$1")"; }
         );
 
         let err = push_failure(pushed.res);
-        assert!(
-            err.contains("unvalidated file committed in HEAD: templates/hook-extra.txt"),
-            "{err}"
-        );
+        assert!(err.contains("unvalidated file committed in HEAD"), "{err}");
+        assert!(!err.contains("hook-extra"), "{err}");
     }
 
     #[test]
@@ -11843,6 +11942,369 @@ byte() { printf "\\$(printf '%03o' "$1")"; }
             git.output(repo.path(), &["diff", "--cached", "--name-only"]),
             ""
         );
+    }
+
+    /// Pushes with `tail` as a post-index-change hook and requires the refusal.
+    #[cfg(unix)]
+    fn index_hook_refusal(open_pr: bool, tail: &str) -> (GitFixture, HookedPush, String) {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let pushed = push_with_index_hook(&git, &engine, open_pr, tail);
+        let err = assert_hook_refused(&git, &pushed);
+        (git, pushed, err)
+    }
+
+    /// The injected entry the staged gate cannot see is refused, and its blob stays off
+    /// the remote.
+    #[cfg(unix)]
+    fn assert_index_hook_hidden_blob_refused(open_pr: bool) {
+        let (git, pushed, err) = index_hook_refusal(open_pr, HOOK_INDEX_HIDDEN_BLOB);
+        assert!(err.contains("differs from the validated content"), "{err}");
+        let blob = hook_recorded_id(&pushed, "ude-test-injected-blob");
+        assert!(
+            !holds_object(&git, pushed.bare.path(), &blob),
+            "the remote holds the injected blob"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_direct_push_refuses_index_hook_hidden_blob() {
+        assert_index_hook_hidden_blob_refused(false);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_pr_push_refuses_index_hook_hidden_blob() {
+        assert_index_hook_hidden_blob_refused(true);
+    }
+
+    /// A token-shaped entry the staged gate cannot see is scanned and refused, and its body
+    /// is not printed.
+    #[cfg(unix)]
+    fn assert_index_hook_hidden_token_refused(open_pr: bool) {
+        let tail = with_injected_token(HOOK_INDEX_HIDDEN_BLOB);
+        let (_git, _pushed, err) = index_hook_refusal(open_pr, &tail);
+        assert!(
+            err.contains("secret detected in committed HEAD blob"),
+            "{err}"
+        );
+        assert!(
+            !err.contains(HOOK_TOKEN_BODY),
+            "the refusal leaked the token"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_direct_push_refuses_index_hook_hidden_token() {
+        assert_index_hook_hidden_token_refused(false);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_pr_push_refuses_index_hook_hidden_token() {
+        assert_index_hook_hidden_token_refused(true);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_direct_push_refuses_index_hook_repeated_same_blob() {
+        let (_git, _pushed, err) = index_hook_refusal(false, HOOK_INDEX_REPEATED_SAME_BLOB);
+        assert!(err.contains("repeats a path"), "{err}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_pr_push_refuses_index_hook_repeated_same_blob() {
+        let (_git, _pushed, err) = index_hook_refusal(true, HOOK_INDEX_REPEATED_SAME_BLOB);
+        assert!(err.contains("repeats a path"), "{err}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_direct_push_refuses_index_hook_removed_file() {
+        let (_git, _pushed, err) = index_hook_refusal(false, HOOK_INDEX_REMOVE);
+        assert!(err.contains("does not hold the validated content"), "{err}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_pr_push_refuses_index_hook_removed_file() {
+        let (_git, _pushed, err) = index_hook_refusal(true, HOOK_INDEX_REMOVE);
+        assert!(err.contains("does not hold the validated content"), "{err}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_push_refuses_index_hook_symlink() {
+        let (_git, _pushed, err) = index_hook_refusal(false, HOOK_INDEX_SYMLINK);
+        assert!(err.contains("does not hold the validated content"), "{err}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_push_refuses_index_hook_empty_directory() {
+        let (_git, _pushed, err) = index_hook_refusal(false, HOOK_INDEX_EMPTY_DIRECTORY);
+        assert!(err.contains("contains an empty directory"), "{err}");
+    }
+
+    /// A mode set before the tree id is recorded reaches the remote with the validated
+    /// bytes. This pins present behaviour so a change to it is seen; it endorses nothing.
+    #[test]
+    #[cfg(unix)]
+    fn test_index_hook_exec_flip_reaches_the_remote() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let pushed = push_with_index_hook(&git, &engine, false, HOOK_INDEX_EXEC_FLIP);
+        let published = assert_published_exact(&git, &pushed, false);
+        let listed = git.output(
+            pushed.bare.path(),
+            &["ls-tree", &published, &pushed.managed_rel],
+        );
+        assert!(listed.starts_with("100755"), "{listed}");
+    }
+
+    /// Runs `git <args>` in `repo` with `input` on stdin; returns its trimmed stdout.
+    fn git_with_input(git: &GitFixture, repo: &Path, args: &[&str], input: &[u8]) -> String {
+        use std::io::Write as _;
+        let mut child = git
+            .cmd(repo)
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(input).unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert!(
+            out.status.success(),
+            "fixture step `git {}` failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// Writes `bytes` as a blob of `repo` and returns its id.
+    fn write_blob(git: &GitFixture, repo: &Path, bytes: &[u8]) -> String {
+        git_with_input(git, repo, &["hash-object", "-w", "--stdin"], bytes)
+    }
+
+    /// A commit on `base` with the sync message whose root tree holds only `templates/`,
+    /// listing `templates_listing` (`git mktree` input).
+    fn commit_of_templates(
+        git: &GitFixture,
+        repo: &Path,
+        base: &str,
+        templates_listing: &str,
+    ) -> String {
+        let templates = git_with_input(git, repo, &["mktree"], templates_listing.as_bytes());
+        let root = git_with_input(
+            git,
+            repo,
+            &["mktree"],
+            format!("040000 tree {templates}\ttemplates\n").as_bytes(),
+        );
+        git_with_input(
+            git,
+            repo,
+            &["commit-tree", &root, "-p", base],
+            format!("{SYNC_COMMIT_MESSAGE}\n").as_bytes(),
+        )
+    }
+
+    /// A repository with `files` committed under `templates/`; returns it and the commit.
+    fn templates_repo(git: &GitFixture, files: &[(&str, &str)]) -> (tempfile::TempDir, String) {
+        let repo = tempdir().unwrap();
+        git.run(repo.path(), &["init", "-b", "main"]);
+        fs::create_dir_all(repo.path().join("templates")).unwrap();
+        for (name, content) in files {
+            fs::write(repo.path().join("templates").join(name), content).unwrap();
+        }
+        git.run(repo.path(), &["add", "-A"]);
+        git.run(repo.path(), &["commit", "-m", "base commit"]);
+        let base = git.output(repo.path(), &["rev-parse", "HEAD"]);
+        (repo, base)
+    }
+
+    /// The record of `entries` (a name under `templates/`, the validated bytes) in `repo`.
+    fn templates_record(repo: &Path, entries: &[(&str, &[u8])]) -> ValidatedBlobs {
+        let mut validated = ValidatedBlobs::default();
+        for (name, bytes) in entries {
+            validated.record(repo.join("templates").join(name), bytes);
+        }
+        validated
+    }
+
+    #[test]
+    fn test_committed_gate_requires_validated_content() {
+        const NOT_HELD: &str = "does not hold the validated content";
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let (repo, base) =
+            templates_repo(&git, &[("f", "f base\n"), ("g", "g base\n"), ("h", "h\n")]);
+        let dir = repo.path();
+        let blob = |bytes: &[u8]| write_blob(&git, dir, bytes);
+        let (f_new, g_old, g_new) = (blob(b"f new\n"), blob(b"g base\n"), blob(b"g new\n"));
+        let (g_crlf, h) = (blob(b"g new\r\n"), blob(b"h\n"));
+        let paths: HashSet<PathBuf> = [PathBuf::from("templates/f"), PathBuf::from("templates/g")]
+            .into_iter()
+            .collect();
+        let both = templates_record(dir, &[("f", b"f new\n"), ("g", b"g new\n")]);
+        let only_f = templates_record(dir, &[("f", b"f new\n")]);
+        let g_kept = templates_record(dir, &[("f", b"f new\n"), ("g", b"g base\n")]);
+        let refused_read = "failed to inspect committed blob";
+
+        let rows = [
+            (
+                "both changed",
+                format!("100644 blob {g_new}\tg\n"),
+                &both,
+                None,
+            ),
+            ("g deleted", String::new(), &both, Some(NOT_HELD)),
+            (
+                "g reverted to the base's blob",
+                format!("100644 blob {g_old}\tg\n"),
+                &both,
+                Some(NOT_HELD),
+            ),
+            (
+                "g a symlink entry holding the validated blob",
+                format!("120000 blob {g_new}\tg\n"),
+                &both,
+                Some(NOT_HELD),
+            ),
+            (
+                "g a gitlink",
+                format!("160000 commit {base}\tg\n"),
+                &both,
+                Some(refused_read),
+            ),
+            (
+                "g deleted with no record for g",
+                String::new(),
+                &only_f,
+                None,
+            ),
+            (
+                "g holding the record's content with CRLF line endings",
+                format!("100644 blob {g_crlf}\tg\n"),
+                &both,
+                None,
+            ),
+            (
+                "g with mode 100755",
+                format!("100755 blob {g_new}\tg\n"),
+                &both,
+                None,
+            ),
+            (
+                "a validated path the commit did not change",
+                format!("100644 blob {g_old}\tg\n"),
+                &g_kept,
+                None,
+            ),
+        ];
+        let mut failures = Vec::new();
+        for (name, g_entry, validated, expected) in rows {
+            let listing = format!("100644 blob {f_new}\tf\n{g_entry}100644 blob {h}\th\n");
+            let commit = commit_of_templates(&git, dir, &base, &listing);
+            let verdict = engine.validate_committed_tree(
+                dir,
+                &commit,
+                &base,
+                &paths,
+                validated,
+                &commit_tree_id(&git, dir, &commit),
+            );
+            let as_expected = match (&verdict, expected) {
+                (Ok(()), None) => true,
+                (Err(err), Some(text)) => err.contains(text),
+                _ => false,
+            };
+            if !as_expected {
+                failures.push(format!("{name}: {verdict:?}, expected {expected:?}"));
+            }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+
+    #[test]
+    fn test_committed_gate_refuses_bad_path_components() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let (repo, base) = templates_repo(&git, &[("f", "f base\n")]);
+        let dir = repo.path();
+        let validated_blob = write_blob(&git, dir, b"f new\n");
+        let subtree = git_with_input(
+            &git,
+            dir,
+            &["mktree"],
+            format!("100644 blob {validated_blob}\tf\n").as_bytes(),
+        );
+        let paths: HashSet<PathBuf> = [PathBuf::from("templates/f")].into_iter().collect();
+        let validated = templates_record(dir, &[("f", b"f new\n")]);
+
+        let rows = [
+            (".", "path component"),
+            ("..", "unvalidated file committed"),
+            ("", "git diff-tree failed"),
+        ];
+        let mut failures = Vec::new();
+        for (component, expected) in rows {
+            let listing =
+                format!("100644 blob {validated_blob}\tf\n040000 tree {subtree}\t{component}\n");
+            let commit = commit_of_templates(&git, dir, &base, &listing);
+            let verdict = engine.validate_committed_tree(
+                dir,
+                &commit,
+                &base,
+                &paths,
+                &validated,
+                &commit_tree_id(&git, dir, &commit),
+            );
+            if !matches!(&verdict, Err(err) if err.contains(expected)) {
+                failures.push(format!(
+                    "subtree named {component:?}: {verdict:?}, expected {expected:?}"
+                ));
+            }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+
+    #[test]
+    fn test_committed_gate_reads_blob_past_replace_ref() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let (repo, base) = templates_repo(&git, &[("f", "f base\n")]);
+        let dir = repo.path();
+        let validated_blob = write_blob(&git, dir, b"f new\n");
+        let injected_blob = write_blob(&git, dir, b"INJECTED_BY_HOOK\n");
+        let listing = format!("100644 blob {injected_blob}\tf\n");
+        let commit = commit_of_templates(&git, dir, &base, &listing);
+        git.run(dir, &["replace", "-f", &injected_blob, &validated_blob]);
+        // Opposite direction: a read honouring replace refs returns the validated bytes.
+        assert_eq!(
+            git.output(dir, &["cat-file", "blob", &injected_blob]),
+            "f new"
+        );
+
+        let paths: HashSet<PathBuf> = [PathBuf::from("templates/f")].into_iter().collect();
+        let validated = templates_record(dir, &[("f", b"f new\n")]);
+        let err = engine
+            .validate_committed_tree(
+                dir,
+                &commit,
+                &base,
+                &paths,
+                &validated,
+                &commit_tree_id(&git, dir, &commit),
+            )
+            .expect_err("the injected blob must be read past the replace ref");
+        assert!(err.contains("differs from the validated content"), "{err}");
     }
 
     #[test]
