@@ -236,7 +236,7 @@ None. No fix was needed beyond the plan's tasks.
 
 ## Issues Encountered
 
-None.
+- **My mistake, undone before any commit:** I first ran `requirements.mark-complete SEC-04 SEC-02` as the executor prompt's short form says. That flipped both from `Gaps Found` to `Complete`. The workflow gates this step on `requirements.ready-ids`, which reports both blocked because plan 02-15 also declares them and has no SUMMARY yet. I restored `.planning/REQUIREMENTS.md` with `git checkout` on that one file, so it still reads `Gaps Found` for both. Recorded in the GSD manual-fix incident log.
 
 ## For plan 02-15
 
@@ -249,7 +249,6 @@ None.
 
 - `cargo mutants --list` over `run_push|run_bounded_ignoring_grafts|remote_branch_is_at` gives 6 mutants. The 2 for `run_push` and `run_bounded_ignoring_grafts` are `Ok(Default::default())`, and `RunOutput` has no `Default`, so I expect both to come out unviable (not run). The mutation run would then say nothing about those two functions; rows 18, 19 and 22 are what cover them.
 - `spawn_prepared` holds `run_bounded`'s former body and is outside the mutation regex. Its code moved without a behaviour change, and the existing process tests run through it. Whether to add it is that plan's call.
-- Row 22's test list, as far as I read it, names `test_cli_direct_push_alone_...`. The PR CLI test fails on the same removal by construction, and including it would be accurate.
 - Rows 18 to 23 name functions and tests that all exist under those names. The rows themselves were not run here.
 
 ## Threat Flags

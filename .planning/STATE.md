@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 02
 current_phase_name: Sanitizer, Boundaries & Security Hardening
 status: executing
-stopped_at: Completed 02-13-PLAN.md
-last_updated: "2026-11-02T16:46:40.478Z"
+stopped_at: Completed 02-14-PLAN.md
+last_updated: "2026-11-02T17:02:48.437Z"
 last_activity: 2026-11-02
 last_activity_desc: Phase 02 execution started
-state_head: 0ea4afefbc020aeb64415ae930c1c20ceb47d86f
+state_head: 21a65baf4b638da1e12e4e4d8dec1bd444ac3c3e
 progress:
   total_phases: 4
   completed_phases: 1
   total_plans: 26
-  completed_plans: 24
+  completed_plans: 25
   percent: 25
 milestone: null
 ---
@@ -29,7 +29,7 @@ See: `.planning/PROJECT.md` (updated 2026-10-22)
 ## Current Position
 
 Phase: 02 (Sanitizer, Boundaries & Security Hardening) — EXECUTING
-Plan: 14 of 15
+Plan: 15 of 15
 Status: Ready to execute
 Last activity: 2026-11-02 — Phase 02 execution started
 
@@ -84,6 +84,7 @@ Progress: [███░░░░░░░] 25%
 | Phase 02 P11 | 15 min | 3 tasks | 1 files |
 | Phase 02 P12 | 32 min | 3 tasks | 1 files |
 | Phase 02 P13 | 22 min | 2 tasks | 1 files |
+| Phase 02 P14 | 12min | 3 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -156,6 +157,9 @@ Recent decisions affecting current work:
 - [Phase 02]: 02-13: stage_publication records the staged tree id with git write-tree, before PR mode's checkout, and the committed gate requires the raw commit's first line to hold that id byte for byte, as its last check
 - [Phase 02]: 02-13: the committed gate reads each listed blob by its own id, refuses a repeated path or a bad path component from the raw listing, and requires every recorded path to hold its recorded content; no separate refusal of a D entry, so a deletion with no record still publishes
 - [Phase 02]: 02-13: read_blob_by_id refuses an object that is not a blob, because cat-file blob peels a tag; added during execution after a probe published a tag object through the real push in both modes
+- [Phase 02]: 02-14: push_direct and push_pr_branch run through SyncEngine::run_push, which sets GIT_GRAFT_FILE to the constant process::NULL_DEVICE after prepare_command's scrub; refuse_grafts_file stays by operator decision 2026-10-28
+- [Phase 02]: 02-14: both pushes add -c advice.graftFileDeprecated=false, because with GIT_GRAFT_FILE naming an existing file the hint takes lines of a refusal's 5-line excerpt
+- [Phase 02]: 02-14: push_direct returns Failed (exit 2) instead of UpstreamMoved when a non-fast-forward refusal comes with git ls-remote reporting the branch at the fetched commit; that read is hook-steerable, so only the wording of a refusal depends on it
 
 ### Pending Todos
 
@@ -195,6 +199,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-02T16:46:40.235Z
-Stopped at: Completed 02-13-PLAN.md
+Last session: 2026-11-02T17:02:48.228Z
+Stopped at: Completed 02-14-PLAN.md
 Resume file: None
