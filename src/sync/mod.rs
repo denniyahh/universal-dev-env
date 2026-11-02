@@ -12770,6 +12770,182 @@ byte() { printf "\\$(printf '%03o' "$1")"; }
         assert_eq!(git_path_bytes(&joined), b"templates/a/b");
     }
 
+    /// A tree object whose only entry is `mode name` pointing at `oid`, whatever type that
+    /// object has; `git mktree` refuses a type that disagrees with the mode.
+    #[cfg(unix)]
+    fn literal_tree(git: &GitFixture, repo: &Path, mode_and_name: &str, oid: &str) -> String {
+        let mut raw = format!("{mode_and_name}\0").into_bytes();
+        for pair in oid.as_bytes().chunks(2) {
+            let pair = std::str::from_utf8(pair).unwrap();
+            raw.push(u8::from_str_radix(pair, 16).unwrap());
+        }
+        git_with_input(
+            git,
+            repo,
+            &["hash-object", "-w", "-t", "tree", "--literally", "--stdin"],
+            &raw,
+        )
+    }
+
+    /// An annotated tag on `blob`, its text a hook's, in `repo`; returns the tag object's id.
+    #[cfg(unix)]
+    fn tag_on_blob(git: &GitFixture, repo: &Path, blob: &str) -> String {
+        git.run(
+            repo,
+            &["tag", "-a", "ude-test-tag", "-m", "INJECTED_TAG_TEXT", blob],
+        );
+        git.output(repo, &["rev-parse", "ude-test-tag"])
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_committed_gate_refuses_tag_object_at_validated_path() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let (repo, base) = templates_repo(&git, &[("f", "f base\n")]);
+        let dir = repo.path();
+        let validated_blob = write_blob(&git, dir, b"f new\n");
+        let tag = tag_on_blob(&git, dir, &validated_blob);
+        let templates = literal_tree(&git, dir, "100644 f", &tag);
+        let root = git_with_input(
+            &git,
+            dir,
+            &["mktree"],
+            format!("040000 tree {templates}\ttemplates\n").as_bytes(),
+        );
+        let commit = git_with_input(
+            &git,
+            dir,
+            &["commit-tree", &root, "-p", &base],
+            format!("{SYNC_COMMIT_MESSAGE}\n").as_bytes(),
+        );
+        // Opposite direction: the plain read peels the tag to the validated bytes, and a
+        // plain push sends the tag object with its text.
+        assert_eq!(git.output(dir, &["cat-file", "blob", &tag]), "f new");
+        let control = push_to_fresh_bare(&git, dir, &commit, &[], false);
+        assert!(holds_object(&git, control.path(), &tag));
+
+        let paths: HashSet<PathBuf> = [PathBuf::from("templates/f")].into_iter().collect();
+        let validated = templates_record(dir, &[("f", b"f new\n")]);
+        let err = engine
+            .validate_committed_tree(dir, &commit, &base, &paths, &validated, &root)
+            .expect_err("a tag object at a validated path must be refused");
+        assert!(err.contains("failed to inspect committed blob"), "{err}");
+    }
+
+    /// Pushes with a `core.fsmonitor` script that reads `swapped_root` (made by `build_root`
+    /// from the checkout) into the index as the staged gate reads the last blob, so the tree
+    /// recorded next holds what the gate never read. The script stands in for any process
+    /// that changes the index in that window. `hook_ran` is the script's marker.
+    #[cfg(target_os = "linux")]
+    fn push_with_index_swap(
+        git: &GitFixture,
+        engine: &SyncEngine,
+        open_pr: bool,
+        build_root: impl FnOnce(&Path) -> String,
+    ) -> HookedPush {
+        let mut pushed = push_managed_file(git, engine, open_pr, HOOKED_TEMPLATE, |repo| {
+            use std::os::unix::fs::PermissionsExt;
+            let swapped_root = build_root(repo);
+            let script = repo.join(".git/ude-test-fsmonitor");
+            fs::write(
+                &script,
+                format!(
+                    "#!/bin/sh\ncase \"$(tr '\\0' ' ' < /proc/$PPID/cmdline)\" in\n  *' show :'*) ;;\n  *) exit 1 ;;\nesac\n[ -e .git/ude-test-hook-ran ] && exit 1\n: > .git/ude-test-hook-ran\ngit read-tree {swapped_root}\nexit 1\n"
+                ),
+            )
+            .unwrap();
+            fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+            git.run(
+                repo,
+                &["config", "core.fsmonitor", script.to_str().unwrap()],
+            );
+        });
+        pushed.hook_ran = pushed.checkout.join(".git/ude-test-hook-ran").exists();
+        pushed
+    }
+
+    /// The root tree holding `generic` (the tree of `generic/`) on the managed file's path.
+    #[cfg(target_os = "linux")]
+    fn root_over_generic(git: &GitFixture, repo: &Path, generic: &str) -> String {
+        let mktree_one = |entry: String| git_with_input(git, repo, &["mktree"], entry.as_bytes());
+        let projects = mktree_one(format!("040000 tree {generic}\tgeneric\n"));
+        let templates = mktree_one(format!("040000 tree {projects}\tprojects\n"));
+        mktree_one(format!("040000 tree {templates}\ttemplates\n"))
+    }
+
+    /// A tag object swapped in at the managed path is refused, reaches no remote, and a
+    /// plain push of the same tree delivers it.
+    #[cfg(target_os = "linux")]
+    fn assert_index_swap_to_tag_refused(open_pr: bool) {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let pushed = push_with_index_swap(&git, &engine, open_pr, |repo| {
+            let validated_blob = write_blob(&git, repo, HOOKED_TEMPLATE.as_bytes());
+            let tag = tag_on_blob(&git, repo, &validated_blob);
+            let generic = literal_tree(&git, repo, "100644 gitconfig.repo", &tag);
+            root_over_generic(&git, repo, &generic)
+        });
+        let err = assert_hook_refused(&git, &pushed);
+        assert!(err.contains("failed to inspect committed blob"), "{err}");
+        let tag = git.output(&pushed.checkout, &["rev-parse", "ude-test-tag"]);
+        assert!(
+            !holds_object(&git, pushed.bare.path(), &tag),
+            "the remote holds the tag object"
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_direct_push_refuses_index_swap_to_tag_object() {
+        assert_index_swap_to_tag_refused(false);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_pr_push_refuses_index_swap_to_tag_object() {
+        assert_index_swap_to_tag_refused(true);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_push_refuses_index_swap_to_injected_blob() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let pushed = push_with_index_swap(&git, &engine, false, |repo| {
+            let injected = write_blob(&git, repo, b"INJECTED_BY_HOOK\n");
+            let generic = git_with_input(
+                &git,
+                repo,
+                &["mktree"],
+                format!("100644 blob {injected}\tgitconfig.repo\n").as_bytes(),
+            );
+            root_over_generic(&git, repo, &generic)
+        });
+        let err = assert_hook_refused(&git, &pushed);
+        assert!(err.contains("differs from the validated content"), "{err}");
+    }
+
+    /// The same index read back unchanged publishes, so the refusals above come from what
+    /// the swap put in the tree and not from the script running.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_push_publishes_with_index_swap_to_the_staged_tree() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let pushed = push_with_index_swap(&git, &engine, false, |repo| {
+            let validated_blob = write_blob(&git, repo, HOOKED_TEMPLATE.as_bytes());
+            let generic = git_with_input(
+                &git,
+                repo,
+                &["mktree"],
+                format!("100644 blob {validated_blob}\tgitconfig.repo\n").as_bytes(),
+            );
+            root_over_generic(&git, repo, &generic)
+        });
+        assert_published_exact(&git, &pushed, false);
+    }
+
     #[test]
     #[cfg(unix)]
     fn test_pr_push_publishes_deletion() {
