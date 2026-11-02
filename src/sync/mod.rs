@@ -2538,9 +2538,17 @@ impl SyncEngine {
     }
 
     /// The exact bytes of the blob `oid`, past any replace ref. `None` on a spawn error, a
-    /// non-zero exit (a gitlink's id, for one) or an id that is not UTF-8.
+    /// non-zero exit (a gitlink's id, for one), an id that is not UTF-8 or an object that is
+    /// not a blob: `cat-file blob` peels a tag, and a tree can list a tag at a file's place,
+    /// which would read as the tagged bytes while the push sends the tag's own text (probed).
     fn read_blob_by_id(&self, repo: &Path, oid: &[u8]) -> Option<Vec<u8>> {
         let oid = std::str::from_utf8(oid).ok()?;
+        let mut object_type = self.git(Some(repo));
+        object_type.args(["--no-replace-objects", "cat-file", "-t", oid]);
+        let object_type = self.run_local(object_type, "git cat-file").ok()?;
+        if !object_type.status.success() || object_type.stdout.trim_ascii_end() != b"blob" {
+            return None;
+        }
         let mut cat_file = self.git(Some(repo));
         cat_file.args(["--no-replace-objects", "cat-file", "blob", oid]);
         let out = self.run_local(cat_file, "git cat-file").ok()?;
