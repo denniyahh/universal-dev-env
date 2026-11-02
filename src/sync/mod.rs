@@ -2268,11 +2268,13 @@ impl SyncEngine {
     }
 
     /// Validates `commit` (a full object id) before pushing it, as the only commit the
-    /// push adds on top of `base` (the fetched head): it has exactly one parent, `base`;
-    /// its message is the sync commit message and its header is free of secrets; every
-    /// file it changes is on the allowlist `paths` (relative to `repo`), free of secrets
-    /// and identical to what `validated` recorded; its tree holds no empty directory; and
-    /// that tree is `staged_tree`, the id [`Self::stage_publication`] recorded.
+    /// push adds on top of `base` (the fetched head). In the order it checks: it has exactly
+    /// one parent, `base`; its message is the sync commit message and its header is free of
+    /// secrets; every blob it changes, read by object id, is on the allowlist `paths`
+    /// (relative to `repo`), free of secrets and identical to what `validated` recorded; its
+    /// tree repeats no path and has no path component that is empty, `.` or `..`; it holds
+    /// no empty directory; every path `validated` recorded holds its recorded content; and
+    /// its tree is `staged_tree`, the id [`Self::stage_publication`] recorded.
     fn validate_committed_tree(
         &self,
         repo: &Path,
@@ -2359,8 +2361,9 @@ impl SyncEngine {
             "--no-replace-objects",
             "diff-tree",
             "-r",
+            "-z",
+            "--raw",
             "--no-commit-id",
-            "--name-status",
             "--no-renames",
             base,
             commit,
@@ -2373,43 +2376,38 @@ impl SyncEngine {
             return Err("git diff-tree failed in remote checkout".to_string());
         }
 
-        let committed_output = String::from_utf8_lossy(&diff_tree.stdout);
+        // A tree can list one name twice, and a lookup by name returns one of the entries
+        // while the push sends both (probed), so each listed blob is read by its own id.
+        // Paths and ids are hook-chosen bytes: a refusal below never prints a listed name
+        // that has not passed the allowlist.
+        let Some(entries) = raw_diff_entries(&diff_tree.stdout) else {
+            return Err(
+                "Post-commit publication gate violation: unparseable committed entry".to_string(),
+            );
+        };
         let validated_rel = validated.relative_to(repo);
-        for line in committed_output.lines() {
-            if line.trim().is_empty() {
-                continue;
-            }
-            let Some((status, p)) = parse_name_status(line) else {
-                return Err(format!(
-                    "Post-commit publication gate violation: unparseable committed entry: {line}"
-                ));
+        for entry in entries {
+            // A path that is not valid UTF-8 cannot be on the allowlist.
+            let path = std::str::from_utf8(entry.path).ok().map(PathBuf::from);
+            let Some(p) = path.filter(|path| paths.contains(path)) else {
+                return Err(
+                    "Post-commit publication gate violation: unvalidated file committed in HEAD"
+                        .to_string(),
+                );
             };
-            if !paths.contains(&p) {
-                return Err(format!(
-                    "Post-commit publication gate violation: unvalidated file committed in HEAD: {}",
-                    p.display()
-                ));
-            }
             // A deletion publishes no blob; every other entry is scanned.
-            if status.starts_with('D') {
+            if entry.status == b'D' {
                 continue;
             }
 
-            let show_arg = format!("{commit}:{}", p.to_string_lossy());
-            let mut show = self.git(Some(repo));
-            show.args(["--no-replace-objects", "show", &show_arg]);
-            let blob_res = self
-                .run_local(show, "git show")
-                .map_err(|e| format!("Failed to read committed blob for {}: {e}", p.display()))?;
-
-            if !blob_res.status.success() {
+            let Some(blob) = self.read_blob_by_id(repo, entry.new_oid) else {
                 return Err(format!(
                     "Post-commit publication gate violation: failed to inspect committed blob for {}",
                     p.display()
                 ));
-            }
+            };
 
-            if let Some(finding) = self.sanitizer.scan_bytes(&blob_res.stdout, &p) {
+            if let Some(finding) = self.sanitizer.scan_bytes(&blob, &p) {
                 return Err(format!(
                     "Post-commit publication gate violation: secret detected in committed HEAD blob {}: {}",
                     p.display(),
@@ -2426,7 +2424,7 @@ impl SyncEngine {
                         p.display()
                     ));
                 }
-                Some(digest) if *digest != Self::fingerprint(&blob_res.stdout) => {
+                Some(digest) if *digest != Self::fingerprint(&blob) => {
                     return Err(format!(
                         "Post-commit publication gate violation: committed HEAD blob {} differs from the validated content",
                         p.display()
@@ -2461,6 +2459,29 @@ impl SyncEngine {
                 &listing,
             ));
         }
+        // The staged tree is read too, not trusted: a post-index-change hook can put a
+        // repeated path into it before its id is recorded, and the recorded id then matches
+        // (probed). None of these refusals prints a name.
+        let listed_blobs = match tree_listing_blobs(&listing.stdout) {
+            Ok(blobs) => blobs,
+            Err(TreeDefect::Unparseable) => {
+                return Err(format!(
+                    "Post-commit publication gate violation: unparseable tree entry in {commit}"
+                ));
+            }
+            Err(TreeDefect::RepeatedPath) => {
+                return Err(
+                    "Post-commit publication gate violation: the tree of the commit to publish repeats a path"
+                        .to_string(),
+                );
+            }
+            Err(TreeDefect::BadComponent) => {
+                return Err(
+                    "Post-commit publication gate violation: the tree of the commit to publish has a path component that is empty, `.` or `..`"
+                        .to_string(),
+                );
+            }
+        };
         match count_empty_directories(&listing.stdout) {
             None => {
                 return Err(format!(
@@ -2476,6 +2497,8 @@ impl SyncEngine {
             }
         }
 
+        self.require_validated_content(repo, &listed_blobs, &validated_rel)?;
+
         // Everything above read what the commit holds, and this binds it: no hook that ran
         // after the tree was recorded can have changed a name, a mode or a blob, and a hook
         // that keeps the content keeps the id and still publishes. It runs last so a refusal
@@ -2487,6 +2510,41 @@ impl SyncEngine {
             );
         }
         Ok(())
+    }
+
+    /// Every path in the record (`validated_rel`) must hold its recorded content as a regular
+    /// file in `listed_blobs` ([`tree_listing_blobs`]), so a push returning Ok has published
+    /// it. One check covers a deletion and a revert, and a deletion nothing validated has no
+    /// record, so it still publishes.
+    fn require_validated_content(
+        &self,
+        repo: &Path,
+        listed_blobs: &HashMap<&[u8], &[u8]>,
+        validated_rel: &HashMap<PathBuf, &str>,
+    ) -> Result<(), String> {
+        for (path, digest) in validated_rel {
+            let held = listed_blobs
+                .get(git_path_bytes(path).as_slice())
+                .and_then(|oid| self.read_blob_by_id(repo, oid))
+                .is_some_and(|blob| Self::fingerprint(&blob) == *digest);
+            if !held {
+                return Err(format!(
+                    "Post-commit publication gate violation: the commit to publish does not hold the validated content of {}",
+                    path.display()
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// The exact bytes of the blob `oid`, past any replace ref. `None` on a spawn error, a
+    /// non-zero exit (a gitlink's id, for one) or an id that is not UTF-8.
+    fn read_blob_by_id(&self, repo: &Path, oid: &[u8]) -> Option<Vec<u8>> {
+        let oid = std::str::from_utf8(oid).ok()?;
+        let mut cat_file = self.git(Some(repo));
+        cat_file.args(["--no-replace-objects", "cat-file", "blob", oid]);
+        let out = self.run_local(cat_file, "git cat-file").ok()?;
+        out.status.success().then_some(out.stdout)
     }
 }
 
@@ -2529,6 +2587,47 @@ fn raw_commit_parts(raw: &[u8]) -> Option<(&[u8], &[u8])> {
     raw.windows(2)
         .position(|pair| pair == b"\n\n")
         .map(|last_header_byte| (&raw[..=last_header_byte], &raw[last_header_byte + 2..]))
+}
+
+/// One record of `diff-tree -r -z --raw` output, as raw bytes.
+struct RawDiffEntry<'a> {
+    new_oid: &'a [u8],
+    status: u8,
+    path: &'a [u8],
+}
+
+/// Parses `diff-tree -r -z --raw` output (records `:<old mode> <new mode> <old id> <new id>
+/// <status>` NUL `<path>` NUL) with no decoding. `None` for a record it cannot parse, so the
+/// caller fails closed.
+fn raw_diff_entries(raw: &[u8]) -> Option<Vec<RawDiffEntry<'_>>> {
+    let mut entries = Vec::new();
+    let mut rest = raw;
+    while !rest.is_empty() {
+        let (record, after_record) = split_at_nul(rest)?;
+        let (path, after_path) = split_at_nul(after_record)?;
+        if path.is_empty() {
+            return None;
+        }
+        let mut fields = record.strip_prefix(b":")?.split(|byte| *byte == b' ');
+        let (_old_mode, _new_mode, _old_oid) = (fields.next()?, fields.next()?, fields.next()?);
+        let (new_oid, status) = (fields.next()?, *fields.next()?.first()?);
+        if fields.next().is_some() {
+            return None;
+        }
+        entries.push(RawDiffEntry {
+            new_oid,
+            status,
+            path,
+        });
+        rest = after_path;
+    }
+    Some(entries)
+}
+
+/// The bytes before the first NUL and the bytes after it; `None` when there is no NUL.
+fn split_at_nul(bytes: &[u8]) -> Option<(&[u8], &[u8])> {
+    let nul = bytes.iter().position(|byte| *byte == 0)?;
+    Some((&bytes[..nul], &bytes[nul + 1..]))
 }
 
 /// Removes every `GIT_TEST_*` variable from `command`'s environment: the keys of
@@ -2576,6 +2675,58 @@ fn count_empty_directories(listing: &[u8]) -> Option<usize> {
             .filter(|tree| !ancestors.contains(tree))
             .count(),
     )
+}
+
+/// Why [`tree_listing_blobs`] refused a listing.
+#[derive(Debug, PartialEq, Eq)]
+enum TreeDefect {
+    /// A record it cannot parse.
+    Unparseable,
+    /// A path, blob or tree, listed twice.
+    RepeatedPath,
+    /// A path component that is empty, `.` or `..`.
+    BadComponent,
+}
+
+/// Reads `ls-tree -r -t -z` output (records `<mode> SP <type> SP <oid> TAB <path>`, each ended
+/// by NUL) and refuses a repeated path, blob or tree, and any path component that is empty,
+/// `.` or `..`, compared as raw bytes. Returns path to object id for regular files only (type
+/// blob, mode 100644 or 100755).
+fn tree_listing_blobs(listing: &[u8]) -> Result<HashMap<&[u8], &[u8]>, TreeDefect> {
+    let mut seen = HashSet::new();
+    let mut blobs = HashMap::new();
+    for record in listing.split_inclusive(|byte| *byte == 0) {
+        let record = record.strip_suffix(&[0]).ok_or(TreeDefect::Unparseable)?;
+        let mut fields = record.splitn(2, |byte| *byte == b'\t');
+        let (meta, path) = match (fields.next(), fields.next()) {
+            (Some(meta), Some(path)) => (meta, path),
+            _ => return Err(TreeDefect::Unparseable),
+        };
+        let meta: Vec<&[u8]> = meta.split(|byte| *byte == b' ').collect();
+        let [mode, kind, oid] = meta.as_slice() else {
+            return Err(TreeDefect::Unparseable);
+        };
+        let bad_component = |component: &[u8]| matches!(component, b"" | b"." | b"..");
+        if path.split(|byte| *byte == b'/').any(bad_component) {
+            return Err(TreeDefect::BadComponent);
+        }
+        if !seen.insert(path) {
+            return Err(TreeDefect::RepeatedPath);
+        }
+        if *kind == b"blob" && matches!(*mode, b"100644" | b"100755") {
+            blobs.insert(path, *oid);
+        }
+    }
+    Ok(blobs)
+}
+
+/// The raw bytes of `path`'s components joined by `/`, the way a git tree listing spells it.
+fn git_path_bytes(path: &Path) -> Vec<u8> {
+    let components: Vec<&[u8]> = path
+        .components()
+        .map(|component| component.as_os_str().as_encoded_bytes())
+        .collect();
+    components.join(&b'/')
 }
 
 /// Appends the redacted stderr excerpt of a failed git/gh run to `message`.
@@ -12305,6 +12456,318 @@ byte() { printf "\\$(printf '%03o' "$1")"; }
             )
             .expect_err("the injected blob must be read past the replace ref");
         assert!(err.contains("differs from the validated content"), "{err}");
+    }
+
+    /// `:100644 100644 <id> <id> <status>` NUL `<path>` NUL, the shape `diff-tree -z --raw` prints.
+    fn raw_diff_record(id: &str, status: &str, path: &[u8]) -> Vec<u8> {
+        let mut record = format!(":100644 100644 {id} {id} {status}\0").into_bytes();
+        record.extend_from_slice(path);
+        record.push(0);
+        record
+    }
+
+    #[test]
+    fn test_raw_diff_entries() {
+        let id = "a".repeat(40);
+        let long_id = "b".repeat(64);
+        let zero = "0".repeat(40);
+        let deletion = format!(":100644 000000 {id} {zero} D\0gone\0").into_bytes();
+        let type_change = format!(":100644 120000 {id} {id} T\0link\0").into_bytes();
+        let non_utf8: &[u8] = &[b'a', 0xFF, b'\t', b'\n', b'z'];
+        let as_tuples = |raw: &[u8]| {
+            raw_diff_entries(raw).map(|entries| {
+                entries
+                    .iter()
+                    .map(|e| (e.status, e.new_oid.to_vec(), e.path.to_vec()))
+                    .collect::<Vec<_>>()
+            })
+        };
+
+        let rows = vec![
+            ("empty input", Vec::new(), Some(vec![])),
+            (
+                "modify then add",
+                [
+                    raw_diff_record(&id, "M", b"a/b"),
+                    raw_diff_record(&id, "A", b"c"),
+                ]
+                .concat(),
+                Some(vec![
+                    (b'M', id.clone().into_bytes(), b"a/b".to_vec()),
+                    (b'A', id.clone().into_bytes(), b"c".to_vec()),
+                ]),
+            ),
+            (
+                "a deletion has an all-zero new id",
+                deletion,
+                Some(vec![(b'D', zero.clone().into_bytes(), b"gone".to_vec())]),
+            ),
+            (
+                "a type change",
+                type_change,
+                Some(vec![(b'T', id.clone().into_bytes(), b"link".to_vec())]),
+            ),
+            (
+                "a path with a tab, a newline and non-UTF-8 bytes",
+                raw_diff_record(&id, "M", non_utf8),
+                Some(vec![(b'M', id.clone().into_bytes(), non_utf8.to_vec())]),
+            ),
+            (
+                "a 64-hex id",
+                raw_diff_record(&long_id, "M", b"p"),
+                Some(vec![(b'M', long_id.clone().into_bytes(), b"p".to_vec())]),
+            ),
+            (
+                "a missing path field",
+                format!(":100644 100644 {id} {id} M\0").into_bytes(),
+                None,
+            ),
+            (
+                "an unterminated path",
+                format!(":100644 100644 {id} {id} M\0p").into_bytes(),
+                None,
+            ),
+            (
+                "an empty path",
+                format!(":100644 100644 {id} {id} M\0\0").into_bytes(),
+                None,
+            ),
+            (
+                "a record without a colon",
+                format!("100644 100644 {id} {id} M\0p\0").into_bytes(),
+                None,
+            ),
+            (
+                "too few fields",
+                format!(":100644 100644 {id} M\0p\0").into_bytes(),
+                None,
+            ),
+            (
+                "too many fields",
+                format!(":100644 100644 {id} {id} M x\0p\0").into_bytes(),
+                None,
+            ),
+            (
+                "an empty status",
+                format!(":100644 100644 {id} {id} \0p\0").into_bytes(),
+                None,
+            ),
+        ];
+        let mut failures = Vec::new();
+        for (name, raw, expected) in rows {
+            let actual = as_tuples(&raw);
+            if actual != expected {
+                failures.push(format!("{name}: {actual:?} != {expected:?}"));
+            }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+
+    proptest::proptest! {
+        /// Whatever bytes a hook puts in a path, the parse returns each status, new id and
+        /// path unchanged and in order; output cut before its last path never parses; and
+        /// no input panics.
+        #[test]
+        fn prop_raw_diff_entries_round_trips(
+            entries in proptest::collection::vec(
+                (
+                    proptest::sample::select(vec!["M", "A", "D", "T"]),
+                    "[0-9a-f]{40}|[0-9a-f]{64}",
+                    proptest::collection::vec(1u8..=255u8, 1..=23usize),
+                ),
+                0..=5usize,
+            ),
+            random in proptest::collection::vec(proptest::num::u8::ANY, 0..256usize),
+        ) {
+            let raw: Vec<u8> = entries
+                .iter()
+                .flat_map(|(status, id, path)| raw_diff_record(id, status, path))
+                .collect();
+            let parsed = raw_diff_entries(&raw).expect("generated output parses");
+            proptest::prop_assert_eq!(parsed.len(), entries.len());
+            for (entry, (status, id, path)) in parsed.iter().zip(&entries) {
+                proptest::prop_assert_eq!(entry.status, status.as_bytes()[0]);
+                proptest::prop_assert_eq!(entry.new_oid, id.as_bytes());
+                proptest::prop_assert_eq!(entry.path, path.as_slice());
+            }
+            if let Some((_, _, last_path)) = entries.last() {
+                let cut = &raw[..raw.len() - last_path.len() - 1];
+                proptest::prop_assert!(raw_diff_entries(cut).is_none());
+            }
+            let _ = raw_diff_entries(&random);
+        }
+    }
+
+    /// `<mode> <kind> <id>` TAB `<path>` NUL, the shape `ls-tree -r -t -z` prints.
+    fn tree_listing_record(mode: &str, kind: &str, id: &str, path: &[u8]) -> Vec<u8> {
+        let mut record = format!("{mode} {kind} {id}\t").into_bytes();
+        record.extend_from_slice(path);
+        record.push(0);
+        record
+    }
+
+    #[test]
+    fn test_tree_listing_blobs() {
+        use TreeDefect::{BadComponent, RepeatedPath, Unparseable};
+        let id = "c".repeat(40);
+        let blob = |path: &[u8]| tree_listing_record("100644", "blob", &id, path);
+        let tree = |path: &[u8]| tree_listing_record("040000", "tree", &id, path);
+        let non_utf8: &[u8] = &[b'a', 0xFF, b'\t', b'z'];
+
+        // The paths a listing must expose as regular files; each row starts from no defect.
+        let good = vec![
+            ("a 100644 blob", blob(b"a"), vec![b"a".as_slice()]),
+            (
+                "a 100755 blob",
+                tree_listing_record("100755", "blob", &id, b"a"),
+                vec![b"a".as_slice()],
+            ),
+            (
+                "a symlink is not a regular file",
+                tree_listing_record("120000", "blob", &id, b"a"),
+                vec![],
+            ),
+            (
+                "a gitlink is not a regular file",
+                tree_listing_record("160000", "commit", &id, b"a"),
+                vec![],
+            ),
+            ("a tree is not a regular file", tree(b"a"), vec![]),
+            (
+                "names merely containing dots",
+                [blob(b"a.b"), blob(b"...")].concat(),
+                vec![b"a.b".as_slice(), b"...".as_slice()],
+            ),
+            (
+                "a path with a tab and non-UTF-8 bytes",
+                blob(non_utf8),
+                vec![non_utf8],
+            ),
+            ("empty input", Vec::new(), vec![]),
+        ];
+        let bad = vec![
+            (
+                "a repeated blob path",
+                [blob(b"a"), blob(b"a")].concat(),
+                RepeatedPath,
+            ),
+            (
+                "a repeated tree path",
+                [tree(b"a"), tree(b"a")].concat(),
+                RepeatedPath,
+            ),
+            (
+                "a blob and a tree at one path",
+                [blob(b"a"), tree(b"a")].concat(),
+                RepeatedPath,
+            ),
+            ("a/./b", blob(b"a/./b"), BadComponent),
+            ("a/../b", blob(b"a/../b"), BadComponent),
+            ("a//b", blob(b"a//b"), BadComponent),
+            (".", tree(b"."), BadComponent),
+            ("..", tree(b".."), BadComponent),
+            ("a leading slash", blob(b"/a"), BadComponent),
+            ("a trailing slash", blob(b"a/"), BadComponent),
+            (
+                "a record without a tab",
+                format!("100644 blob {id}\0").into_bytes(),
+                Unparseable,
+            ),
+            (
+                "too few metadata fields",
+                format!("100644 {id}\ta\0").into_bytes(),
+                Unparseable,
+            ),
+            (
+                "too many metadata fields",
+                format!("100644 blob {id} x\ta\0").into_bytes(),
+                Unparseable,
+            ),
+            (
+                "an unterminated record",
+                format!("100644 blob {id}\ta").into_bytes(),
+                Unparseable,
+            ),
+        ];
+        let mut failures = Vec::new();
+        for (name, listing, expected_paths) in good {
+            match tree_listing_blobs(&listing) {
+                Ok(blobs) => {
+                    let holds_all = expected_paths
+                        .iter()
+                        .all(|path| blobs.get(path) == Some(&id.as_bytes()));
+                    if !holds_all || blobs.len() != expected_paths.len() {
+                        failures.push(format!("{name}: {blobs:?}"));
+                    }
+                }
+                Err(defect) => failures.push(format!("{name}: {defect:?}")),
+            }
+        }
+        for (name, listing, expected) in bad {
+            match tree_listing_blobs(&listing) {
+                Err(defect) if defect == expected => {}
+                other => failures.push(format!("{name}: {other:?}, expected {expected:?}")),
+            }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+
+    /// One to three path components, each 1 to 5 bytes from 1 to 255, none of them `/`, `.`
+    /// or `..`.
+    fn listed_path_strategy() -> impl proptest::strategy::Strategy<Value = Vec<u8>> {
+        use proptest::strategy::Strategy as _;
+        let component = proptest::collection::vec(1u8..=255u8, 1..=5usize)
+            .prop_filter("a name git can list", |name| {
+                !name.contains(&b'/') && name != b"." && name != b".."
+            });
+        proptest::collection::vec(component, 1..=3usize).prop_map(|names| names.join(&b'/'))
+    }
+
+    proptest::proptest! {
+        /// Whatever bytes a hook puts in a name, every listed path comes back with its id;
+        /// one more record for a listed path, or a record below it through `.`, is refused;
+        /// and no input panics.
+        #[test]
+        fn prop_tree_listing_blobs_round_trips(
+            paths in proptest::collection::hash_set(listed_path_strategy(), 1..=5usize),
+            id in "[0-9a-f]{40}",
+            random in proptest::collection::vec(proptest::num::u8::ANY, 0..256usize),
+        ) {
+            let listing: Vec<u8> = paths
+                .iter()
+                .flat_map(|path| tree_listing_record("100644", "blob", &id, path))
+                .collect();
+            let blobs = tree_listing_blobs(&listing).expect("generated output parses");
+            proptest::prop_assert_eq!(blobs.len(), paths.len());
+            for path in &paths {
+                proptest::prop_assert_eq!(blobs.get(path.as_slice()), Some(&id.as_bytes()));
+            }
+
+            let listed = paths.iter().next().expect("at least one path");
+            let mut repeated = listing.clone();
+            repeated.extend(tree_listing_record("100644", "blob", &id, listed));
+            proptest::prop_assert_eq!(
+                tree_listing_blobs(&repeated).err(),
+                Some(TreeDefect::RepeatedPath)
+            );
+
+            let mut below_dot = listing.clone();
+            let dotted = [listed.as_slice(), b"/./x"].concat();
+            below_dot.extend(tree_listing_record("100644", "blob", &id, &dotted));
+            proptest::prop_assert_eq!(
+                tree_listing_blobs(&below_dot).err(),
+                Some(TreeDefect::BadComponent)
+            );
+
+            let _ = tree_listing_blobs(&random);
+        }
+    }
+
+    #[test]
+    fn test_git_path_bytes() {
+        let joined = Path::new("templates").join("a").join("b");
+        assert_eq!(git_path_bytes(Path::new("templates/a/b")), b"templates/a/b");
+        assert_eq!(git_path_bytes(&joined), b"templates/a/b");
     }
 
     #[test]
