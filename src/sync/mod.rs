@@ -2028,6 +2028,11 @@ impl SyncEngine {
         // Push's object walk also reads the grafts file. The gate's refusal runs before the
         // push, and a hook, a process it left or a command it wrote into the remote config
         // can write the file after that, so run_push makes the walk read the null device.
+        //
+        // With GIT_GRAFT_FILE naming an existing file git prints a deprecation hint on stderr
+        // when a push reads objects, and a refusal's excerpt is the last lines of stderr, so
+        // the hint would take lines there. A future git that drops grafts makes the variable
+        // and this option no-ops, which needs no action.
         let refspec = format!("{commit}:refs/heads/{sync_branch}");
         let mut push = self.git(Some(remote_checkout));
         push.args([
@@ -2035,6 +2040,8 @@ impl SyncEngine {
             "core.commitGraph=false",
             "-c",
             "pack.useBitmaps=false",
+            "-c",
+            "advice.graftFileDeprecated=false",
             "push",
             "--no-follow-tags",
             "origin",
@@ -2147,6 +2154,11 @@ impl SyncEngine {
         // Push's object walk also reads the grafts file. The gate's refusal runs before the
         // push, and a hook, a process it left or a command it wrote into the remote config
         // can write the file after that, so run_push makes the walk read the null device.
+        //
+        // With GIT_GRAFT_FILE naming an existing file git prints a deprecation hint on stderr
+        // when a push reads objects, and a refusal's excerpt is the last lines of stderr, so
+        // the hint would take lines there. A future git that drops grafts makes the variable
+        // and this option no-ops, which needs no action.
         let refspec = format!("{commit}:refs/heads/{branch}");
         let mut push = self.git(Some(remote_checkout));
         push.args([
@@ -2154,6 +2166,8 @@ impl SyncEngine {
             "core.commitGraph=false",
             "-c",
             "pack.useBitmaps=false",
+            "-c",
+            "advice.graftFileDeprecated=false",
             "push",
             "--porcelain",
             "--no-follow-tags",
