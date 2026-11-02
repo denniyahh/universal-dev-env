@@ -9002,6 +9002,19 @@ git config remote.origin.receivepack "n=0; : > '$D/ude-go'; while [ ! -e '$D/ude
 "#
     );
 
+    /// post-commit tail: the shallow file names UDE's commit, so git sees it as having no
+    /// parent and calls it a non-fast-forward.
+    #[cfg(unix)]
+    const HOOK_SHALLOW_NAMES_COMMIT: &str = "git rev-parse HEAD > .git/shallow\n";
+
+    /// post-commit tail: replaces UDE's commit with a parentless one, so git calls it a
+    /// non-fast-forward.
+    #[cfg(unix)]
+    const HOOK_REPLACE_WITH_PARENTLESS: &str = r#"T=$(git rev-parse 'HEAD^{tree}')
+R=$(git commit-tree "$T" -m parentless)
+git replace HEAD "$R"
+"#;
+
     /// Hook tail: writes a commit-graph holding the injected commit, then forges UDE's
     /// commit in it to have the injected commit as a second parent. Needs a `FORGE` line.
     #[cfg(unix)]
@@ -11062,6 +11075,45 @@ byte() { printf "\\$(printf '%03o' "$1")"; }
             cached.fetched_sha,
             "the published commit must build on the fetched head"
         );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_direct_push_shallow_file_refusal_does_not_say_upstream_moved() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let pushed = push_with_post_commit_hook(&git, &engine, false, HOOK_SHALLOW_NAMES_COMMIT);
+
+        assert!(pushed.hook_ran, "the hook never ran");
+        assert_remote_unchanged(&git, &pushed);
+        let err = push_failure(pushed.res);
+        assert!(err.contains("still at the commit UDE fetched"), "{err}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_direct_push_replaced_commit_refusal_does_not_say_upstream_moved() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let pushed = push_with_post_commit_hook(&git, &engine, false, HOOK_REPLACE_WITH_PARENTLESS);
+
+        assert!(pushed.hook_ran, "the hook never ran");
+        assert_remote_unchanged(&git, &pushed);
+        let err = push_failure(pushed.res);
+        assert!(err.contains("still at the commit UDE fetched"), "{err}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_pr_push_with_shallow_file_publishes_nothing() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let pushed = push_with_post_commit_hook(&git, &engine, true, HOOK_SHALLOW_NAMES_COMMIT);
+
+        assert!(pushed.hook_ran, "the hook never ran");
+        assert_remote_unchanged(&git, &pushed);
+        let err = push_failure(pushed.res);
+        assert!(err.contains("git push failed for branch"), "{err}");
     }
 
     #[test]
