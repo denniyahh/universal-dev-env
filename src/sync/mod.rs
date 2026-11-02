@@ -362,6 +362,15 @@ pub struct RemoteCache {
     pub lock: RemoteLockGuard,
 }
 
+/// What the staged gate validated, handed to the commit and to the committed gate.
+#[derive(Debug, PartialEq, Eq)]
+struct StagedPublication {
+    /// The allowlist, relative to the cache checkout.
+    paths: HashSet<PathBuf>,
+    /// The id of the staged tree, recorded after the staged gate passed.
+    tree: String,
+}
+
 /// Why [`SyncEngine::push_to_remote`] published nothing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PushRemoteError {
@@ -1733,41 +1742,32 @@ impl SyncEngine {
         validated: &ValidatedBlobs,
         fetched_sha: &str,
     ) -> Result<String, PushRemoteError> {
-        let Some(expected_set) = self
+        let Some(staged) = self
             .stage_publication(remote_checkout, staged_files, validated)
             .map_err(PushRemoteError::Failed)?
         else {
             return Ok("No changes to push to remote repository.".to_string());
         };
         if open_pr {
-            self.push_pr_branch(
-                remote_checkout,
-                branch,
-                &expected_set,
-                validated,
-                fetched_sha,
-            )
-            .map_err(PushRemoteError::Failed)
+            self.push_pr_branch(remote_checkout, branch, &staged, validated, fetched_sha)
+                .map_err(PushRemoteError::Failed)
         } else {
-            self.push_direct(
-                remote_checkout,
-                branch,
-                &expected_set,
-                validated,
-                fetched_sha,
-            )
+            self.push_direct(remote_checkout, branch, &staged, validated, fetched_sha)
         }
     }
 
     /// Stages exactly `staged_files` in the cache checkout and runs the publication gate
     /// on the index (allowlist, secret scan of every staged blob). Returns the validated
-    /// allowlist relative to `remote_checkout`, or `None` when there is nothing to push.
+    /// allowlist relative to `remote_checkout` and the id of the staged tree, or `None`
+    /// when there is nothing to push. The id is recorded here, in the one place both modes
+    /// share and before PR mode's `git checkout -b`, so no hook that runs after this
+    /// function can move what the committed gate compares the commit with.
     fn stage_publication(
         &self,
         remote_checkout: &Path,
         staged_files: &[PathBuf],
         validated: &ValidatedBlobs,
-    ) -> Result<Option<HashSet<PathBuf>>, String> {
+    ) -> Result<Option<StagedPublication>, String> {
         let mut status_cmd = self.git(Some(remote_checkout));
         status_cmd.args(["status", "--porcelain"]);
         let status = self
@@ -1909,7 +1909,32 @@ impl SyncEngine {
             }
         }
 
-        Ok(Some(expected_set))
+        let tree = match self.record_staged_tree(remote_checkout) {
+            Ok(tree) => tree,
+            Err(err) => {
+                self.reset_index(remote_checkout);
+                return Err(err);
+            }
+        };
+        Ok(Some(StagedPublication {
+            paths: expected_set,
+            tree,
+        }))
+    }
+
+    /// The id of the tree `repo`'s index holds. A refusal carries no stderr excerpt: git
+    /// names paths there, and a hook can choose those names.
+    fn record_staged_tree(&self, repo: &Path) -> Result<String, String> {
+        const REFUSAL: &str = "Publication gate violation: cannot record the staged tree";
+        let mut write_tree = self.git(Some(repo));
+        write_tree.arg("write-tree");
+        let out = self
+            .run_local(write_tree, "git write-tree")
+            .map_err(|_| REFUSAL.to_string())?;
+        if !out.status.success() {
+            return Err(REFUSAL.to_string());
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
     }
 
     /// PR mode: commits on a fresh `ude-sync-<hash>-<epoch>` branch, pushes it and opens
@@ -1920,7 +1945,7 @@ impl SyncEngine {
         &self,
         remote_checkout: &Path,
         branch: &str,
-        expected_set: &HashSet<PathBuf>,
+        staged: &StagedPublication,
         validated: &ValidatedBlobs,
         fetched_sha: &str,
     ) -> Result<String, String> {
@@ -1974,8 +1999,9 @@ impl SyncEngine {
             remote_checkout,
             &commit,
             fetched_sha,
-            expected_set,
+            &staged.paths,
             validated,
+            &staged.tree,
         ) {
             self.rollback_commit(remote_checkout);
             self.abandon_sync_branch(remote_checkout, branch, &sync_branch);
@@ -2057,7 +2083,7 @@ impl SyncEngine {
         &self,
         remote_checkout: &Path,
         branch: &str,
-        expected_set: &HashSet<PathBuf>,
+        staged: &StagedPublication,
         validated: &ValidatedBlobs,
         fetched_sha: &str,
     ) -> Result<String, PushRemoteError> {
@@ -2088,8 +2114,9 @@ impl SyncEngine {
             remote_checkout,
             &commit,
             fetched_sha,
-            expected_set,
+            &staged.paths,
             validated,
+            &staged.tree,
         ) {
             self.rollback_commit(remote_checkout);
             return Err(Failed(err));
@@ -2244,7 +2271,8 @@ impl SyncEngine {
     /// push adds on top of `base` (the fetched head): it has exactly one parent, `base`;
     /// its message is the sync commit message and its header is free of secrets; every
     /// file it changes is on the allowlist `paths` (relative to `repo`), free of secrets
-    /// and identical to what `validated` recorded; and its tree holds no empty directory.
+    /// and identical to what `validated` recorded; its tree holds no empty directory; and
+    /// that tree is `staged_tree`, the id [`Self::stage_publication`] recorded.
     fn validate_committed_tree(
         &self,
         repo: &Path,
@@ -2252,6 +2280,7 @@ impl SyncEngine {
         base: &str,
         paths: &HashSet<PathBuf>,
         validated: &ValidatedBlobs,
+        staged_tree: &str,
     ) -> Result<(), String> {
         if base.is_empty() {
             return Err(
@@ -2433,15 +2462,31 @@ impl SyncEngine {
             ));
         }
         match count_empty_directories(&listing.stdout) {
-            None => Err(format!(
-                "Post-commit publication gate violation: unparseable tree entry in {commit}"
-            )),
-            Some(0) => Ok(()),
-            Some(_) => Err(
-                "Post-commit publication gate violation: the commit to publish contains an empty directory"
-                    .to_string(),
-            ),
+            None => {
+                return Err(format!(
+                    "Post-commit publication gate violation: unparseable tree entry in {commit}"
+                ));
+            }
+            Some(0) => {}
+            Some(_) => {
+                return Err(
+                    "Post-commit publication gate violation: the commit to publish contains an empty directory"
+                        .to_string(),
+                );
+            }
         }
+
+        // Everything above read what the commit holds, and this binds it: no hook that ran
+        // after the tree was recorded can have changed a name, a mode or a blob, and a hook
+        // that keeps the content keeps the id and still publishes. It runs last so a refusal
+        // names the most specific cause it can.
+        if raw_commit_tree(&raw_commit.stdout) != Some(staged_tree.as_bytes()) {
+            return Err(
+                "Post-commit publication gate violation: the tree of the commit to publish is not the tree UDE staged; a hook in the cache checkout most likely changed it"
+                    .to_string(),
+            );
+        }
+        Ok(())
     }
 }
 
@@ -2466,6 +2511,15 @@ fn raw_commit_parents(raw: &[u8]) -> Vec<String> {
         .filter_map(|line| line.strip_prefix(b"parent "))
         .map(|id| String::from_utf8_lossy(id).into_owned())
         .collect()
+}
+
+/// The bytes after `tree ` on the first line of a raw commit object (`git cat-file commit`
+/// output), the only line git reads a commit's tree from, with no decoding. `None` when the
+/// first line does not start with `tree `.
+fn raw_commit_tree(raw: &[u8]) -> Option<&[u8]> {
+    raw.split(|byte| *byte == b'\n')
+        .next()?
+        .strip_prefix(b"tree ")
 }
 
 /// Splits a raw commit object (`git cat-file commit` output) at its first empty line into
@@ -8231,7 +8285,7 @@ mod tests {
         assert!(
             staged
                 .as_ref()
-                .is_some_and(|set| set.contains(Path::new(GATE_REL))),
+                .is_some_and(|staged| staged.paths.contains(Path::new(GATE_REL))),
             "{staged:?}"
         );
     }
@@ -9341,6 +9395,7 @@ byte() { printf "\\$(printf '%03o' "$1")"; }
                 row_base,
                 &expected_set,
                 &validated,
+                &commit_tree_id(&git, repo.path(), &head),
             );
             let as_expected = match (&verdict, expected) {
                 (Ok(()), None) => true,
@@ -9758,6 +9813,7 @@ byte() { printf "\\$(printf '%03o' "$1")"; }
                 &base,
                 &expected_set,
                 &validated,
+                &tree,
             );
             let as_expected = match (&verdict, expected) {
                 (Ok(()), None) => true,
@@ -10433,7 +10489,7 @@ byte() { printf "\\$(printf '%03o' "$1")"; }
             .stage_publication(repo.path(), std::slice::from_ref(&tracked), &validated)
             .unwrap()
             .expect("the edit must be staged");
-        assert!(staged.contains(rel), "{staged:?}");
+        assert!(staged.paths.contains(rel), "{staged:?}");
     }
 
     /// `checkout_dir` is the cache checkout's git toplevel whether or not the remote
@@ -10834,6 +10890,7 @@ byte() { printf "\\$(printf '%03o' "$1")"; }
             &base_head_sha,
             &expected_set,
             &validated,
+            &commit_tree_id(&git, remote_repo.path(), "HEAD"),
         );
         assert!(
             clean_check.is_ok(),
@@ -10855,6 +10912,7 @@ byte() { printf "\\$(printf '%03o' "$1")"; }
             &git.output(remote_repo.path(), &["rev-parse", "HEAD~1"]),
             &expected_set,
             &validated,
+            &commit_tree_id(&git, remote_repo.path(), "HEAD"),
         );
         assert!(
             secret_check.is_err(),
@@ -10904,6 +10962,7 @@ byte() { printf "\\$(printf '%03o' "$1")"; }
             &git.output(remote_repo.path(), &["rev-parse", "HEAD~1"]),
             &expected_set,
             &validated,
+            &commit_tree_id(&git, remote_repo.path(), "HEAD"),
         )
     }
 
@@ -10982,6 +11041,7 @@ byte() { printf "\\$(printf '%03o' "$1")"; }
                 &git.output(remote_repo.path(), &["rev-parse", "HEAD~1"]),
                 &expected_set,
                 &validated,
+                &commit_tree_id(&git, remote_repo.path(), "HEAD"),
             ),
             Ok(())
         );
@@ -10998,6 +11058,7 @@ byte() { printf "\\$(printf '%03o' "$1")"; }
                 &git.output(remote_repo.path(), &["rev-parse", "HEAD~1"]),
                 &expected_set,
                 &validated,
+                &commit_tree_id(&git, remote_repo.path(), "HEAD"),
             )
             .expect_err("a committed Slack bot token must fail the gate");
         assert!(
@@ -11599,6 +11660,189 @@ byte() { printf "\\$(printf '%03o' "$1")"; }
     #[cfg(unix)]
     fn test_pr_push_refuses_rewriting_clean_filter() {
         assert_rewriting_clean_filter_refused(true);
+    }
+
+    /// The id of the tree of `commit`, read the way the committed gate reads it.
+    fn commit_tree_id(git: &GitFixture, repo: &Path, commit: &str) -> String {
+        git.output(
+            repo,
+            &[
+                "--no-replace-objects",
+                "rev-parse",
+                &format!("{commit}^{{tree}}"),
+            ],
+        )
+    }
+
+    #[test]
+    fn test_raw_commit_tree() {
+        let id = |digit: char| digit.to_string().repeat(40);
+        let (tree, other) = (id('0'), id('1'));
+        let people = "author a <a@x> 1 +0000\ncommitter c <c@x> 1 +0000\n";
+        let rows = vec![
+            (
+                "the first line",
+                format!("tree {tree}\nparent {other}\n{people}\nmsg\n").into_bytes(),
+                Some(tree.clone().into_bytes()),
+            ),
+            (
+                "a second tree line in the header",
+                format!("tree {tree}\ntree {other}\n{people}\nmsg\n").into_bytes(),
+                Some(tree.clone().into_bytes()),
+            ),
+            (
+                "a first line that is no tree line, with one below it",
+                format!("parent {other}\ntree {tree}\n{people}\nmsg\n").into_bytes(),
+                None,
+            ),
+            (
+                "only the message starts with tree",
+                format!("{people}\ntree {tree}\n").into_bytes(),
+                None,
+            ),
+            (
+                "bytes that are not UTF-8 stay as they are",
+                vec![b't', b'r', b'e', b'e', b' ', 0xFF, 0xFE, b'\n'],
+                Some(vec![0xFF, 0xFE]),
+            ),
+            ("empty input", Vec::new(), None),
+        ];
+        let mut failures = Vec::new();
+        for (name, raw, expected) in rows {
+            let actual = raw_commit_tree(&raw).map(<[u8]>::to_vec);
+            if actual != expected {
+                failures.push(format!("{name}: {actual:?} != {expected:?}"));
+            }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+
+    proptest::proptest! {
+        /// `tree <id>` counts only on the first line, whatever bytes follow it, and a raw
+        /// object a hook wrote never panics the read.
+        #[test]
+        fn prop_raw_commit_tree_reads_only_the_first_line(
+            id in "[0-9a-f]{40}|[0-9a-f]{64}",
+            tail in proptest::collection::vec(proptest::num::u8::ANY, 0..64),
+            random in proptest::collection::vec(proptest::num::u8::ANY, 0..256),
+        ) {
+            let mut first = format!("tree {id}\n").into_bytes();
+            first.extend_from_slice(&tail);
+            proptest::prop_assert_eq!(raw_commit_tree(&first), Some(id.as_bytes()));
+
+            let mut second = format!("parent {id}\ntree {id}\n").into_bytes();
+            second.extend_from_slice(&tail);
+            proptest::prop_assert_eq!(raw_commit_tree(&second), None);
+
+            let _ = raw_commit_tree(&random);
+        }
+    }
+
+    #[test]
+    fn test_committed_gate_requires_the_staged_tree() {
+        const REFUSAL: &str = "is not the tree UDE staged";
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let repo = tempdir().unwrap();
+        git.run(repo.path(), &["init", "-b", "main"]);
+        let file = repo.path().join("base.txt");
+        fs::write(&file, "initial").unwrap();
+        git.run(repo.path(), &["add", "-A"]);
+        git.run(repo.path(), &["commit", "-m", "base commit"]);
+        let base = git.output(repo.path(), &["rev-parse", "HEAD"]);
+        let base_tree = commit_tree_id(&git, repo.path(), "HEAD");
+        fs::write(&file, "updated\n").unwrap();
+        git.run(repo.path(), &["add", "base.txt"]);
+        git.run(repo.path(), &["commit", "-m", SYNC_COMMIT_MESSAGE]);
+        let head = git.output(repo.path(), &["rev-parse", "HEAD"]);
+        let tree = commit_tree_id(&git, repo.path(), "HEAD");
+        let paths: HashSet<PathBuf> = [PathBuf::from("base.txt")].into_iter().collect();
+        let validated = ValidatedBlobs::from_files(std::slice::from_ref(&file));
+
+        let rows: [(&str, &str, Option<&str>); 4] = [
+            ("the commit's own tree", &tree, None),
+            ("another tree", &base_tree, Some(REFUSAL)),
+            ("first 12 characters", &tree[..12], Some(REFUSAL)),
+            ("empty", "", Some(REFUSAL)),
+        ];
+        let mut failures = Vec::new();
+        for (name, recorded, expected) in rows {
+            let verdict = engine.validate_committed_tree(
+                repo.path(),
+                &head,
+                &base,
+                &paths,
+                &validated,
+                recorded,
+            );
+            let as_expected = match (&verdict, expected) {
+                (Ok(()), None) => true,
+                (Err(err), Some(text)) => err.contains(text),
+                _ => false,
+            };
+            if !as_expected {
+                failures.push(format!("{name}: {verdict:?}, expected {expected:?}"));
+            }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+
+    #[test]
+    fn test_stage_publication_records_the_staged_tree() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let (repo, file) = gate_repo(&git);
+        fs::write(&file, "[core]\n\tx = 1\n").unwrap();
+        let validated = ValidatedBlobs::from_files(std::slice::from_ref(&file));
+        let staged = engine
+            .stage_publication(repo.path(), std::slice::from_ref(&file), &validated)
+            .unwrap()
+            .expect("the edit must be staged");
+        assert_eq!(staged.tree, git.output(repo.path(), &["write-tree"]));
+        assert_ne!(staged.tree, commit_tree_id(&git, repo.path(), "HEAD"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_stage_publication_refuses_when_the_tree_cannot_be_recorded() {
+        use std::os::unix::fs::PermissionsExt;
+        let git = GitFixture::new();
+        let (repo, file) = gate_repo(&git);
+        fs::write(&file, "[core]\n\tx = 1\n").unwrap();
+        let validated = ValidatedBlobs::from_files(std::slice::from_ref(&file));
+
+        let inherited = std::env::var_os("PATH").unwrap();
+        let real_git = std::env::split_paths(&inherited)
+            .map(|dir| dir.join("git"))
+            .find(|candidate| candidate.is_file())
+            .expect("git on PATH");
+        let shim_dir = tempdir().unwrap();
+        let shim = shim_dir.path().join("git");
+        fs::write(
+            &shim,
+            format!(
+                "#!/bin/sh\nfor arg in \"$@\"; do\n  [ \"$arg\" = write-tree ] && exit 1\ndone\nexec '{}' \"$@\"\n",
+                real_git.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&shim, fs::Permissions::from_mode(0o755)).unwrap();
+        let path = std::env::join_paths(
+            std::iter::once(shim_dir.path().to_path_buf()).chain(std::env::split_paths(&inherited)),
+        )
+        .unwrap();
+        let mut env = git.gitconfig_env();
+        env.push(("PATH".into(), path));
+        let engine = SyncEngine::new().with_extra_env(env);
+
+        let err = engine
+            .stage_publication(repo.path(), std::slice::from_ref(&file), &validated)
+            .expect_err("an unrecorded tree must refuse");
+        assert!(err.contains("cannot record the staged tree"), "{err}");
+        assert_eq!(
+            git.output(repo.path(), &["diff", "--cached", "--name-only"]),
+            ""
+        );
     }
 
     #[test]
