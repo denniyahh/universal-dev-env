@@ -3,6 +3,34 @@ phase: 02
 review: 02-REVIEW.md
 titles: json
 findings:
+  - id: CR-300
+    severity: critical
+    disposition: open
+    title: "A ref named after the commit id makes git push send another commit"
+  - id: CR-301
+    severity: critical
+    disposition: open
+    title: "A hook can move the fetched head, and the injected commit goes out as the base"
+  - id: WR-300
+    severity: warning
+    disposition: open
+    title: "An index flag makes the push return Ok with nothing published"
+  - id: WR-301
+    severity: warning
+    disposition: open
+    title: "A hook-written pushurl sends the commit elsewhere and the push returns Ok"
+  - id: WR-302
+    severity: warning
+    disposition: open
+    title: "A refusal prints hook-chosen bytes from a `parent` header, including terminal escapes"
+  - id: IN-300
+    severity: info
+    disposition: open
+    title: "Some push failure paths leave the cache commit or the sync branch behind"
+  - id: IN-301
+    severity: info
+    disposition: open
+    title: "The new e2e helper runs `ude init` with the host's HOME"
   - id: CR-200
     severity: critical
     disposition: open
@@ -111,28 +139,35 @@ findings:
     severity: info
     disposition: open
     title: "The vendored rule pin is enforced only under `cargo test`, and line-ending conversion would break it"
-open: 25
-total: 27
-recorded: 2026-11-01T16:07:03.676Z
+open: 32
+total: 34
+recorded: 2026-11-02T19:31:26.995Z
 ---
 
 # Phase 02: Code Review Disposition
 
 | Finding | Severity | Disposition | Source |
 |---------|----------|-------------|--------|
-| CR-200 | critical | open | - |
-| CR-201 | critical | open | - |
-| WR-200 | warning | open | - |
-| WR-201 | warning | open | - |
-| WR-202 | warning | open | - |
-| WR-203 | warning | open | - |
-| WR-204 | warning | open | - |
-| IN-200 | info | open | - |
-| IN-201 | info | open | - |
-| IN-202 | info | open | - |
-| IN-203 | info | open | - |
-| IN-204 | info | open | - |
-| IN-205 | info | open | - |
+| CR-300 | critical | open | - |
+| CR-301 | critical | open | - |
+| WR-300 | warning | open | - |
+| WR-301 | warning | open | - |
+| WR-302 | warning | open | - |
+| IN-300 | info | open | - |
+| IN-301 | info | open | - |
+| CR-200 | critical | open | - (not in the current review) |
+| CR-201 | critical | open | - (not in the current review) |
+| WR-200 | warning | open | - (not in the current review) |
+| WR-201 | warning | open | - (not in the current review) |
+| WR-202 | warning | open | - (not in the current review) |
+| WR-203 | warning | open | - (not in the current review) |
+| WR-204 | warning | open | - (not in the current review) |
+| IN-200 | info | open | - (not in the current review) |
+| IN-201 | info | open | - (not in the current review) |
+| IN-202 | info | open | - (not in the current review) |
+| IN-203 | info | open | - (not in the current review) |
+| IN-204 | info | open | - (not in the current review) |
+| IN-205 | info | open | - (not in the current review) |
 | WR-01 | warning | open | - (not in the current review) |
 | WR-02 | warning | open | - (not in the current review) |
 | IN-01 | info | open | - (not in the current review) |
