@@ -8516,6 +8516,119 @@ git update-ref HEAD "$N"
         "printf '%s\\n' \"$N\" > .git/ude-test-emptydir-commit\n",
     );
 
+    /// Opens a rebuild of UDE's commit: the parent and message bytes are kept, `V` is the
+    /// validated blob and `I` an injected one, whose id is left for the test.
+    #[cfg(unix)]
+    macro_rules! rebuild_start_lines {
+        () => {
+            r#"P=$(git rev-parse HEAD~1)
+git cat-file commit HEAD | sed '1,/^$/d' > .git/ude-test-msg
+V=$(git rev-parse "HEAD:$F")
+I=$(printf 'INJECTED_BY_HOOK\n' | git hash-object -w --stdin)
+printf '%s\n' "$I" > .git/ude-test-injected-blob
+"#
+        };
+    }
+
+    /// Closes a rebuild: wraps `T1` (the tree of `projects/`) up to a root tree and moves
+    /// HEAD onto a commit of it, whose id is left for the test.
+    #[cfg(unix)]
+    macro_rules! rebuild_end_lines {
+        () => {
+            r#"T2=$(printf '040000 tree %s\tprojects\n' "$T1" | git mktree)
+R=$(printf '040000 tree %s\ttemplates\n' "$T2" | git mktree)
+N=$(git commit-tree "$R" -p "$P" -F .git/ude-test-msg)
+printf '%s\n' "$N" > .git/ude-test-rebuilt-commit
+git update-ref HEAD "$N"
+"#
+        };
+    }
+
+    /// Makes `T1` the tree holding `G` (the tree of `generic/`) as its only entry.
+    #[cfg(unix)]
+    macro_rules! one_generic_line {
+        () => {
+            r#"T1=$(printf '040000 tree %s\tgeneric\n' "$G" | git mktree)
+"#
+        };
+    }
+
+    /// Hook tail: rebuilds UDE's commit with the managed file listed twice, the validated
+    /// blob first and an injected blob second.
+    #[cfg(unix)]
+    const HOOK_DUPLICATE_ENTRY: &str = concat!(
+        rebuild_start_lines!(),
+        r#"G=$(printf '100644 blob %s\tgitconfig.repo\n100644 blob %s\tgitconfig.repo\n' "$V" "$I" | git mktree)
+"#,
+        one_generic_line!(),
+        rebuild_end_lines!(),
+    );
+
+    /// Hook tail: rebuilds UDE's commit with the managed file listed twice, both entries
+    /// the validated blob.
+    #[cfg(unix)]
+    const HOOK_REPEATED_SAME_BLOB: &str = concat!(
+        rebuild_start_lines!(),
+        r#"G=$(printf '100644 blob %s\tgitconfig.repo\n100644 blob %s\tgitconfig.repo\n' "$V" "$V" | git mktree)
+"#,
+        one_generic_line!(),
+        rebuild_end_lines!(),
+    );
+
+    /// Hook tail: rebuilds UDE's commit with the managed file's directory listed twice,
+    /// the second one holding an injected blob under the managed name.
+    #[cfg(unix)]
+    const HOOK_DUPLICATE_DIRECTORY: &str = concat!(
+        rebuild_start_lines!(),
+        r#"G1=$(printf '100644 blob %s\tgitconfig.repo\n' "$V" | git mktree)
+G2=$(printf '100644 blob %s\tgitconfig.repo\n' "$I" | git mktree)
+T1=$(printf '040000 tree %s\tgeneric\n040000 tree %s\tgeneric\n' "$G1" "$G2" | git mktree)
+"#,
+        rebuild_end_lines!(),
+    );
+
+    /// Hook tail: rebuilds UDE's commit with a subtree named `.` next to the managed file,
+    /// holding the validated blob under the managed name.
+    #[cfg(unix)]
+    const HOOK_DOT_SUBTREE: &str = concat!(
+        rebuild_start_lines!(),
+        r#"D=$(printf '100644 blob %s\tgitconfig.repo\n' "$V" | git mktree)
+G=$(printf '100644 blob %s\tgitconfig.repo\n040000 tree %s\t.\n' "$V" "$D" | git mktree)
+"#,
+        one_generic_line!(),
+        rebuild_end_lines!(),
+    );
+
+    /// Hook tail: amends the managed file out of UDE's commit.
+    #[cfg(unix)]
+    const HOOK_DELETE_VALIDATED: &str = r#"git rm -q --cached "$F"
+git commit --amend --no-edit --no-verify -q --allow-empty
+git rev-parse HEAD > .git/ude-test-rebuilt-commit
+"#;
+
+    /// Hook tail: amends the managed file back to the fetched head's content.
+    #[cfg(unix)]
+    const HOOK_REVERT_VALIDATED: &str = r#"git checkout -q HEAD~1 -- "$F"
+git commit --amend --no-edit --no-verify -q --allow-empty
+git rev-parse HEAD > .git/ude-test-rebuilt-commit
+"#;
+
+    /// Hook tail: amends UDE's commit, keeping its tree and message.
+    #[cfg(unix)]
+    const HOOK_KEPT_AMEND: &str = "git commit --amend --no-edit --no-verify -q\n";
+
+    /// Hook tail: amends the exec bit of the managed file into UDE's commit, leaving its
+    /// bytes as validated.
+    #[cfg(unix)]
+    const HOOK_EXEC_FLIP: &str = r#"git update-index --chmod=+x "$F"
+git commit --amend --no-edit --no-verify -q
+git rev-parse HEAD > .git/ude-test-rebuilt-commit
+"#;
+
+    /// post-checkout tail: removes the managed file from the index.
+    #[cfg(unix)]
+    const HOOK_CHECKOUT_REMOVE: &str = "git rm -q --cached \"$F\"\n";
+
     /// See [`amend_inject_lines`].
     #[cfg(unix)]
     macro_rules! injected_commit_lines {
@@ -11080,5 +11193,462 @@ byte() { printf "\\$(printf '%03o' "$1")"; }
             .find(|s| s.relative_path == Path::new("scripts/hooks/pre-push"))
             .unwrap();
         assert_eq!(hook_st2.status, SyncStatus::Conflicted); // no ancestor recorded, so divergent hashes = Conflicted
+    }
+
+    /// The hook ran, nothing reached the remote, and the push failed hard with the
+    /// committed gate's refusal holding none of the hook's text. Returns the refusal.
+    #[cfg(unix)]
+    fn assert_hook_refused(git: &GitFixture, pushed: &HookedPush) -> String {
+        assert!(pushed.hook_ran, "the hook never ran");
+        assert_remote_unchanged(git, pushed);
+        let err = match &pushed.res {
+            Err(PushRemoteError::Failed(err)) => err.clone(),
+            other => panic!("expected a hard push failure, got {other:?}"),
+        };
+        assert!(
+            err.contains("Post-commit publication gate violation"),
+            "{err}"
+        );
+        assert!(!err.contains("INJECTED"), "{err}");
+        err
+    }
+
+    /// The injected blob did not reach the remote, and the commit the hook built delivers
+    /// it to a fresh bare repository, so the hook's tree really carried it.
+    #[cfg(unix)]
+    fn assert_injected_blob_not_delivered(git: &GitFixture, pushed: &HookedPush) {
+        let blob = hook_recorded_id(pushed, "ude-test-injected-blob");
+        let rebuilt = hook_recorded_id(pushed, "ude-test-rebuilt-commit");
+        assert!(
+            !holds_object(git, pushed.bare.path(), &blob),
+            "the remote holds the injected blob"
+        );
+        let control = push_to_fresh_bare(git, &pushed.checkout, &rebuilt, &[], false);
+        assert!(
+            holds_object(git, control.path(), &blob),
+            "a plain push of the hook's commit did not deliver the injected blob"
+        );
+    }
+
+    /// Pushes with `tail` as a post-commit hook and requires the refusal.
+    #[cfg(unix)]
+    fn post_commit_hook_refusal(open_pr: bool, tail: &str) -> (GitFixture, HookedPush, String) {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let pushed = push_with_post_commit_hook(&git, &engine, open_pr, tail);
+        let err = assert_hook_refused(&git, &pushed);
+        (git, pushed, err)
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_direct_push_refuses_hook_duplicate_entry() {
+        let (git, pushed, _) = post_commit_hook_refusal(false, HOOK_DUPLICATE_ENTRY);
+        assert_injected_blob_not_delivered(&git, &pushed);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_pr_push_refuses_hook_duplicate_entry() {
+        let (git, pushed, _) = post_commit_hook_refusal(true, HOOK_DUPLICATE_ENTRY);
+        assert_injected_blob_not_delivered(&git, &pushed);
+    }
+
+    /// The body of the GitHub PAT shape the hook tails below carry, joined at runtime so no
+    /// token literal is committed.
+    #[cfg(unix)]
+    const HOOK_TOKEN_BODY: &str = "111122223333444455556666777788889999";
+
+    /// `tail` with its injected blob's text replaced by a GitHub PAT shape.
+    #[cfg(unix)]
+    fn with_injected_token(tail: &str) -> String {
+        let prefix = "ghp_";
+        tail.replace("INJECTED_BY_HOOK", &format!("{prefix}{HOOK_TOKEN_BODY}"))
+    }
+
+    /// A token-shaped second entry is refused, its body is not printed, the checkout is
+    /// back at the fetched head, and the token blob did not reach the remote.
+    #[cfg(unix)]
+    fn assert_hook_duplicate_token_refused(open_pr: bool) {
+        let tail = with_injected_token(HOOK_DUPLICATE_ENTRY);
+        let (git, pushed, err) = post_commit_hook_refusal(open_pr, &tail);
+        assert!(
+            !err.contains(HOOK_TOKEN_BODY),
+            "the refusal leaked the token"
+        );
+        assert_eq!(
+            git.output(&pushed.checkout, &["rev-parse", "HEAD"]),
+            pushed.fetched_sha,
+            "the cache commit was not rolled back"
+        );
+        assert_injected_blob_not_delivered(&git, &pushed);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_direct_push_refuses_hook_duplicate_token_entry() {
+        assert_hook_duplicate_token_refused(false);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_pr_push_refuses_hook_duplicate_token_entry() {
+        assert_hook_duplicate_token_refused(true);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_direct_push_refuses_hook_duplicate_directory() {
+        let (git, pushed, _) = post_commit_hook_refusal(false, HOOK_DUPLICATE_DIRECTORY);
+        assert_injected_blob_not_delivered(&git, &pushed);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_pr_push_refuses_hook_duplicate_directory() {
+        let (git, pushed, _) = post_commit_hook_refusal(true, HOOK_DUPLICATE_DIRECTORY);
+        assert_injected_blob_not_delivered(&git, &pushed);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_direct_push_refuses_hook_repeated_same_blob() {
+        post_commit_hook_refusal(false, HOOK_REPEATED_SAME_BLOB);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_pr_push_refuses_hook_repeated_same_blob() {
+        post_commit_hook_refusal(true, HOOK_REPEATED_SAME_BLOB);
+    }
+
+    /// A subtree named `.` is refused, and the commit the hook built, delivered to a fresh
+    /// bare repository, cannot be cloned from it.
+    #[cfg(unix)]
+    fn assert_hook_dot_subtree_refused(open_pr: bool) {
+        let (git, pushed, _) = post_commit_hook_refusal(open_pr, HOOK_DOT_SUBTREE);
+        let rebuilt = hook_recorded_id(&pushed, "ude-test-rebuilt-commit");
+        let control = push_to_fresh_bare(&git, &pushed.checkout, &rebuilt, &[], false);
+        let clone_parent = tempdir().unwrap();
+        let clone = git
+            .cmd(clone_parent.path())
+            .env("LC_ALL", "C")
+            .args([
+                "clone",
+                "-b",
+                "control",
+                control.path().to_str().unwrap(),
+                "clone",
+            ])
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&clone.stderr);
+        assert!(!clone.status.success(), "the clone succeeded: {stderr}");
+        assert!(stderr.contains("invalid path"), "{stderr}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_direct_push_refuses_hook_dot_subtree() {
+        assert_hook_dot_subtree_refused(false);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_pr_push_refuses_hook_dot_subtree() {
+        assert_hook_dot_subtree_refused(true);
+    }
+
+    /// A commit that lost the managed file is refused, and the hook's commit really lacks it.
+    #[cfg(unix)]
+    fn assert_hook_deleted_file_refused(open_pr: bool) {
+        let (git, pushed, _) = post_commit_hook_refusal(open_pr, HOOK_DELETE_VALIDATED);
+        let rebuilt = hook_recorded_id(&pushed, "ude-test-rebuilt-commit");
+        let listed = git.output(
+            &pushed.checkout,
+            &["ls-tree", "-r", "--name-only", &rebuilt],
+        );
+        assert!(!listed.contains(&pushed.managed_rel), "{listed}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_direct_push_refuses_hook_deleted_file() {
+        assert_hook_deleted_file_refused(false);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_pr_push_refuses_hook_deleted_file() {
+        assert_hook_deleted_file_refused(true);
+    }
+
+    /// A commit holding the fetched content of the managed file is refused, and the hook's
+    /// commit really holds that content.
+    #[cfg(unix)]
+    fn assert_hook_reverted_file_refused(open_pr: bool) {
+        let (git, pushed, _) = post_commit_hook_refusal(open_pr, HOOK_REVERT_VALIDATED);
+        let rebuilt = hook_recorded_id(&pushed, "ude-test-rebuilt-commit");
+        let held = git.output(
+            &pushed.checkout,
+            &["show", &format!("{rebuilt}:{}", pushed.managed_rel)],
+        );
+        assert!(held.contains("autocrlf"), "{held}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_direct_push_refuses_hook_reverted_file() {
+        assert_hook_reverted_file_refused(false);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_pr_push_refuses_hook_reverted_file() {
+        assert_hook_reverted_file_refused(true);
+    }
+
+    /// A commit whose only difference is the managed file's mode is refused as a changed
+    /// tree, and the hook's commit really has that mode.
+    #[cfg(unix)]
+    fn assert_hook_exec_flip_refused(open_pr: bool) {
+        let (git, pushed, err) = post_commit_hook_refusal(open_pr, HOOK_EXEC_FLIP);
+        assert!(err.contains("is not the tree UDE staged"), "{err}");
+        let rebuilt = hook_recorded_id(&pushed, "ude-test-rebuilt-commit");
+        let listed = git.output(
+            &pushed.checkout,
+            &["ls-tree", &rebuilt, &pushed.managed_rel],
+        );
+        assert!(listed.starts_with("100755"), "{listed}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_direct_push_refuses_hook_exec_flip() {
+        assert_hook_exec_flip_refused(false);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_pr_push_refuses_hook_exec_flip() {
+        assert_hook_exec_flip_refused(true);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_pr_push_refuses_post_checkout_index_change() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let pushed = push_with_hook(&git, &engine, true, "post-checkout", HOOK_CHECKOUT_REMOVE);
+        assert_hook_refused(&git, &pushed);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_direct_push_publishes_with_content_kept_amend() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let pushed = push_with_post_commit_hook(&git, &engine, false, HOOK_KEPT_AMEND);
+        assert_published_exact(&git, &pushed, false);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_pr_push_publishes_with_content_kept_amend() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let pushed = push_with_post_commit_hook(&git, &engine, true, HOOK_KEPT_AMEND);
+        assert_published_exact(&git, &pushed, true);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_pr_push_publishes_with_benign_post_checkout_hook() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let pushed = push_with_hook(&git, &engine, true, "post-checkout", "");
+        assert_published_exact(&git, &pushed, true);
+    }
+
+    /// Publishes `content` over the seeded template of a fresh bare remote with no hook;
+    /// `setup` prepares the cache checkout first. `hook_ran` is false.
+    #[cfg(unix)]
+    fn push_managed_file(
+        git: &GitFixture,
+        engine: &SyncEngine,
+        open_pr: bool,
+        content: &str,
+        setup: impl FnOnce(&Path),
+    ) -> HookedPush {
+        let bare = seeded_bare_remote(git);
+        let cache = tempdir().unwrap();
+        let cached = engine
+            .ensure_remote_repo(bare.path().to_str().unwrap(), "main", cache.path())
+            .unwrap();
+        let checkout = cached.checkout_dir.clone();
+        let managed = cached.templates_dir.join("projects/generic/gitconfig.repo");
+        let managed_rel = managed
+            .strip_prefix(&checkout)
+            .unwrap()
+            .display()
+            .to_string();
+        fs::write(&managed, content).unwrap();
+        let validated = ValidatedBlobs::from_files(std::slice::from_ref(&managed));
+        setup(&checkout);
+        let res = engine.push_to_remote(
+            &checkout,
+            "main",
+            open_pr,
+            std::slice::from_ref(&managed),
+            &validated,
+            &cached.fetched_sha,
+        );
+        let fetched_sha = cached.fetched_sha.clone();
+        drop(cached);
+        HookedPush {
+            res,
+            bare,
+            _cache: cache,
+            checkout,
+            fetched_sha,
+            managed_rel,
+            hook_ran: false,
+        }
+    }
+
+    /// A CRLF working file under a `text` attribute publishes, and its blob is stored LF.
+    #[cfg(unix)]
+    fn assert_crlf_under_text_attribute_publishes(open_pr: bool) {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let pushed = push_managed_file(&git, &engine, open_pr, "[core]\r\n\tx = 1\r\n", |repo| {
+            fs::write(repo.join(".git/info/attributes"), "*.repo text\n").unwrap();
+        });
+        assert!(pushed.res.is_ok(), "{:?}", pushed.res);
+        let published = published_commit(&git, &pushed, open_pr);
+        assert_eq!(
+            remote_managed_blob(&git, &pushed, &published),
+            HOOKED_TEMPLATE.as_bytes()
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_direct_push_publishes_crlf_file_under_text_attribute() {
+        assert_crlf_under_text_attribute_publishes(false);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_pr_push_publishes_crlf_file_under_text_attribute() {
+        assert_crlf_under_text_attribute_publishes(true);
+    }
+
+    /// A pass-through clean filter publishes the validated bytes.
+    #[cfg(unix)]
+    fn assert_pass_through_clean_filter_publishes(open_pr: bool) {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let pushed = push_managed_file(&git, &engine, open_pr, HOOKED_TEMPLATE, |repo| {
+            set_clean_filter(&git, repo, "cat\n");
+        });
+        assert!(pushed.res.is_ok(), "{:?}", pushed.res);
+        let published = published_commit(&git, &pushed, open_pr);
+        assert_eq!(
+            remote_managed_blob(&git, &pushed, &published),
+            HOOKED_TEMPLATE.as_bytes()
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_direct_push_publishes_with_pass_through_clean_filter() {
+        assert_pass_through_clean_filter_publishes(false);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_pr_push_publishes_with_pass_through_clean_filter() {
+        assert_pass_through_clean_filter_publishes(true);
+    }
+
+    /// A clean filter that rewrites the blob is refused at the staged gate.
+    #[cfg(unix)]
+    fn assert_rewriting_clean_filter_refused(open_pr: bool) {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let pushed = push_managed_file(&git, &engine, open_pr, HOOKED_TEMPLATE, |repo| {
+            set_clean_filter(&git, repo, "sed s/x/INJECTED/\n");
+        });
+        assert_remote_unchanged(&git, &pushed);
+        let err = push_failure(pushed.res);
+        assert!(
+            err.contains("Publication gate violation: staged index blob"),
+            "{err}"
+        );
+        assert!(err.contains("differs from the validated content"), "{err}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_direct_push_refuses_rewriting_clean_filter() {
+        assert_rewriting_clean_filter_refused(false);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_pr_push_refuses_rewriting_clean_filter() {
+        assert_rewriting_clean_filter_refused(true);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_pr_push_publishes_deletion() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let bare = tempdir().unwrap();
+        let cache = tempdir().unwrap();
+        git.run(bare.path(), &["init", "--bare", "-b", "main"]);
+        let seed = tempdir().unwrap();
+        git.run(seed.path(), &["init", "-b", "main"]);
+        let generic = seed.path().join("templates/projects/generic");
+        fs::create_dir_all(&generic).unwrap();
+        fs::write(generic.join("gitconfig.repo"), "[core]\n").unwrap();
+        fs::write(generic.join("gitignore.repo"), "target/\n").unwrap();
+        git.run(seed.path(), &["add", "-A"]);
+        git.run(seed.path(), &["commit", "-m", "seed"]);
+        git.run(
+            seed.path(),
+            &["push", bare.path().to_str().unwrap(), "main"],
+        );
+
+        let cached = engine
+            .ensure_remote_repo(bare.path().to_str().unwrap(), "main", cache.path())
+            .unwrap();
+        let gitconfig = cached.templates_dir.join("projects/generic/gitconfig.repo");
+        fs::remove_file(&gitconfig).unwrap();
+        // A deletion publishes no blob, so it needs no validated content.
+        let pushed = engine.push_to_remote(
+            &cached.checkout_dir,
+            "main",
+            true,
+            &[gitconfig],
+            &ValidatedBlobs::default(),
+            &cached.fetched_sha,
+        );
+        assert!(pushed.is_ok(), "deletion push: {pushed:?}");
+
+        let heads = remote_heads(&git, bare.path());
+        let sync: Vec<_> = heads
+            .iter()
+            .filter(|(name, _)| name.starts_with("refs/heads/ude-sync-"))
+            .collect();
+        assert_eq!(sync.len(), 1, "{heads:?}");
+        let tree = git.output(bare.path(), &["ls-tree", "-r", "--name-only", &sync[0].0]);
+        assert!(!tree.contains("gitconfig.repo"), "{tree}");
+        assert!(
+            tree.contains("templates/projects/generic/gitignore.repo"),
+            "{tree}"
+        );
     }
 }
