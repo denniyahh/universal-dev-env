@@ -71,7 +71,7 @@ Plans:
   3. Path parameterization matches only full word and punctuation boundaries (`\b`, path delimiters), preventing corruption of partial substring tokens.
   4. Sanitizer round-tripping verifies that templated tokens substitute back cleanly to local machine environments on initialization.
 
-**Plans**: 12/15 plans executed
+**Plans**: 13/15 plans executed
 
 Plans:
 **Wave 1**
@@ -105,7 +105,7 @@ Plans:
 - [x] 02-12: Gate binds the commit message to the sync commit message, secret-scans the header and refuses empty directories; push is refused while a grafts file exists and both pushes run with commit-graphs and bitmaps disabled (every GIT_TEST_* variable removed), so hook-written commit text and objects outside the validated commit cannot publish, except the accepted pre-push-hook grafts residual (T-02-52), while a gc'd local-path remote still pushes (re-verification gap 1, second half); scoped mutation run and phase final gates (SEC-04).
 
 **Wave 10** *(gap closure; blocked on Wave 9 completion)*
-- [ ] 02-13: Published commit bound to the tree UDE staged (`git write-tree` id against the raw commit's tree line), each listed blob read by object id, every validated path required to hold its recorded content, repeated paths and empty, `.` or `..` path components refused, no hook-chosen name printed, so a duplicate tree entry, a deleted or reverted validated file and an unclonable `.` subtree cannot publish in direct or PR mode (re-verification gaps 1, 2, 4, 5; review CR-200, CR-201, WR-200) (SEC-04, SEC-02).
+- [x] 02-13: Published commit bound to the tree UDE staged (`git write-tree` id against the raw commit's tree line), each listed blob read by object id, every validated path required to hold its recorded content, repeated paths and empty, `.` or `..` path components refused, no hook-chosen name printed, so a duplicate tree entry, a deleted or reverted validated file and an unclonable `.` subtree cannot publish in direct or PR mode (re-verification gaps 1, 2, 4, 5; review CR-200, CR-201, WR-200) (SEC-04, SEC-02).
 
 **Wave 11** *(gap closure; blocked on Wave 10 completion)*
 - [ ] 02-14: Both pushes run with `GIT_GRAFT_FILE` at the null device through a narrow carve-out, so a grafts file written after the gate by a pre-push hook or by a process a hook left running sends nothing (re-verification gap 3, review WR-203; T-02-52 moves from accepted to mitigated if the tests hold); a direct push refused as not a fast-forward blames upstream only when the remote branch is not confirmed at the fetched commit (SEC-04, SEC-02).
@@ -159,7 +159,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Sync Engine & State Hermeticity | 11/11 | Complete    | 2026-10-22 |
-| 2. Sanitizer, Boundaries & Security Hardening | 12/15 | In Progress | - |
+| 2. Sanitizer, Boundaries & Security Hardening | 13/15 | In Progress | - |
 | 3. Doctor & CLI Hardening | 0/4 | Not started | - |
 | 4. Templates, Archetypes & Manifest Decoupling | 0/3 | Not started | - |
 

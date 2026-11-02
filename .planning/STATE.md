@@ -1,19 +1,20 @@
 ---
 gsd_state_version: "1.0"
-milestone: null
 current_phase: 02
 current_phase_name: Sanitizer, Boundaries & Security Hardening
 status: executing
-stopped_at: Completed 02-12-PLAN.md
-last_updated: "2026-11-02T16:20:42.050Z"
+stopped_at: Completed 02-13-PLAN.md
+last_updated: "2026-11-02T16:46:40.478Z"
 last_activity: 2026-11-02
 last_activity_desc: Phase 02 execution started
-state_head: 85898aa74e39ed068f14fd879c4bee64791a982a
+state_head: 0ea4afefbc020aeb64415ae930c1c20ceb47d86f
 progress:
   total_phases: 4
   completed_phases: 1
   total_plans: 26
-  completed_plans: 23
+  completed_plans: 24
+  percent: 25
+milestone: null
 ---
 
 # Project State
@@ -28,8 +29,8 @@ See: `.planning/PROJECT.md` (updated 2026-10-22)
 ## Current Position
 
 Phase: 02 (Sanitizer, Boundaries & Security Hardening) — EXECUTING
-Plan: 13 of 15
-Status: Executing Phase 02
+Plan: 14 of 15
+Status: Ready to execute
 Last activity: 2026-11-02 — Phase 02 execution started
 
 Progress: [███░░░░░░░] 25%
@@ -82,6 +83,7 @@ Progress: [███░░░░░░░] 25%
 | Phase 02 P10 | 14min | 3 tasks | 2 files |
 | Phase 02 P11 | 15 min | 3 tasks | 1 files |
 | Phase 02 P12 | 32 min | 3 tasks | 1 files |
+| Phase 02 P13 | 22 min | 2 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -151,6 +153,9 @@ Recent decisions affecting current work:
 - [Phase 02]: 02-12: the committed gate requires the raw commit message to equal SYNC_COMMIT_MESSAGE plus exactly one LF, secret-scans the header (a scan, not a bind) and refuses any directory with no entry below it
 - [Phase 02]: 02-12: the push is refused while the cache checkout has a grafts file; commit-graphs and bitmaps are disabled on both pushes instead of refused on presence, and every GIT_TEST_* variable is removed from both push commands
 - [Phase 02]: 02-12: the grafts path is read as strict UTF-8, so a cache checkout under a non-UTF-8 path refuses rather than checking a lossy path that could read as absent
+- [Phase 02]: 02-13: stage_publication records the staged tree id with git write-tree, before PR mode's checkout, and the committed gate requires the raw commit's first line to hold that id byte for byte, as its last check
+- [Phase 02]: 02-13: the committed gate reads each listed blob by its own id, refuses a repeated path or a bad path component from the raw listing, and requires every recorded path to hold its recorded content; no separate refusal of a D entry, so a deletion with no record still publishes
+- [Phase 02]: 02-13: read_blob_by_id refuses an object that is not a blob, because cat-file blob peels a tag; added during execution after a probe published a tag object through the real push in both modes
 
 ### Pending Todos
 
@@ -190,6 +195,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-01T15:45:48.136Z
-Stopped at: Completed 02-12-PLAN.md
+Last session: 2026-11-02T16:46:40.235Z
+Stopped at: Completed 02-13-PLAN.md
 Resume file: None
