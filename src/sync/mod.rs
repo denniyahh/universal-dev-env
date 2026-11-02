@@ -10522,6 +10522,80 @@ byte() { printf "\\$(printf '%03o' "$1")"; }
         }
     }
 
+    /// Publishes [`HOOKED_TEMPLATE`] to a seeded bare remote whose pre-receive hook prints
+    /// `REMOTE_REFUSED_THIS_PUSH` and refuses.
+    #[cfg(unix)]
+    fn push_refused_by_remote(
+        git: &GitFixture,
+        engine: &SyncEngine,
+        open_pr: bool,
+    ) -> Result<String, PushRemoteError> {
+        use std::os::unix::fs::PermissionsExt;
+        let bare = seeded_bare_remote(git);
+        let refuser = bare.path().join("hooks/pre-receive");
+        fs::create_dir_all(refuser.parent().unwrap()).unwrap();
+        fs::write(
+            &refuser,
+            "#!/bin/sh\necho REMOTE_REFUSED_THIS_PUSH >&2\nexit 1\n",
+        )
+        .unwrap();
+        fs::set_permissions(&refuser, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let cache = tempdir().unwrap();
+        let cached = engine
+            .ensure_remote_repo(bare.path().to_str().unwrap(), "main", cache.path())
+            .unwrap();
+        let managed = cached.templates_dir.join("projects/generic/gitconfig.repo");
+        fs::write(&managed, HOOKED_TEMPLATE).unwrap();
+        let validated = ValidatedBlobs::from_files(std::slice::from_ref(&managed));
+        engine.push_to_remote(
+            &cached.checkout_dir,
+            "main",
+            open_pr,
+            std::slice::from_ref(&managed),
+            &validated,
+            &cached.fetched_sha,
+        )
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_direct_push_failure_excerpt_has_no_grafts_hint() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let err = push_failure(push_refused_by_remote(&git, &engine, false));
+        assert!(err.contains("REMOTE_REFUSED_THIS_PUSH"), "{err}");
+        assert!(!err.contains("graftFileDeprecated"), "{err}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_pr_push_failure_excerpt_has_no_grafts_hint() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let err = push_failure(push_refused_by_remote(&git, &engine, true));
+        assert!(err.contains("REMOTE_REFUSED_THIS_PUSH"), "{err}");
+        assert!(!err.contains("graftFileDeprecated"), "{err}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_direct_push_publishes_with_benign_pre_push_hook() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let pushed = push_with_hook(&git, &engine, false, "pre-push", "");
+        assert_published_exact(&git, &pushed, false);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_pr_push_publishes_with_benign_pre_push_hook() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let pushed = push_with_hook(&git, &engine, true, "pre-push", "");
+        assert_published_exact(&git, &pushed, true);
+    }
+
     #[test]
     #[cfg(unix)]
     fn test_direct_push_publishes_with_hook_commit_and_no_grafts_file() {
