@@ -516,6 +516,12 @@ impl SyncEngine {
         process::run_bounded(cmd, label, self.limits.network)
     }
 
+    /// Runs a `git push` on the network tier with the grafts file at the null device.
+    /// `label` must not contain argv (remote URLs).
+    fn run_push(&self, cmd: Command, label: &str) -> Result<RunOutput, String> {
+        process::run_bounded_ignoring_grafts(cmd, label, self.limits.network)
+    }
+
     /// Computes the sha256 checksum of a byte slice
     pub fn compute_hash(bytes: &[u8]) -> String {
         let mut hasher = Sha256::new();
@@ -1940,7 +1946,7 @@ impl SyncEngine {
     /// PR mode: commits on a fresh `ude-sync-<hash>-<epoch>` branch, pushes it and opens
     /// a PR against `branch`. Not subject to the upstream-moved abort (D-18 scope note),
     /// but its commit must sit directly on `fetched_sha`, like a direct push's. The push
-    /// reads no commit-graph or bitmap and sees no `GIT_TEST_*` variable.
+    /// reads no commit-graph, bitmap or grafts file and sees no `GIT_TEST_*` variable.
     fn push_pr_branch(
         &self,
         remote_checkout: &Path,
@@ -2018,6 +2024,10 @@ impl SyncEngine {
         // here. Every GIT_TEST_* variable is removed because GIT_TEST_COMMIT_GRAPH makes git
         // load commit-graphs even under core.commitGraph=false (probed), and git's other
         // test-suite variables have no place in a user's push.
+        //
+        // Push's object walk also reads the grafts file. The gate's refusal runs before the
+        // push, and a hook, a process it left or a command it wrote into the remote config
+        // can write the file after that, so run_push makes the walk read the null device.
         let refspec = format!("{commit}:refs/heads/{sync_branch}");
         let mut push = self.git(Some(remote_checkout));
         push.args([
@@ -2032,7 +2042,7 @@ impl SyncEngine {
         ]);
         remove_git_test_env(&mut push, std::env::vars_os().map(|(key, _)| key));
         let push_out = self
-            .run_network(push, "git push")
+            .run_push(push, "git push")
             .map_err(|e| format!("Failed to push sync branch: {e}"))?;
 
         // Return working tree to canonical branch
@@ -2077,8 +2087,8 @@ impl SyncEngine {
     /// commit id the committed gate validated, never a ref a hook can move, and no tags.
     /// It is a plain fast-forward push, never forced: when upstream moved after the fetch,
     /// the remote's fast-forward check rejects it, the cache commit is rolled back and the
-    /// result is [`PushRemoteError::UpstreamMoved`] (D-18). The push reads no commit-graph
-    /// or bitmap and sees no `GIT_TEST_*` variable.
+    /// result is [`PushRemoteError::UpstreamMoved`] (D-18). The push reads no commit-graph,
+    /// bitmap or grafts file and sees no `GIT_TEST_*` variable.
     fn push_direct(
         &self,
         remote_checkout: &Path,
@@ -2133,6 +2143,10 @@ impl SyncEngine {
         // here. Every GIT_TEST_* variable is removed because GIT_TEST_COMMIT_GRAPH makes git
         // load commit-graphs even under core.commitGraph=false (probed), and git's other
         // test-suite variables have no place in a user's push.
+        //
+        // Push's object walk also reads the grafts file. The gate's refusal runs before the
+        // push, and a hook, a process it left or a command it wrote into the remote config
+        // can write the file after that, so run_push makes the walk read the null device.
         let refspec = format!("{commit}:refs/heads/{branch}");
         let mut push = self.git(Some(remote_checkout));
         push.args([
@@ -2148,7 +2162,7 @@ impl SyncEngine {
         ]);
         remove_git_test_env(&mut push, std::env::vars_os().map(|(key, _)| key));
         let push_out = self
-            .run_network(push, "git push")
+            .run_push(push, "git push")
             .map_err(|e| Failed(format!("Failed to push to remote: {e}")))?;
 
         if !push_out.status.success() {
@@ -2291,9 +2305,8 @@ impl SyncEngine {
             );
         }
 
-        // Push's object walk follows grafts, which change no raw object the gate reads, and
-        // git has no option to ignore them (GIT_GRAFT_FILE is removed by
-        // process::prepare_command), so the file's presence is refused.
+        // The refusal on presence stays by operator decision 2026-10-28. It no longer decides
+        // what is sent: both pushes run through run_push, so they do not read the file.
         self.refuse_grafts_file(repo)?;
 
         // A post-commit hook (it runs despite --no-verify) can amend, add commits or build

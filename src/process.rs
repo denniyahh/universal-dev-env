@@ -41,6 +41,16 @@ pub const GIT_LOCAL_ENV_VARS: [&str; 15] = [
     "GIT_COMMON_DIR",
 ];
 
+/// The null device's path. `std` has no such constant. The Windows spelling is from this
+/// cfg alone and has not been run (backlog Phase 999.1).
+#[cfg(not(windows))]
+pub const NULL_DEVICE: &str = "/dev/null";
+
+/// The null device's path. `std` has no such constant. The Windows spelling is from this
+/// cfg alone and has not been run (backlog Phase 999.1).
+#[cfg(windows)]
+pub const NULL_DEVICE: &str = "NUL";
+
 /// Number of trailing non-empty stderr lines that [`stderr_excerpt`] keeps.
 pub const STDERR_EXCERPT_LINES: usize = 5;
 
@@ -115,6 +125,27 @@ pub fn prepare_command(cmd: &mut Command) {
 pub fn run_bounded(cmd: Command, label: &str, timeout: Duration) -> Result<RunOutput, String> {
     let mut cmd = cmd;
     prepare_command(&mut cmd);
+    spawn_prepared(cmd, label, timeout)
+}
+
+/// [`run_bounded`] for a `git push` only: the child sees `GIT_GRAFT_FILE` at
+/// [`NULL_DEVICE`], so its object walk reads no grafts file. [`prepare_command`] still
+/// removes an inherited or caller-set value, and only this constant is set after it, so
+/// no caller can pass another value.
+pub fn run_bounded_ignoring_grafts(
+    cmd: Command,
+    label: &str,
+    timeout: Duration,
+) -> Result<RunOutput, String> {
+    let mut cmd = cmd;
+    prepare_command(&mut cmd);
+    cmd.env("GIT_GRAFT_FILE", NULL_DEVICE);
+    spawn_prepared(cmd, label, timeout)
+}
+
+/// Spawns `cmd`, already prepared with [`prepare_command`], and waits as [`run_bounded`]
+/// describes.
+fn spawn_prepared(cmd: Command, label: &str, timeout: Duration) -> Result<RunOutput, String> {
     let mut wrapped = CommandWrap::from(cmd);
     #[cfg(unix)]
     wrapped.wrap(process_wrap::std::ProcessGroup::leader());
@@ -453,6 +484,23 @@ mod tests {
         assert!(out.status.success());
         assert!(out.stdout.is_empty(), "stdout not empty: {:?}", out.stdout);
         assert!(out.stderr.is_empty(), "stderr not empty: {:?}", out.stderr);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_run_bounded_ignoring_grafts_sets_the_null_device() {
+        let script = r#"printf "%s" "${GIT_GRAFT_FILE-unset}""#;
+        let mut ignoring = sh(script, &[]);
+        ignoring.env("GIT_GRAFT_FILE", "/decoy");
+        let out = run_bounded_ignoring_grafts(ignoring, LABEL, Duration::from_secs(10))
+            .expect("child runs");
+        assert_eq!(String::from_utf8_lossy(&out.stdout), NULL_DEVICE);
+
+        // The opposite direction: the plain run still removes the value.
+        let mut plain = sh(script, &[]);
+        plain.env("GIT_GRAFT_FILE", "/decoy");
+        let out = run_bounded(plain, LABEL, Duration::from_secs(10)).expect("child runs");
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "unset");
     }
 
     #[test]
