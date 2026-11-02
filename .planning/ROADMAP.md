@@ -71,7 +71,7 @@ Plans:
   3. Path parameterization matches only full word and punctuation boundaries (`\b`, path delimiters), preventing corruption of partial substring tokens.
   4. Sanitizer round-tripping verifies that templated tokens substitute back cleanly to local machine environments on initialization.
 
-**Plans**: 14/15 plans executed
+**Plans**: 15/15 plans executed
 
 Plans:
 **Wave 1**
@@ -111,7 +111,7 @@ Plans:
 - [x] 02-14: Both pushes run with `GIT_GRAFT_FILE` at the null device through a narrow carve-out, so a grafts file written after the gate by a pre-push hook or by a process a hook left running sends nothing (re-verification gap 3, review WR-203; T-02-52 moves from accepted to mitigated if the tests hold); a direct push refused as not a fast-forward blames upstream only when the remote branch is not confirmed at the fetched commit (SEC-04, SEC-02).
 
 **Wave 12** *(gap closure; blocked on Wave 11 completion)*
-- [ ] 02-15: Per-check, per-read and per-option controls, scoped mutation run and phase final gates, including a hermeticity gate that inspects its decoy, on the gate's final state; no production code (SEC-04, SEC-02).
+- [x] 02-15: Per-check, per-read and per-option controls, scoped mutation run and phase final gates, including a hermeticity gate that inspects its decoy, on the gate's final state; no production code (SEC-04, SEC-02).
 
 ### Phase 3: Doctor & CLI Hardening
 
@@ -159,7 +159,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Sync Engine & State Hermeticity | 11/11 | Complete    | 2026-10-22 |
-| 2. Sanitizer, Boundaries & Security Hardening | 14/15 | In Progress | - |
+| 2. Sanitizer, Boundaries & Security Hardening | 15/15 | In Progress | - |
 | 3. Doctor & CLI Hardening | 0/4 | Not started | - |
 | 4. Templates, Archetypes & Manifest Decoupling | 0/3 | Not started | - |
 
