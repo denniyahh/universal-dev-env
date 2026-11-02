@@ -8961,6 +8961,20 @@ sh "$FORGE" .git/objects/info/commit-graph "$(git rev-parse HEAD)" parent "$X"
     #[cfg(unix)]
     const HOOK_GRAFT: &str = graft_lines!();
 
+    /// post-commit tail: the injected commit now, and a grafts file written during the push.
+    /// The hook leaves a bounded background process and points `remote.origin.receivepack`
+    /// at a command that signals it and waits for its write before running the real
+    /// receive-pack. So the write always lands after the gate and before push's object walk.
+    /// Both loops stop after about 10 s, so a refused push leaves nothing running for long.
+    #[cfg(unix)]
+    const HOOK_GRAFTS_WRITTEN_DURING_PUSH: &str = concat!(
+        injected_commit_lines!(),
+        r#"C=$(git rev-parse HEAD); B=$(git rev-parse HEAD~1); D=$(pwd)/.git
+git config remote.origin.receivepack "n=0; : > '$D/ude-go'; while [ ! -e '$D/ude-ack' ] && [ \$n -lt 1000 ]; do sleep 0.01; n=\$((n+1)); done; git receive-pack"
+( n=0; while [ ! -e "$D/ude-go" ] && [ $n -lt 1000 ]; do sleep 0.01; n=$((n+1)); done; printf '%s %s %s\n' "$C" "$B" "$X" >> "$D/info/grafts"; : > "$D/ude-ack" ) >/dev/null 2>&1 &
+"#
+    );
+
     /// Hook tail: writes a commit-graph holding the injected commit, then forges UDE's
     /// commit in it to have the injected commit as a second parent. Needs a `FORGE` line.
     #[cfg(unix)]
@@ -10395,6 +10409,10 @@ byte() { printf "\\$(printf '%03o' "$1")"; }
         );
     }
 
+    /// How many times each test of a grafts file written during the push repeats.
+    #[cfg(unix)]
+    const GRAFTS_DURING_PUSH_RUNS: usize = 3;
+
     /// A hook wrote a grafts file: nothing was published and the injected blob stayed home.
     #[cfg(unix)]
     fn assert_refused_for_grafts(git: &GitFixture, pushed: HookedPush) {
@@ -10426,6 +10444,69 @@ byte() { printf "\\$(printf '%03o' "$1")"; }
         let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
         let pushed = push_with_post_commit_hook(&git, &engine, true, HOOK_GRAFT);
         assert_refused_for_grafts(&git, pushed);
+    }
+
+    /// A hook wrote a grafts file after the gate: the push succeeded with exactly the
+    /// validated bytes and the injected blob stayed home, while the published commit pushed
+    /// from the same checkout without the null grafts file delivers it (the opposite
+    /// direction: the grafts file was really in effect).
+    #[cfg(unix)]
+    fn assert_no_injected_blob_with_control(git: &GitFixture, pushed: &HookedPush, open_pr: bool) {
+        assert!(pushed.hook_ran, "the hook never ran");
+        assert!(pushed.res.is_ok(), "{:?}", pushed.res);
+        let injected = hook_recorded_id(pushed, "ude-test-injected-blob");
+        assert!(
+            !holds_object(git, pushed.bare.path(), &injected),
+            "the remote holds the injected blob"
+        );
+        let published = assert_published_exact(git, pushed, open_pr);
+        let control = push_to_fresh_bare(git, &pushed.checkout, &published, &[], false);
+        assert!(
+            holds_object(git, control.path(), &injected),
+            "the control push did not send the injected blob, so the grafts file had no effect"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_direct_push_sends_no_object_from_pre_push_grafts() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let pushed = push_with_hook(&git, &engine, false, "pre-push", HOOK_GRAFT);
+        assert_no_injected_blob_with_control(&git, &pushed, false);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_pr_push_sends_no_object_from_pre_push_grafts() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let pushed = push_with_hook(&git, &engine, true, "pre-push", HOOK_GRAFT);
+        assert_no_injected_blob_with_control(&git, &pushed, true);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_direct_push_sends_no_object_from_grafts_written_during_push() {
+        for _ in 0..GRAFTS_DURING_PUSH_RUNS {
+            let git = GitFixture::new();
+            let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+            let pushed =
+                push_with_post_commit_hook(&git, &engine, false, HOOK_GRAFTS_WRITTEN_DURING_PUSH);
+            assert_no_injected_blob_with_control(&git, &pushed, false);
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_pr_push_sends_no_object_from_grafts_written_during_push() {
+        for _ in 0..GRAFTS_DURING_PUSH_RUNS {
+            let git = GitFixture::new();
+            let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+            let pushed =
+                push_with_post_commit_hook(&git, &engine, true, HOOK_GRAFTS_WRITTEN_DURING_PUSH);
+            assert_no_injected_blob_with_control(&git, &pushed, true);
+        }
     }
 
     #[test]

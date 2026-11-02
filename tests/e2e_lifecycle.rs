@@ -896,6 +896,173 @@ fn test_sync_ignores_inherited_git_dir() {
     );
 }
 
+/// Runs `ude sync push` on a local edit with `GIT_GRAFT_FILE` set to a decoy path in UDE's
+/// own process environment and a `git` shim first on `PATH`. Returns the push's output and
+/// one `(GIT_GRAFT_FILE value or "unset", args)` for each git process the shim saw.
+#[cfg(unix)]
+fn push_logging_git_graft_file(open_pr: bool) -> (Output, Vec<(String, String)>) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let bin = env!("CARGO_BIN_EXE_ude");
+    let temp = tempdir().unwrap();
+    let git = GitFixture::new();
+
+    // Project created with ude init; its mise.toml seeds the remote template.
+    let local_proj = temp.path().join("local_proj");
+    fs::create_dir_all(&local_proj).unwrap();
+    let init = ude_command(bin)
+        .args([
+            "init",
+            "--path",
+            &local_proj.to_string_lossy(),
+            "--type",
+            "rust",
+        ])
+        .output()
+        .expect("ude init execution");
+    assert!(
+        init.status.success(),
+        "ude init failed: {}",
+        String::from_utf8_lossy(&init.stderr)
+    );
+    let init_content = fs::read_to_string(local_proj.join("mise.toml")).unwrap();
+
+    // Bare remote seeded with templates/projects/agents/mise.toml.jinja.
+    let bare_remote = temp.path().join("bare_remote.git");
+    let bare_url = bare_remote.to_string_lossy().to_string();
+    git.run(temp.path(), &["init", "--bare", "-b", "main", &bare_url]);
+    let seed_dir = temp.path().join("seed_repo");
+    git.run(
+        temp.path(),
+        &["init", "-b", "main", &seed_dir.to_string_lossy()],
+    );
+    let tdir = seed_dir.join("templates/projects/agents");
+    fs::create_dir_all(&tdir).unwrap();
+    fs::write(tdir.join("mise.toml.jinja"), &init_content).unwrap();
+    git.run(&seed_dir, &["add", "-A"]);
+    git.run(&seed_dir, &["commit", "-m", "seed commit"]);
+    git.run(&seed_dir, &["remote", "add", "origin", &bare_url]);
+    git.run(&seed_dir, &["push", "origin", "main"]);
+
+    let fake_home = temp.path().join("fake_home");
+    let fake_config = fake_home.join(".config");
+    fs::create_dir_all(fake_config.join("git")).unwrap();
+    let gitconfig = fake_config.join("git/config");
+    fs::write(
+        &gitconfig,
+        "[user]\n  name = UDE Tester\n  email = tester@example.com\n[commit]\n  gpgsign = false\n",
+    )
+    .unwrap();
+    let cache_dir = temp.path().join("cache");
+    fs::create_dir_all(&cache_dir).unwrap();
+
+    // The shim logs what each git process sees, then runs the real git.
+    let host_path = std::env::var_os("PATH").expect("PATH is set");
+    let real_git = std::env::split_paths(&host_path)
+        .map(|dir| dir.join("git"))
+        .find(|candidate| candidate.is_file())
+        .expect("git on PATH");
+    let shim_dir = temp.path().join("shim");
+    fs::create_dir_all(&shim_dir).unwrap();
+    let log = temp.path().join("git-graft-file.log");
+    let shim = shim_dir.join("git");
+    fs::write(
+        &shim,
+        format!(
+            "#!/bin/sh\nprintf '%s\\t%s\\n' \"${{GIT_GRAFT_FILE-unset}}\" \"$*\" >> '{log}'\nexec '{real}' \"$@\"\n",
+            log = log.display(),
+            real = real_git.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&shim, fs::Permissions::from_mode(0o755)).unwrap();
+    let decoy = temp.path().join("decoy-grafts");
+    fs::write(&decoy, "").unwrap();
+
+    // Negative control: nothing removes the variable here, so the shim logs the decoy.
+    let control = Command::new(&shim)
+        .arg("--version")
+        .env("GIT_GRAFT_FILE", &decoy)
+        .stdin(Stdio::null())
+        .output()
+        .expect("run the git shim");
+    assert!(control.status.success(), "the git shim failed");
+    assert_eq!(
+        fs::read_to_string(&log).unwrap(),
+        format!("{}\t--version\n", decoy.display()),
+        "the shim did not log the value it was given"
+    );
+    fs::write(&log, "").unwrap();
+
+    fs::write(
+        local_proj.join("mise.toml"),
+        format!("{init_content}\n# edit pushed with an inherited GIT_GRAFT_FILE\n"),
+    )
+    .unwrap();
+    let mut shim_path = vec![shim_dir];
+    shim_path.extend(std::env::split_paths(&host_path));
+    let mut args = vec!["sync", "push", "--remote", &bare_url];
+    if open_pr {
+        args.push("--pr");
+    }
+    let push = ude_command(bin)
+        .current_dir(&local_proj)
+        .args(&args)
+        .env("GIT_GRAFT_FILE", &decoy)
+        .env("PATH", std::env::join_paths(shim_path).unwrap())
+        .env("HOME", &fake_home)
+        .env("XDG_CONFIG_HOME", &fake_config)
+        .env("GIT_CONFIG_GLOBAL", &gitconfig)
+        .env("XDG_CACHE_HOME", &cache_dir)
+        .output()
+        .expect("ude sync push execution");
+
+    let lines = fs::read_to_string(&log)
+        .unwrap()
+        .lines()
+        .map(|line| {
+            let (value, args) = line.split_once('\t').expect("value and args");
+            (value.to_string(), args.to_string())
+        })
+        .collect();
+    (push, lines)
+}
+
+/// The push exited 0; the one git process running `push` saw the null device, and every
+/// other git process saw the variable unset. Whole fields are compared, so the inherited
+/// decoy or any other value fails.
+#[cfg(unix)]
+fn assert_only_the_push_sees_the_null_device(open_pr: bool) {
+    let (push, lines) = push_logging_git_graft_file(open_pr);
+    assert!(
+        push.status.success(),
+        "ude sync push failed. Out: {}\nErr: {}",
+        String::from_utf8_lossy(&push.stdout),
+        String::from_utf8_lossy(&push.stderr)
+    );
+    let (pushes, others): (Vec<_>, Vec<_>) = lines
+        .iter()
+        .partition(|(_, args)| args.split_whitespace().any(|word| word == "push"));
+    assert_eq!(pushes.len(), 1, "expected one push process: {lines:?}");
+    assert_eq!(pushes[0].0, "/dev/null", "the push's value: {lines:?}");
+    assert!(!others.is_empty(), "no other git process ran: {lines:?}");
+    for (value, args) in others {
+        assert_eq!(value, "unset", "the value seen by git {args}");
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn test_cli_direct_push_alone_gets_the_null_grafts_file() {
+    assert_only_the_push_sees_the_null_device(false);
+}
+
+#[test]
+#[cfg(unix)]
+fn test_cli_pr_push_alone_gets_the_null_grafts_file() {
+    assert_only_the_push_sees_the_null_device(true);
+}
+
 #[test]
 fn test_sync_corrupt_state_fails_loudly() {
     let bin = env!("CARGO_BIN_EXE_ude");
