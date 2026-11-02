@@ -13136,6 +13136,37 @@ byte() { printf "\\$(printf '%03o' "$1")"; }
         assert!(err.contains("failed to inspect committed blob"), "{err}");
     }
 
+    #[test]
+    #[cfg(unix)]
+    fn test_committed_gate_requires_validated_content_refuses_tag_object() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let (repo, _base) = templates_repo(&git, &[("f", "f base\n")]);
+        let dir = repo.path();
+        let blob = write_blob(&git, dir, b"f new\n");
+        let tag = tag_on_blob(&git, dir, &blob);
+        let digest = SyncEngine::fingerprint(b"f new\n");
+        let record: HashMap<PathBuf, &str> = [(PathBuf::from("templates/f"), digest.as_str())]
+            .into_iter()
+            .collect();
+
+        // Opposite direction: the same record is satisfied by the blob the tag points at.
+        let holds_blob: HashMap<&[u8], &[u8]> = [(b"templates/f".as_slice(), blob.as_bytes())]
+            .into_iter()
+            .collect();
+        engine
+            .require_validated_content(dir, &holds_blob, &record)
+            .expect("the blob holds the recorded content");
+
+        let holds_tag: HashMap<&[u8], &[u8]> = [(b"templates/f".as_slice(), tag.as_bytes())]
+            .into_iter()
+            .collect();
+        let err = engine
+            .require_validated_content(dir, &holds_tag, &record)
+            .expect_err("a tag object must not count as the recorded content");
+        assert!(err.contains("does not hold the validated content"), "{err}");
+    }
+
     /// Pushes with a `core.fsmonitor` script that reads `swapped_root` (made by `build_root`
     /// from the checkout) into the index as the staged gate reads the last blob, so the tree
     /// recorded next holds what the gate never read. The script stands in for any process
