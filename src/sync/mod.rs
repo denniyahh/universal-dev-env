@@ -15436,6 +15436,49 @@ git update-ref HEAD "$N"
         assert_unchanged_subtree_not_matching_its_id_refused(true);
     }
 
+    /// The fetched head's root tree object, rewritten in the cache checkout to list an extra
+    /// file: refused, the remote untouched. git itself refuses that read (`hash mismatch`,
+    /// measured), so this pins git's own check of the root tree, which the gate relies on;
+    /// it makes no assertion on which refusal fires.
+    #[cfg(unix)]
+    fn assert_fetched_root_tree_not_matching_its_id_refused(open_pr: bool) {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let step = |checkout: &Path, managed: &Path| {
+            let pushed = hide_hooked_template(&git, checkout, managed);
+            let validated = write_blob(&git, checkout, HOOKED_TEMPLATE.as_bytes());
+            let templates_entry = git.output(checkout, &["ls-tree", "HEAD", "templates"]);
+            let root = git.output(checkout, &["rev-parse", "HEAD^{tree}"]);
+            let forged = git_with_input(
+                &git,
+                checkout,
+                &["mktree"],
+                format!("{templates_entry}\n100644 blob {validated}\textra\n").as_bytes(),
+            );
+            forge_loose_object(checkout, &root, &forged);
+            pushed
+        };
+        let pushed = push_after_step(&git, &engine, open_pr, &step);
+        assert_push_refused(&git, &pushed);
+        let root = git.output(pushed.bare.path(), &["rev-parse", "main^{tree}"]);
+        assert!(
+            remote_object_matches_id(&git, pushed.bare.path(), &root, "tree"),
+            "the forgery reached the bare remote's object"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_direct_push_refuses_fetched_root_tree_not_matching_its_id() {
+        assert_fetched_root_tree_not_matching_its_id_refused(false);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_pr_push_refuses_fetched_root_tree_not_matching_its_id() {
+        assert_fetched_root_tree_not_matching_its_id_refused(true);
+    }
+
     /// post-checkout tail, run by `checkout -B` before ensure's `reset --hard`: points
     /// `refs/replace/<HEAD's tree>` at that tree with the blob of
     /// `.git/ude-test-validated-bytes` at [`GATE_REL`], so the reset fills the index and the
