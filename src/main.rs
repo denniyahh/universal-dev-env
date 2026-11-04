@@ -1039,7 +1039,7 @@ fn main() {
                     }
                 }
                 cli::SyncAction::Push { force, pr } => {
-                    let (root_template_dir, remote_checkout_root, remote_cache) =
+                    let (root_template_dir, _remote_checkout_root, remote_cache) =
                         open_push_templates(&engine, remote_url.as_deref(), &branch, &cache_dir);
                     // The same deletion check as status and pull, so push agrees with them.
                     let engine = match &remote_cache {
@@ -1147,7 +1147,7 @@ fn main() {
                         }
                     }
 
-                    let persist_immediately = remote_checkout_root.is_none();
+                    let persist_immediately = remote_cache.is_none();
                     match engine.push_updates(
                         &local_project,
                         &root_template_dir,
@@ -1247,21 +1247,16 @@ fn main() {
                                 );
                             }
 
-                            if let Some(ref remote_checkout) = remote_checkout_root {
+                            if let Some(ref cache) = remote_cache {
                                 println!(
                                     "  {} Pushing synchronized templates to remote repository...",
                                     "==>".cyan()
                                 );
-                                let fetched_sha = remote_cache
-                                    .as_ref()
-                                    .map_or("", |cache| cache.fetched_sha.as_str());
                                 match engine.push_to_remote(
-                                    remote_checkout,
-                                    &branch,
+                                    &cache.publish_target(&branch),
                                     pr,
                                     &staged_files,
                                     &validated_blobs,
-                                    fetched_sha,
                                 ) {
                                     Ok(msg) => {
                                         println!("  {} {msg}", "✓".green());

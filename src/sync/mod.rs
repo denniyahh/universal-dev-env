@@ -373,6 +373,34 @@ pub struct RemoteCache {
     pub lock: RemoteLockGuard,
 }
 
+impl RemoteCache {
+    /// Where a publication of `branch` from this cache goes: the checkout it is committed
+    /// in, the caller's URL it is pushed to and read back from, and the head it builds on.
+    pub fn publish_target<'a>(&'a self, branch: &'a str) -> PublishTarget<'a> {
+        PublishTarget {
+            checkout: &self.checkout_dir,
+            remote_url: &self.remote_url,
+            branch,
+            fetched_sha: &self.fetched_sha,
+        }
+    }
+}
+
+/// Where [`SyncEngine::push_to_remote`] publishes. The push names `remote_url`, never a
+/// remote of the checkout, and returns Ok only once `git ls-remote` of `remote_url` from
+/// outside the checkout reports the pushed ref at the validated commit.
+#[derive(Debug, Clone, Copy)]
+pub struct PublishTarget<'a> {
+    /// The cache checkout the commit is made in ([`RemoteCache::checkout_dir`]).
+    pub checkout: &'a Path,
+    /// The caller's remote URL ([`RemoteCache::remote_url`]).
+    pub remote_url: &'a str,
+    /// The branch a direct push updates and a PR targets.
+    pub branch: &'a str,
+    /// The head the commit must build on ([`RemoteCache::fetched_sha`]).
+    pub fetched_sha: &'a str,
+}
+
 /// What the staged gate validated, handed to the commit and to the committed gate.
 #[derive(Debug, PartialEq, Eq)]
 struct StagedPublication {
@@ -537,22 +565,6 @@ impl SyncEngine {
     /// `label` must not contain argv (remote URLs).
     fn run_push(&self, cmd: Command, label: &str) -> Result<RunOutput, String> {
         process::run_bounded_ignoring_grafts(cmd, label, self.limits.network)
-    }
-
-    /// Whether `git ls-remote` reports `refs/heads/<branch>` on `origin` at exactly `sha`;
-    /// false when that cannot be read or the output is anything else.
-    ///
-    /// The read goes through the checkout's remote config, which a hook can write, so true
-    /// means what `git ls-remote` printed, not what the remote holds. That is why only a
-    /// refusal's wording may depend on it.
-    fn remote_branch_is_at(&self, repo: &Path, branch: &str, sha: &str) -> bool {
-        let refname = format!("refs/heads/{branch}");
-        let mut ls_remote = self.git(Some(repo));
-        ls_remote.args(["ls-remote", "--refs", "origin", &refname]);
-        self.run_network(ls_remote, "git ls-remote")
-            .is_ok_and(|out| {
-                out.status.success() && out.stdout == format!("{sha}\t{refname}\n").into_bytes()
-            })
     }
 
     /// Computes the sha256 checksum of a byte slice
@@ -1169,6 +1181,27 @@ impl SyncEngine {
                 let (id, name) = line.split_once('\t')?;
                 (name == refname).then(|| id.to_string())
             }))
+    }
+
+    /// Ok only when [`Self::remote_head`] of `target.remote_url` reports `refs/heads/<branch>`
+    /// at exactly `commit` (whole ids, so a prefix does not pass). What `git push` said is
+    /// not enough: config in the checkout (`url.*.pushInsteadOf`, `url.*.insteadOf`,
+    /// `remote.<url>.pushurl`) can send a push to the caller's URL somewhere else, and the
+    /// read, run from the filesystem root, does not follow it.
+    fn confirm_published(
+        &self,
+        target: &PublishTarget<'_>,
+        branch: &str,
+        commit: &str,
+    ) -> Result<(), String> {
+        let detail = match self.remote_head(target.remote_url, branch) {
+            Ok(Some(head)) if head == commit => return Ok(()),
+            Ok(_) => String::new(),
+            Err(e) => format!(": {e}"),
+        };
+        Err(format!(
+            "git push reported success, but the remote branch {branch} is not at the validated commit{detail}; nothing was recorded as published; run ude sync pull, then push again"
+        ))
     }
 
     /// The commit `refs/remotes/origin/<branch>` points at in `checkout`.
@@ -1834,31 +1867,29 @@ impl SyncEngine {
         }
     }
 
-    /// Publishes the staged template updates: commits them in the cache checkout and
-    /// pushes the commit directly to `branch`, or to a fresh `ude-sync-*` branch with a
-    /// PR when `open_pr` is set. `fetched_sha` is the head UDE fetched
-    /// ([`RemoteCache::fetched_sha`]); the published commit must have it as its only
-    /// parent.
+    /// Publishes the staged template updates: commits them in `target.checkout` and pushes
+    /// the commit to `target.remote_url`, directly to `target.branch`, or to a fresh
+    /// `ude-sync-*` branch with a PR when `open_pr` is set. The published commit must have
+    /// `target.fetched_sha` as its only parent, and Ok means `git ls-remote` of the URL
+    /// reports the pushed ref at that commit.
     pub fn push_to_remote(
         &self,
-        remote_checkout: &Path,
-        branch: &str,
+        target: &PublishTarget<'_>,
         open_pr: bool,
         staged_files: &[PathBuf],
         validated: &ValidatedBlobs,
-        fetched_sha: &str,
     ) -> Result<String, PushRemoteError> {
         let Some(staged) = self
-            .stage_publication(remote_checkout, staged_files, validated)
+            .stage_publication(target.checkout, staged_files, validated)
             .map_err(PushRemoteError::Failed)?
         else {
             return Ok("No changes to push to remote repository.".to_string());
         };
         if open_pr {
-            self.push_pr_branch(remote_checkout, branch, &staged, validated, fetched_sha)
+            self.push_pr_branch(target, &staged, validated)
                 .map_err(PushRemoteError::Failed)
         } else {
-            self.push_direct(remote_checkout, branch, &staged, validated, fetched_sha)
+            self.push_direct(target, &staged, validated)
         }
     }
 
@@ -2049,12 +2080,16 @@ impl SyncEngine {
     /// reads no commit-graph, bitmap or grafts file and sees no `GIT_TEST_*` variable.
     fn push_pr_branch(
         &self,
-        remote_checkout: &Path,
-        branch: &str,
+        target: &PublishTarget<'_>,
         staged: &StagedPublication,
         validated: &ValidatedBlobs,
-        fetched_sha: &str,
     ) -> Result<String, String> {
+        let PublishTarget {
+            checkout: remote_checkout,
+            branch,
+            fetched_sha,
+            ..
+        } = *target;
         let epoch_secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -2197,11 +2232,15 @@ impl SyncEngine {
         }
     }
 
-    /// Direct mode: commits in the cache checkout and pushes the commit to `branch`.
+    /// Direct mode: commits in the cache checkout and pushes the commit to `branch` of
+    /// `target.remote_url`.
     ///
     /// The commit must build on `fetched_sha` (branch continuity). The push sends the
     /// commit the committed gate validated, named so that no local ref and no replace ref
-    /// can stand in for it, and no tags.
+    /// can stand in for it, and no tags, to the caller's URL rather than to a remote of the
+    /// checkout, whose config a hook can write. Ok needs [`Self::confirm_published`] too;
+    /// when the remote does not report the commit the cache commit is rolled back and the
+    /// result is [`PushRemoteError::Failed`].
     /// It is a plain fast-forward push, never forced: when upstream moved after the fetch,
     /// the remote's fast-forward check rejects it, the cache commit is rolled back and the
     /// result is [`PushRemoteError::UpstreamMoved`] (D-18). When `git ls-remote` instead
@@ -2210,13 +2249,17 @@ impl SyncEngine {
     /// variable.
     fn push_direct(
         &self,
-        remote_checkout: &Path,
-        branch: &str,
+        target: &PublishTarget<'_>,
         staged: &StagedPublication,
         validated: &ValidatedBlobs,
-        fetched_sha: &str,
     ) -> Result<String, PushRemoteError> {
         use PushRemoteError::Failed;
+        let PublishTarget {
+            checkout: remote_checkout,
+            branch,
+            fetched_sha,
+            ..
+        } = *target;
         let commit_out = self
             .run_local(
                 self.commit_command(remote_checkout, SYNC_COMMIT_MESSAGE),
@@ -2292,7 +2335,8 @@ impl SyncEngine {
             "push",
             "--porcelain",
             "--no-follow-tags",
-            "origin",
+            "--",
+            target.remote_url,
             &refspec,
         ]);
         remove_git_test_env(&mut push, std::env::vars_os().map(|(key, _)| key));
@@ -2308,11 +2352,11 @@ impl SyncEngine {
                 // A shallow file can make git see the validated commit as not building on
                 // the fetched head, so the rejection alone does not mean upstream moved
                 // (probed). A replace ref no longer can, because the push reads past replace
-                // refs. This read runs only on this failure path, so a successful push makes
-                // no extra network call.
-                if self.remote_branch_is_at(remote_checkout, branch, fetched_sha) {
+                // refs. This read runs only on this failure path.
+                let head = self.remote_head(target.remote_url, branch);
+                if head.ok().flatten().as_deref() == Some(fetched_sha) {
                     return Err(Failed(format!(
-                        "git push origin {branch} was refused as not a fast-forward, but git ls-remote reports the remote branch still at the commit UDE fetched; a hook in the cache checkout most likely caused this"
+                        "git push to {branch} was refused as not a fast-forward, but git ls-remote reports the remote branch still at the commit UDE fetched; a hook in the cache checkout most likely caused this"
                     )));
                 }
                 return Err(PushRemoteError::UpstreamMoved {
@@ -2320,9 +2364,14 @@ impl SyncEngine {
                 });
             }
             return Err(Failed(with_excerpt(
-                format!("git push origin {branch} failed"),
+                format!("git push to {branch} failed"),
                 &push_out,
             )));
+        }
+
+        if let Err(err) = self.confirm_published(target, branch, &commit) {
+            self.rollback_commit(remote_checkout);
+            return Err(Failed(err));
         }
 
         Ok(format!(
@@ -5553,19 +5602,16 @@ mod tests {
             .ensure_remote_repo(bare.path().to_str().unwrap(), "main", cache.path())
             .unwrap();
         let tmpl_dir = &cached.templates_dir;
-        let checkout = cached.checkout_dir.as_path();
         let remote_tree = || git.output(bare.path(), &["ls-tree", "-r", "--name-only", "main"]);
 
         let gitconfig = tmpl_dir.join("projects/generic/gitconfig.repo");
         fs::remove_file(&gitconfig).unwrap();
         // A deletion publishes no blob, so it needs no validated content.
         let pushed = engine.push_to_remote(
-            checkout,
-            "main",
+            &cached.publish_target("main"),
             false,
             &[gitconfig],
             &ValidatedBlobs::default(),
-            &cached.fetched_sha,
         );
         assert!(pushed.is_ok(), "deletion push: {pushed:?}");
         let tree = remote_tree();
@@ -5585,12 +5631,10 @@ mod tests {
         fs::write(&hook, format!("#!/bin/sh\n# {prefix}{body}\n")).unwrap();
         let validated = ValidatedBlobs::from_files(std::slice::from_ref(&hook));
         let err = push_failure(engine.push_to_remote(
-            checkout,
-            "main",
+            &cached.publish_target("main"),
             false,
             &[gitignore, hook],
             &validated,
-            &cached.fetched_sha,
         ));
         assert!(
             err.starts_with("Publication gate violation: secret detected"),
@@ -7920,12 +7964,15 @@ mod tests {
         let head = git.output(remote_repo.path(), &["rev-parse", "HEAD"]);
         let validated = ValidatedBlobs::from_files(&staged_allowlist);
         let _ = engine.push_to_remote(
-            remote_repo.path(),
-            "main",
+            &PublishTarget {
+                checkout: remote_repo.path(),
+                remote_url: NO_REMOTE_URL,
+                branch: "main",
+                fetched_sha: &head,
+            },
             false,
             &staged_allowlist,
             &validated,
-            &head,
         );
 
         // Verify git status: the dirty secret file must remain UNTRACKED / UNSTAGED!
@@ -8119,12 +8166,15 @@ mod tests {
         let head = git.output(remote_repo.path(), &["rev-parse", "HEAD"]);
         let validated = ValidatedBlobs::from_files(&staged_allowlist);
         let res = engine.push_to_remote(
-            remote_repo.path(),
-            "main",
+            &PublishTarget {
+                checkout: remote_repo.path(),
+                remote_url: NO_REMOTE_URL,
+                branch: "main",
+                fetched_sha: &head,
+            },
             false,
             &staged_allowlist,
             &validated,
-            &head,
         );
 
         // Publication gate must detect secret in the staged blob and reject!
@@ -8185,12 +8235,15 @@ mod tests {
         let head = git.output(remote_repo.path(), &["rev-parse", "HEAD"]);
         let validated = ValidatedBlobs::from_files(std::slice::from_ref(&valid_file));
         let res = engine.push_to_remote(
-            remote_repo.path(),
-            "main",
+            &PublishTarget {
+                checkout: remote_repo.path(),
+                remote_url: NO_REMOTE_URL,
+                branch: "main",
+                fetched_sha: &head,
+            },
             false,
             &[valid_file],
             &validated,
-            &head,
         );
         let diff_cached = git.output(remote_repo.path(), &["diff", "--cached", "--name-only"]);
         (res, diff_cached)
@@ -8412,7 +8465,6 @@ mod tests {
             )
             .unwrap();
         let tmpl_dir = &cached.templates_dir;
-        let remote_checkout = cached.checkout_dir.as_path();
 
         // Step 2: Push changes in PR mode (open_pr: true)
         let managed_gitconfig = tmpl_dir.join("projects/generic/gitconfig.repo");
@@ -8423,14 +8475,8 @@ mod tests {
         .unwrap();
         let staged = vec![managed_gitconfig.clone()];
         let validated = ValidatedBlobs::from_files(&staged);
-        let pr_res = engine.push_to_remote(
-            remote_checkout,
-            "main",
-            true,
-            &staged,
-            &validated,
-            &cached.fetched_sha,
-        );
+        let pr_res =
+            engine.push_to_remote(&cached.publish_target("main"), true, &staged, &validated);
         assert!(pr_res.is_ok(), "PR push must succeed: {:?}", pr_res.err());
 
         // Explicitly release first lock before acquiring lock in Step 3
@@ -8453,7 +8499,6 @@ mod tests {
             )
             .unwrap();
         let tmpl_dir_2 = &cached_2.templates_dir;
-        let remote_checkout_2 = cached_2.checkout_dir.as_path();
         let managed_gitconfig_2 = tmpl_dir_2.join("projects/generic/gitconfig.repo");
         fs::write(
             &managed_gitconfig_2,
@@ -8463,12 +8508,10 @@ mod tests {
         let staged_2 = vec![managed_gitconfig_2.clone()];
         let validated_2 = ValidatedBlobs::from_files(&staged_2);
         let direct_res = engine.push_to_remote(
-            remote_checkout_2,
-            "main",
+            &cached_2.publish_target("main"),
             false,
             &staged_2,
             &validated_2,
-            &cached_2.fetched_sha,
         );
         assert!(
             direct_res.is_ok(),
@@ -8486,6 +8529,10 @@ mod tests {
             "Bare remote main branch must contain direct commit! Got: {main_content}"
         );
     }
+
+    /// The remote URL of a [`PublishTarget`] over a plain repository with no remote: those
+    /// tests stop at the staged gate or at `git status`, before any push or read.
+    const NO_REMOTE_URL: &str = "/nonexistent/ude-test-remote.git";
 
     /// The message of a hard push failure; panics on success or on `UpstreamMoved`.
     fn push_failure(res: Result<String, PushRemoteError>) -> String {
@@ -8711,12 +8758,10 @@ mod tests {
         fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
 
         let res = engine.push_to_remote(
-            checkout,
-            "main",
+            &cached.publish_target("main"),
             false,
             std::slice::from_ref(&managed),
             &validated,
-            &cached.fetched_sha,
         );
         let err = push_failure(res);
         assert!(
@@ -8734,12 +8779,10 @@ mod tests {
         fs::write(&managed, "[core]\n\tx = 1\n").unwrap();
         let validated = ValidatedBlobs::from_files(std::slice::from_ref(&managed));
         let res = engine.push_to_remote(
-            checkout,
-            "main",
+            &cached.publish_target("main"),
             false,
             std::slice::from_ref(&managed),
             &validated,
-            &cached.fetched_sha,
         );
         assert!(res.is_ok(), "{res:?}");
         assert_ne!(remote_main(), cached.fetched_sha);
@@ -9357,12 +9400,10 @@ byte() { printf "\\$(printf '%03o' "$1")"; }
         fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
 
         let res = engine.push_to_remote(
-            &checkout,
-            "main",
+            &cached.publish_target("main"),
             open_pr,
             std::slice::from_ref(&managed),
             &validated,
-            &cached.fetched_sha,
         );
         let hook_ran = checkout.join(".git/ude-test-hook-ran").exists();
         let fetched_sha = cached.fetched_sha.clone();
@@ -10726,12 +10767,10 @@ byte() { printf "\\$(printf '%03o' "$1")"; }
         fs::write(&managed, HOOKED_TEMPLATE).unwrap();
         let validated = ValidatedBlobs::from_files(std::slice::from_ref(&managed));
         engine.push_to_remote(
-            &cached.checkout_dir,
-            "main",
+            &cached.publish_target("main"),
             open_pr,
             std::slice::from_ref(&managed),
             &validated,
-            &cached.fetched_sha,
         )
     }
 
@@ -10977,12 +11016,10 @@ byte() { printf "\\$(printf '%03o' "$1")"; }
         fs::write(&managed, HOOKED_TEMPLATE).unwrap();
         let validated = ValidatedBlobs::from_files(std::slice::from_ref(&managed));
         let res = engine.push_to_remote(
-            &cached.checkout_dir,
-            "main",
+            &cached.publish_target("main"),
             false,
             std::slice::from_ref(&managed),
             &validated,
-            &cached.fetched_sha,
         );
 
         assert!(res.is_ok(), "{res:?}");
@@ -11057,12 +11094,15 @@ byte() { printf "\\$(printf '%03o' "$1")"; }
             .expect_err("a failed git status must be an error");
         assert!(err.contains("git status"), "{err}");
         let pushed = engine.push_to_remote(
-            not_repo.path(),
-            "main",
+            &PublishTarget {
+                checkout: not_repo.path(),
+                remote_url: NO_REMOTE_URL,
+                branch: "main",
+                fetched_sha: "",
+            },
             false,
             &[edited],
             &ValidatedBlobs::default(),
-            "",
         );
         assert!(
             matches!(pushed, Err(PushRemoteError::Failed(_))),
@@ -11152,17 +11192,14 @@ byte() { printf "\\$(printf '%03o' "$1")"; }
         cached: &RemoteCache,
         content: &str,
     ) -> Result<String, PushRemoteError> {
-        let checkout = cached.checkout_dir.as_path();
         let managed = cached.templates_dir.join("projects/generic/gitconfig.repo");
         fs::write(&managed, content).unwrap();
         let validated = ValidatedBlobs::from_files(std::slice::from_ref(&managed));
         engine.push_to_remote(
-            checkout,
-            "main",
+            &cached.publish_target("main"),
             false,
             &[managed],
             &validated,
-            &cached.fetched_sha,
         )
     }
 
@@ -11745,38 +11782,6 @@ git replace -f "$C" "$TG"
     }
 
     #[test]
-    fn test_remote_branch_is_at() {
-        let git = GitFixture::new();
-        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
-        let bare = seeded_bare_remote(&git);
-        let clone = tempdir().unwrap();
-        git.run(clone.path(), &["clone", bare.path().to_str().unwrap(), "."]);
-        let head = git.output(bare.path(), &["rev-parse", "refs/heads/main"]);
-        let zeros = "0".repeat(head.len());
-
-        let mut failures = Vec::new();
-        let mut check = |row: &str, branch: &str, sha: &str, expected: bool| {
-            let got = engine.remote_branch_is_at(clone.path(), branch, sha);
-            if got != expected {
-                failures.push(format!("{row}: got {got}, expected {expected}"));
-            }
-        };
-        check("the fetched head", "main", &head, true);
-        check("a prefix of the id", "main", &head[..12], false);
-        check("another id of the same length", "main", &zeros, false);
-        check("a branch that does not exist", "ude-absent", &head, false);
-
-        let missing = clone.path().join("no-such-remote");
-        git.run(
-            clone.path(),
-            &["remote", "set-url", "origin", missing.to_str().unwrap()],
-        );
-        check("an unreachable remote", "main", &head, false);
-
-        assert!(failures.is_empty(), "{failures:?}");
-    }
-
-    #[test]
     fn test_classify_push_porcelain() {
         let fetch_first = "To /x\n!\tHEAD:refs/heads/main\t[rejected] (fetch first)\nDone\n";
         let non_ff = "To /x\n!\tHEAD:refs/heads/main\t[rejected] (non-fast-forward)\nDone\n";
@@ -11941,18 +11946,15 @@ git replace -f "$C" "$TG"
         let cached = engine
             .ensure_remote_repo(bare.to_str().unwrap(), "main", cache.path())
             .expect("cache checkout of the bare remote");
-        let checkout = cached.checkout_dir.as_path();
         let managed = cached.templates_dir.join("projects/generic/gitconfig.repo");
         fs::write(&managed, "[core]\n  autocrlf = false\n").unwrap();
         let start = std::time::Instant::now();
         let validated = ValidatedBlobs::from_files(std::slice::from_ref(&managed));
         let res = engine.push_to_remote(
-            checkout,
-            "main",
+            &cached.publish_target("main"),
             false,
             &[managed],
             &validated,
-            &cached.fetched_sha,
         );
         (res, start.elapsed())
     }
@@ -12709,12 +12711,10 @@ git replace -f "$C" "$TG"
         let validated = ValidatedBlobs::from_files(std::slice::from_ref(&managed));
         setup(&checkout);
         let res = engine.push_to_remote(
-            &checkout,
-            "main",
+            &cached.publish_target("main"),
             open_pr,
             std::slice::from_ref(&managed),
             &validated,
-            &cached.fetched_sha,
         );
         let fetched_sha = cached.fetched_sha.clone();
         drop(cached);
@@ -13907,12 +13907,10 @@ git replace -f "$C" "$TG"
         fs::remove_file(&gitconfig).unwrap();
         // A deletion publishes no blob, so it needs no validated content.
         let pushed = engine.push_to_remote(
-            &cached.checkout_dir,
-            "main",
+            &cached.publish_target("main"),
             true,
             &[gitconfig],
             &ValidatedBlobs::default(),
-            &cached.fetched_sha,
         );
         assert!(pushed.is_ok(), "deletion push: {pushed:?}");
 
@@ -14029,12 +14027,10 @@ git update-ref refs/remotes/origin/main "$N"
                 fs::write(&managed, HOOKED_TEMPLATE).unwrap();
                 let validated = ValidatedBlobs::from_files(std::slice::from_ref(&managed));
                 let res = engine.push_to_remote(
-                    &cached.checkout_dir,
-                    "main",
+                    &cached.publish_target("main"),
                     open_pr,
                     std::slice::from_ref(&managed),
                     &validated,
-                    &cached.fetched_sha,
                 );
                 (res, Some(cached.fetched_sha.clone()))
             }
@@ -14863,5 +14859,89 @@ git update-ref refs/heads/main "$N"
     #[cfg(unix)]
     fn test_direct_push_ignores_hook_written_origin_pushurl() {
         assert_origin_pushurl_ignored(false);
+    }
+
+    /// The text every refused confirmation carries.
+    const NOT_PUBLISHED: &str = "not at the validated commit";
+
+    #[test]
+    fn test_confirm_published() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let bare = seeded_bare_remote(&git);
+        let url = bare.path().to_str().unwrap();
+        let fetched = git.output(bare.path(), &["rev-parse", "refs/heads/main"]);
+        let tree = git.output(bare.path(), &["rev-parse", "main^{tree}"]);
+        let child_of = |parent: &str| {
+            git.output(
+                bare.path(),
+                &["commit-tree", &tree, "-p", parent, "-m", "step"],
+            )
+        };
+        let commit = child_of(&fetched);
+        let one_step_on = child_of(&commit);
+        git.run(bare.path(), &["update-ref", "refs/heads/main", &commit]);
+        let zeros = "0".repeat(commit.len());
+        let unreachable_url = format!("{url}-missing");
+        let target = |remote_url| PublishTarget {
+            checkout: bare.path(),
+            remote_url,
+            branch: "main",
+            fetched_sha: &fetched,
+        };
+
+        let confirm = |remote_url, branch, id: &str| {
+            engine.confirm_published(&target(remote_url), branch, id)
+        };
+        let refused =
+            |res: &Result<(), String>| res.as_ref().is_err_and(|e| e.contains(NOT_PUBLISHED));
+        let rows = [
+            ("the ref at the commit", confirm(url, "main", &commit), true),
+            (
+                "a prefix of the id",
+                confirm(url, "main", &commit[..12]),
+                false,
+            ),
+            (
+                "another id of the same length",
+                confirm(url, "main", &zeros),
+                false,
+            ),
+            (
+                "the fetched head: nothing moved",
+                confirm(url, "main", &fetched),
+                false,
+            ),
+            (
+                "a commit one step on",
+                confirm(url, "main", &one_step_on),
+                false,
+            ),
+            (
+                "an absent branch",
+                confirm(url, "ude-absent", &commit),
+                false,
+            ),
+            (
+                "an unreachable URL",
+                confirm(&unreachable_url, "main", &commit),
+                false,
+            ),
+        ];
+        let mut failures: Vec<String> = rows
+            .iter()
+            .filter(|(_, res, passes)| if *passes { res.is_err() } else { !refused(res) })
+            .map(|(name, res, _)| format!("{name}: got {res:?}"))
+            .collect();
+        let failed_read = &rows[6].1;
+        if !failed_read
+            .as_ref()
+            .is_err_and(|e| e.contains(&format!("{NOT_PUBLISHED}: git ls-remote failed")))
+        {
+            failures.push(format!(
+                "a failed read names the read's error: got {failed_read:?}"
+            ));
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
     }
 }
