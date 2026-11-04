@@ -16164,35 +16164,50 @@ git update-ref HEAD "$N"
         assert_unchanged_subtree_rewritten_only_while_listed_refused(true);
     }
 
-    /// The fetched head's root tree object, rewritten in the cache checkout to list an extra
-    /// file: refused, the remote untouched. git itself refuses that read (`hash mismatch`,
-    /// measured), so this pins git's own check of the root tree, which the gate relies on;
-    /// it makes no assertion on which refusal fires.
+    /// Writes, in `repo`, a root tree listing `templates/projects/generic/gitconfig.repo` at
+    /// the [`HOOKED_TEMPLATE`] blob (which it writes) and nothing else, through a `mktree`
+    /// chain; returns its id. A HEAD whose root tree reads as these bytes holds the record.
+    #[cfg(unix)]
+    fn root_listing_validated_blob(git: &GitFixture, repo: &Path) -> String {
+        let mktree = |listing: String| git_with_input(git, repo, &["mktree"], listing.as_bytes());
+        let validated = write_blob(git, repo, HOOKED_TEMPLATE.as_bytes());
+        let generic = mktree(format!("100644 blob {validated}\tgitconfig.repo\n"));
+        let projects = mktree(format!("040000 tree {generic}\tgeneric\n"));
+        let templates = mktree(format!("040000 tree {projects}\tprojects\n"));
+        mktree(format!("040000 tree {templates}\ttemplates\n"))
+    }
+
+    /// The fetched head's root tree object, rewritten in the cache checkout to the bytes of
+    /// a root that would read as holding the record ([`root_listing_validated_blob`]):
+    /// refused at `git status`, which is git's own check of the root tree and runs before
+    /// the gate, and the remote untouched. The gate's own root check is pinned by
+    /// test_fetched_head_holds_refuses_root_tree_not_matching_its_id. Control: the same
+    /// step without the rewrite reaches the gate and is refused as not held.
     #[cfg(unix)]
     fn assert_fetched_root_tree_not_matching_its_id_refused(open_pr: bool) {
         let git = GitFixture::new();
         let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
         let step = |checkout: &Path, managed: &Path| {
             let pushed = hide_hooked_template(&git, checkout, managed);
-            let validated = write_blob(&git, checkout, HOOKED_TEMPLATE.as_bytes());
-            let templates_entry = git.output(checkout, &["ls-tree", "HEAD", "templates"]);
+            let forged = root_listing_validated_blob(&git, checkout);
             let root = git.output(checkout, &["rev-parse", "HEAD^{tree}"]);
-            let forged = git_with_input(
-                &git,
-                checkout,
-                &["mktree"],
-                format!("{templates_entry}\n100644 blob {validated}\textra\n").as_bytes(),
-            );
             forge_loose_object(checkout, &root, &forged);
             pushed
         };
         let pushed = push_after_step(&git, &engine, open_pr, &step);
-        assert_push_refused(&git, &pushed);
+        let err = assert_push_refused(&git, &pushed);
+        assert!(err.contains("git status failed"), "{err}");
         let root = git.output(pushed.bare.path(), &["rev-parse", "main^{tree}"]);
         assert!(
             remote_object_matches_id(&git, pushed.bare.path(), &root, "tree"),
             "the forgery reached the bare remote's object"
         );
+
+        let step = |checkout: &Path, managed: &Path| hide_hooked_template(&git, checkout, managed);
+        let control = push_with_empty_status(&git, &engine, open_pr, &step);
+        let err = assert_empty_status_refused(&git, &control);
+        assert!(err.contains(NOT_HELD), "{err}");
+        assert!(!err.contains("git status failed"), "{err}");
     }
 
     #[test]
@@ -16205,6 +16220,48 @@ git update-ref HEAD "$N"
     #[cfg(unix)]
     fn test_pr_push_refuses_fetched_root_tree_not_matching_its_id() {
         assert_fetched_root_tree_not_matching_its_id_refused(true);
+    }
+
+    /// The gate's own check of the fetched head's root tree, called directly so `git status`
+    /// never runs. The record is [`HOOKED_TEMPLATE`] at GATE_REL. At the base commit the
+    /// head does not hold it. A commit whose root is [`root_listing_validated_blob`] holds
+    /// it: the same bytes under their own id read as held. With HEAD back on the base commit
+    /// and its root tree file given those bytes, the gate refuses on the id check alone.
+    #[test]
+    #[cfg(unix)]
+    fn test_fetched_head_holds_refuses_root_tree_not_matching_its_id() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let (repo, file) = gate_repo(&git);
+        let dir = repo.path();
+        fs::write(&file, HOOKED_TEMPLATE).unwrap();
+        let validated = ValidatedBlobs::from_files(std::slice::from_ref(&file));
+        let staged = std::slice::from_ref(&file);
+        let base = git.output(dir, &["rev-parse", "HEAD"]);
+        let holds = |head: &str| {
+            engine.require_fetched_head_holds(&checkout_target(dir, head), staged, &validated)
+        };
+
+        let err = holds(&base).expect_err("the base commit does not hold the record");
+        assert!(err.contains(NOT_HELD), "{err}");
+
+        let root = root_listing_validated_blob(&git, dir);
+        let holding = git_with_input(
+            &git,
+            dir,
+            &["commit-tree", &root, "-p", &base],
+            b"holds the record\n",
+        );
+        git.run(dir, &["update-ref", "refs/heads/main", &holding]);
+        assert_eq!(holds(&holding), Ok(()));
+
+        git.run(dir, &["update-ref", "refs/heads/main", &base]);
+        let base_root = git.output(dir, &["rev-parse", &format!("{base}^{{tree}}")]);
+        forge_loose_object(dir, &base_root, &root);
+        let err = holds(&base).expect_err("a root tree not matching its id must be refused");
+        assert!(err.contains(ID_MISMATCH), "{err}");
+        assert!(err.contains(GATE_REL), "{err}");
+        assert!(!err.contains(NOT_HELD), "{err}");
     }
 
     /// post-checkout tail, run by `checkout -B` before ensure's `reset --hard`: points

@@ -507,6 +507,34 @@ mod tests {
         );
     }
 
+    /// A child that neither reads its input nor exits, given more input than a pipe buffer
+    /// holds, is still bounded by the deadline: the writer runs on its own thread, so the
+    /// call times out instead of blocking on the write until the child exits.
+    #[test]
+    #[cfg(unix)]
+    fn test_run_bounded_with_input_times_out_when_the_child_neither_reads_nor_exits() {
+        const INPUT_BYTES: usize = 4 * 1024 * 1024;
+        let timeout = Duration::from_millis(500);
+        let started = Instant::now();
+        let result =
+            run_bounded_with_input(sh("sleep 10", &[]), LABEL, timeout, vec![b'x'; INPUT_BYTES]);
+        let elapsed = started.elapsed();
+        let err = match result {
+            Ok(out) => panic!(
+                "a child that neither reads nor exits returned Ok after {elapsed:?}: {:?}",
+                out.status
+            ),
+            Err(e) => e,
+        };
+        assert!(err.contains(LABEL), "timeout error lacks the label: {err}");
+        assert!(
+            err.contains("timed out after 0.5s"),
+            "timeout error lacks the limit: {err}"
+        );
+        let bound = timeout + KILL_GRACE + Duration::from_secs(1);
+        assert!(elapsed < bound, "the call took {elapsed:?}, past {bound:?}");
+    }
+
     #[test]
     fn test_spawn_failure_names_label() {
         let mut cmd = Command::new("ude-test-no-such-program-7f3a9c");
