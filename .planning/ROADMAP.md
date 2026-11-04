@@ -71,7 +71,7 @@ Plans:
   3. Path parameterization matches only full word and punctuation boundaries (`\b`, path delimiters), preventing corruption of partial substring tokens.
   4. Sanitizer round-tripping verifies that templated tokens substitute back cleanly to local machine environments on initialization.
 
-**Plans**: 20/21 plans executed
+**Plans**: 21/21 plans executed
 
 Plans:
 **Wave 1**
@@ -129,7 +129,7 @@ Plans:
 - [x] 02-20: The closed list of what the gate promises: DEF rows with the tests that pin each, NOT rows with their reason or status, in docs/ARCHITECTURE.md, with a rule that classifies any later finding; reconciles the absolute wording of 02-13 and 02-08 without weakening a fix (SEC-04, SEC-02).
 
 **Wave 18** *(gap closure; blocked on Wave 17 completion)*
-- [ ] 02-21: Controls, mutation run, hermeticity and phase final gates on the gate's final state, as 02-15 did them; hand edits carried forward; SEC-01 and SEC-03 carried, regression-only; no production code (SEC-04, SEC-02).
+- [x] 02-21: Controls, mutation run, hermeticity and phase final gates on the gate's final state, as 02-15 did them; hand edits carried forward; SEC-01 and SEC-03 carried, regression-only; no production code (SEC-04, SEC-02).
 
 ### Phase 3: Doctor & CLI Hardening
 
@@ -177,7 +177,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Sync Engine & State Hermeticity | 11/11 | Complete    | 2026-10-22 |
-| 2. Sanitizer, Boundaries & Security Hardening | 20/21 | In Progress | - |
+| 2. Sanitizer, Boundaries & Security Hardening | 21/21 | In Progress | - |
 | 3. Doctor & CLI Hardening | 0/4 | Not started | - |
 | 4. Templates, Archetypes & Manifest Decoupling | 0/3 | Not started | - |
 

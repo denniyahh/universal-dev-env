@@ -19,9 +19,9 @@ Requirements for initial release, mapping directly to remediation tracks from [`
 ### Sanitizer, Boundaries & Security (Track 2)
 
 - [ ] **SEC-01**: `Sanitizer` calculates Shannon entropy to detect high-entropy tokens and raw Base64 credentials lacking obvious prefixes.
-- [ ] **SEC-02**: Outbound content screening expands regex token patterns to cover full Gitleaks secret categories before git staging.
+- [x] **SEC-02**: Outbound content screening expands regex token patterns to cover full Gitleaks secret categories before git staging.
 - [ ] **SEC-03**: Path parameterization enforces strict word and punctuation boundaries (`\b` and path delimiters) to prevent partial substring corruption.
-- [ ] **SEC-04**: Sanitizer verifies token substitution reversibility between templated placeholders and local machine environments.
+- [x] **SEC-04**: Sanitizer verifies token substitution reversibility between templated placeholders and local machine environments.
 - [ ] **SEC-05**: TypeSafe semantic drift evaluation fails closed below 0.85 confidence or 0.20 top-two margin, and never transmits unscanned or local-only content.
 
 ### Doctor & CLI Hardening (Track 3)
@@ -75,9 +75,9 @@ Which phases cover which requirements. Updated during roadmap creation.
 | SYNC-05 | Phase 1 | Complete |
 | SYNC-06 | Phase 1 | Complete |
 | SEC-01 | Phase 2 | Gaps Found |
-| SEC-02 | Phase 2 | Gaps Found |
+| SEC-02 | Phase 2 | Complete |
 | SEC-03 | Phase 2 | Gaps Found |
-| SEC-04 | Phase 2 | Gaps Found |
+| SEC-04 | Phase 2 | Complete |
 | CLI-01 | Phase 3 | Pending |
 | CLI-02 | Phase 3 | Pending |
 | CLI-03 | Phase 3 | Pending |
