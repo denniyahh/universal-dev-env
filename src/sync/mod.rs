@@ -15233,6 +15233,69 @@ git update-ref HEAD "$N"
         assert!(err.contains("the commit to publish"), "{err}");
     }
 
+    /// A fetched-head templates tree whose stored bytes do not match its id hides an added
+    /// unvalidated file, or an unvalidated deletion, from a diff against the fetched head.
+    /// Refused by the id check naming the recorded path. Control for each, first: the same
+    /// commit over the honest fetched head is refused as unvalidated.
+    #[test]
+    #[ignore = "RED: fails until 02-25 Task 1 fix"]
+    fn test_committed_gate_refuses_base_tree_not_matching_its_id() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let paths: HashSet<PathBuf> = [PathBuf::from("templates/f")].into_iter().collect();
+        let mut failures = Vec::new();
+        for (case, hidden_addition) in [("hidden addition", true), ("hidden deletion", false)] {
+            let (repo, base) = templates_repo(&git, &[("f", "f base\n"), ("g", "g base\n")]);
+            let dir = repo.path();
+            let f_new = write_blob(&git, dir, b"f new\n");
+            let f_base = git.output(dir, &["rev-parse", "HEAD:templates/f"]);
+            let g_base = git.output(dir, &["rev-parse", "HEAD:templates/g"]);
+            let base_templates = git.output(dir, &["rev-parse", "HEAD:templates"]);
+            let (commit_listing, forged_listing) = if hidden_addition {
+                let h = write_blob(&git, dir, b"h\n");
+                (
+                    format!(
+                        "100644 blob {f_new}\tf\n100644 blob {g_base}\tg\n100644 blob {h}\th\n"
+                    ),
+                    format!(
+                        "100644 blob {f_base}\tf\n100644 blob {g_base}\tg\n100644 blob {h}\th\n"
+                    ),
+                )
+            } else {
+                (
+                    format!("100644 blob {f_new}\tf\n"),
+                    format!("100644 blob {f_base}\tf\n"),
+                )
+            };
+            let commit = commit_of_templates(&git, dir, &base, &commit_listing);
+            // Read before the forgery, as stage_publication records it.
+            let staged_tree = commit_tree_id(&git, dir, &commit);
+            let validated = templates_record(dir, &[("f", b"f new\n")]);
+            let validate = || {
+                engine.validate_committed_tree(
+                    dir,
+                    &commit,
+                    &base,
+                    &paths,
+                    &validated,
+                    &staged_tree,
+                )
+            };
+
+            match validate() {
+                Err(err) if err.contains("unvalidated file committed in HEAD") => {}
+                other => failures.push(format!("{case}, honest fetched head: {other:?}")),
+            }
+            let forged = git_with_input(&git, dir, &["mktree"], forged_listing.as_bytes());
+            forge_loose_object(dir, &base_templates, &forged);
+            match validate() {
+                Err(err) if err.contains(ID_MISMATCH) && err.contains("templates/f") => {}
+                other => failures.push(format!("{case}, forged fetched head: {other:?}")),
+            }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+
     /// A raw tree entry: `mode` SP `name` NUL `id`.
     fn raw_tree_entry(mode: &[u8], name: &[u8], id: &[u8]) -> Vec<u8> {
         [mode, b" ", name, b"\0", id].concat()
@@ -16076,6 +16139,124 @@ git update-ref HEAD "$N"
     #[cfg(unix)]
     fn test_pr_push_refuses_unchanged_subtree_not_matching_its_id() {
         assert_unchanged_subtree_not_matching_its_id_refused(true);
+    }
+
+    /// The step of the base-side rows: the template edited and recorded, a hook-style
+    /// `update-index` adding [`HIDDEN_REL`] to the index at the seed blob (which the remote
+    /// holds), and `pack.window 0` in the checkout's config. With `forge`, the fetched head's
+    /// generic tree object is also given the bytes of a tree listing [`HIDDEN_REL`] at the same
+    /// blob, so neither the staged diff nor a diff against the fetched head sees the addition.
+    #[cfg(unix)]
+    fn add_file_hidden_by_base_tree(
+        git: &GitFixture,
+        checkout: &Path,
+        managed: &Path,
+        forge: bool,
+    ) -> StepResult {
+        let pushed = write_hooked_template(managed);
+        let seed = git.output(checkout, &["rev-parse", &format!("HEAD:{GATE_REL}")]);
+        git.run(
+            checkout,
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                &format!("100644,{seed},{HIDDEN_REL}"),
+            ],
+        );
+        if forge {
+            forge_generic_tree(
+                git,
+                checkout,
+                &format!("100644 blob {seed}\tgitconfig.repo\n100644 blob {seed}\thidden.repo\n"),
+            );
+        }
+        git.run(checkout, &["config", "pack.window", "0"]);
+        if forge {
+            let walked = git.output(
+                checkout,
+                &[
+                    "--no-replace-objects",
+                    "ls-tree",
+                    "-r",
+                    "--name-only",
+                    "HEAD",
+                ],
+            );
+            assert!(
+                walked.lines().any(|path| path == HIDDEN_REL),
+                "the walk of HEAD does not read the forged generic tree: {walked}"
+            );
+        }
+        pushed
+    }
+
+    /// The path the base-side rows add and hide.
+    #[cfg(unix)]
+    const HIDDEN_REL: &str = "templates/projects/generic/hidden.repo";
+
+    /// The base-side channel: an added file hidden by a fetched-head tree that does not match
+    /// its id. Refused by the committed gate's id check naming [`GATE_REL`] and no name read
+    /// from a tree; no remote head moves, the remote's main does not list the hidden path and
+    /// its generic tree hashes to its id. Control: the same steps without the rewrite are
+    /// refused by the staged gate.
+    #[cfg(unix)]
+    fn assert_added_file_hidden_by_base_tree_refused(open_pr: bool) {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let forged = |checkout: &Path, managed: &Path| {
+            add_file_hidden_by_base_tree(&git, checkout, managed, true)
+        };
+        let pushed = push_after_step(&git, &engine, open_pr, &forged);
+        let err = assert_push_refused(&git, &pushed);
+        assert!(
+            err.contains("Post-commit publication gate violation"),
+            "{err}"
+        );
+        assert!(err.contains(ID_MISMATCH), "{err}");
+        assert!(err.contains(GATE_REL), "{err}");
+        assert!(
+            !err.contains("hidden.repo"),
+            "the refusal printed a name read from a tree: {err}"
+        );
+        let published = git.output(
+            pushed.bare.path(),
+            &["ls-tree", "-r", "--name-only", "main"],
+        );
+        assert!(
+            !published.lines().any(|path| path == HIDDEN_REL),
+            "the remote's main lists the hidden path: {published}"
+        );
+        let generic = generic_tree_id(&git, pushed.bare.path());
+        assert!(
+            remote_object_matches_id(&git, pushed.bare.path(), &generic, "tree"),
+            "the forgery reached the bare remote's object"
+        );
+
+        let honest = |checkout: &Path, managed: &Path| {
+            add_file_hidden_by_base_tree(&git, checkout, managed, false)
+        };
+        let control = push_after_step(&git, &engine, open_pr, &honest);
+        let err = assert_push_refused(&git, &control);
+        assert!(
+            err.contains("unvalidated file staged in remote checkout"),
+            "{err}"
+        );
+        assert!(!err.contains(ID_MISMATCH), "{err}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    #[ignore = "RED: fails until 02-25 Task 1 fix"]
+    fn test_direct_push_refuses_added_file_hidden_by_base_tree_not_matching_its_id() {
+        assert_added_file_hidden_by_base_tree_refused(false);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    #[ignore = "RED: fails until 02-25 Task 1 fix"]
+    fn test_pr_push_refuses_added_file_hidden_by_base_tree_not_matching_its_id() {
+        assert_added_file_hidden_by_base_tree_refused(true);
     }
 
     /// The committed route: the generic tree object rewritten to list the validated blob, the
