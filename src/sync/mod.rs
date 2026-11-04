@@ -14819,4 +14819,49 @@ git update-ref refs/heads/main "$N"
         }
         assert!(failures.is_empty(), "{failures:#?}");
     }
+
+    /// A post-commit hook points `remote.origin.pushurl` at an empty bare repository and
+    /// records UDE's commit in `.git/ude-test-validated`. The push goes to the caller's URL,
+    /// so it reaches the real remote and the other repository stays empty, while a push
+    /// naming `origin` from the same checkout lands there (the config was in effect).
+    #[cfg(unix)]
+    fn assert_origin_pushurl_ignored(open_pr: bool) {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let other = tempdir().unwrap();
+        git.run(other.path(), &["init", "-q", "--bare", "-b", "main"]);
+        let tail = format!(
+            "git config remote.origin.pushurl '{}'\ngit rev-parse HEAD > .git/ude-test-validated\n",
+            other.path().display()
+        );
+        let pushed = push_with_post_commit_hook(&git, &engine, open_pr, &tail);
+
+        let published = assert_published_exact(&git, &pushed, open_pr);
+        assert_eq!(published, hook_recorded_id(&pushed, "ude-test-validated"));
+        assert_eq!(
+            remote_heads(&git, other.path()),
+            vec![],
+            "the other repository received a ref"
+        );
+        git.run(
+            &pushed.checkout,
+            &[
+                "push",
+                "-q",
+                "origin",
+                &format!("{published}:refs/heads/control"),
+            ],
+        );
+        assert_eq!(
+            remote_heads(&git, other.path()),
+            vec![("refs/heads/control".to_string(), published)],
+            "a push naming origin did not follow the hook's pushurl"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_direct_push_ignores_hook_written_origin_pushurl() {
+        assert_origin_pushurl_ignored(false);
+    }
 }
