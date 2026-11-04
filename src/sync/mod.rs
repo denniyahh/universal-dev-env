@@ -2179,9 +2179,10 @@ impl SyncEngine {
         // when a push reads objects, and a refusal's excerpt is the last lines of stderr, so
         // the hint would take lines there. A future git that drops grafts makes the variable
         // and this option no-ops, which needs no action.
-        let refspec = format!("{commit}:refs/heads/{branch}");
+        let refspec = format!("{commit}^{{commit}}:refs/heads/{branch}");
         let mut push = self.git(Some(remote_checkout));
         push.args([
+            "--no-replace-objects",
             "-c",
             "core.commitGraph=false",
             "-c",
