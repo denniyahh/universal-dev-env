@@ -510,6 +510,14 @@ pub struct SyncEngine {
     /// test can swap an object file back between the listing and the checks after it.
     #[cfg(test)]
     after_tree_listing: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
+    /// The records one publication gate call may list, in place of the production limit
+    /// (tests only), so a test can reach the limit with a small tree.
+    #[cfg(test)]
+    listing_record_limit: Option<usize>,
+    /// The listing bytes one publication gate call may list, in place of the production
+    /// limit (tests only), so a test can reach the limit with a small tree.
+    #[cfg(test)]
+    listing_byte_limit: Option<usize>,
 }
 
 impl SyncEngine {
@@ -521,6 +529,10 @@ impl SyncEngine {
             deletion_history: None,
             #[cfg(test)]
             after_tree_listing: None,
+            #[cfg(test)]
+            listing_record_limit: None,
+            #[cfg(test)]
+            listing_byte_limit: None,
         }
     }
 
@@ -550,6 +562,20 @@ impl SyncEngine {
     #[cfg(test)]
     fn with_after_tree_listing(mut self, hook: impl Fn() + Send + Sync + 'static) -> Self {
         self.after_tree_listing = Some(std::sync::Arc::new(hook));
+        self
+    }
+
+    /// Sets the records one publication gate call may list (tests only).
+    #[cfg(test)]
+    fn with_listing_record_limit(mut self, records: usize) -> Self {
+        self.listing_record_limit = Some(records);
+        self
+    }
+
+    /// Sets the listing bytes one publication gate call may list (tests only).
+    #[cfg(test)]
+    fn with_listing_byte_limit(mut self, bytes: usize) -> Self {
+        self.listing_byte_limit = Some(bytes);
         self
     }
 
@@ -18462,5 +18488,384 @@ done
             ));
         }
         assert!(failures.is_empty(), "{failures:#?}");
+    }
+
+    /// The refusal text of a listing over either bound of one gate call (records or bytes);
+    /// a literal of its own, so a changed production text fails the rows.
+    const TOO_LARGE: &str = "is larger than the publication gate lists for one push";
+
+    /// A `mktree` tree holding `f` (100644) at `leaf`, then `depth` times a tree listing `a`
+    /// and `b`, both `040000 tree` at the tree below; returns the top id. It lists
+    /// 3 * 2^depth - 2 records below its own record, from depth + 1 tree objects.
+    fn shared_subtree_tree(git: &GitFixture, repo: &Path, leaf: &str, depth: u32) -> String {
+        let mktree = |listing: String| git_with_input(git, repo, &["mktree"], listing.as_bytes());
+        let mut tree = mktree(format!("100644 blob {leaf}\tf\n"));
+        for _ in 0..depth {
+            tree = mktree(format!("040000 tree {tree}\ta\n040000 tree {tree}\tb\n"));
+        }
+        tree
+    }
+
+    /// The bytes `--no-replace-objects ls-tree <args>` prints in `repo` and how many of them
+    /// are `end`, counted as git writes them, so a large listing is never held; panics
+    /// unless git exits 0.
+    fn ls_tree_counts(git: &GitFixture, repo: &Path, args: &[&str], end: u8) -> (usize, usize) {
+        use std::io::Read as _;
+        let mut child = git
+            .cmd(repo)
+            .args(["--no-replace-objects", "ls-tree"])
+            .args(args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut stdout = child.stdout.take().unwrap();
+        let (mut bytes, mut ends) = (0, 0);
+        let mut buffer = vec![0u8; 1 << 16];
+        loop {
+            let read = stdout.read(&mut buffer).unwrap();
+            if read == 0 {
+                break;
+            }
+            bytes += read;
+            ends += buffer[..read].iter().filter(|byte| **byte == end).count();
+        }
+        let out = child.wait_with_output().unwrap();
+        assert!(
+            out.status.success(),
+            "ls-tree failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        (bytes, ends)
+    }
+
+    /// The number of lines `--no-replace-objects ls-tree -r -t <treeish>` prints in `repo`:
+    /// git's record count, one line a record (no fixture name holds a newline).
+    fn ls_tree_record_count(git: &GitFixture, repo: &Path, treeish: &str) -> usize {
+        ls_tree_counts(git, repo, &["-r", "-t", treeish], b'\n').1
+    }
+
+    /// The byte count of `--no-replace-objects ls-tree -r -t -z --full-tree <treeish>` in
+    /// `repo`: the bytes git's own listing of the tree takes.
+    fn ls_tree_byte_count(git: &GitFixture, repo: &Path, treeish: &str) -> usize {
+        ls_tree_counts(git, repo, &["-r", "-t", "-z", "--full-tree", treeish], 0).0
+    }
+
+    /// Hook tail: rebuilds UDE's commit with `templates/bomb`, a shared-subtree tree of
+    /// `depth` levels ([`shared_subtree_tree`]) whose leaves are the validated blob, beside
+    /// `templates/projects`; the rebuilt commit's id is left for the test.
+    #[cfg(unix)]
+    fn hook_shared_subtree(depth: u32) -> String {
+        [
+            rebuild_start_lines!(),
+            r#"L=$(printf '100644 blob %s\tf\n' "$V" | git mktree)
+i=0
+while [ "$i" -lt "#,
+            &depth.to_string(),
+            r#" ]; do
+L=$(printf '040000 tree %s\ta\n040000 tree %s\tb\n' "$L" "$L" | git mktree)
+i=$((i + 1))
+done
+G=$(printf '100644 blob %s\tgitconfig.repo\n' "$V" | git mktree)
+"#,
+            one_generic_line!(),
+            r#"T2=$(printf '040000 tree %s\tbomb\n040000 tree %s\tprojects\n' "$L" "$T1" | git mktree)
+R=$(printf '040000 tree %s\ttemplates\n' "$T2" | git mktree)
+N=$(git commit-tree "$R" -p "$P" -F .git/ude-test-msg)
+printf '%s\n' "$N" > .git/ude-test-rebuilt-commit
+git update-ref HEAD "$N"
+"#,
+        ]
+        .concat()
+    }
+
+    /// [`root_listing_validated_blob`]'s chain with the templates tree also listing `bomb`, a
+    /// shared-subtree tree of `depth` levels whose leaf is the [`HOOKED_TEMPLATE`] blob;
+    /// returns the root tree's id.
+    #[cfg(unix)]
+    fn root_with_shared_subtree(git: &GitFixture, repo: &Path, depth: u32) -> String {
+        let mktree = |listing: String| git_with_input(git, repo, &["mktree"], listing.as_bytes());
+        let validated = write_blob(git, repo, HOOKED_TEMPLATE.as_bytes());
+        let bomb = shared_subtree_tree(git, repo, &validated, depth);
+        let generic = mktree(format!("100644 blob {validated}\tgitconfig.repo\n"));
+        let projects = mktree(format!("040000 tree {generic}\tgeneric\n"));
+        let templates = mktree(format!(
+            "040000 tree {bomb}\tbomb\n040000 tree {projects}\tprojects\n"
+        ));
+        mktree(format!("040000 tree {templates}\ttemplates\n"))
+    }
+
+    /// A post-commit hook rebuilds UDE's commit with `templates/bomb`, a shared-subtree tree
+    /// of depth 6, so the commit lists 195 records. With a record limit of 64 the committed
+    /// gate refuses the commit's listing as too large, naming no tree text, and nothing
+    /// reaches the remote. Control: the same hook under the production limit is refused as
+    /// unvalidated, so the limit decided, not the tree's shape.
+    #[cfg(unix)]
+    fn assert_tree_over_the_record_limit_refused(open_pr: bool) {
+        const RECORD_LIMIT: usize = 64;
+        let git = GitFixture::new();
+        let engine = SyncEngine::new()
+            .with_extra_env(git.gitconfig_env())
+            .with_listing_record_limit(RECORD_LIMIT);
+        let pushed = push_with_post_commit_hook(&git, &engine, open_pr, &hook_shared_subtree(6));
+        let err = assert_hook_refused(&git, &pushed);
+        let rebuilt = hook_recorded_id(&pushed, "ude-test-rebuilt-commit");
+        let records = ls_tree_record_count(&git, &pushed.checkout, &rebuilt);
+        assert_eq!(
+            records, 195,
+            "templates, bomb, 190 below it, projects, generic and gitconfig.repo"
+        );
+        assert!(records > RECORD_LIMIT, "{records}");
+        assert!(err.contains(TOO_LARGE), "{err}");
+        assert!(err.contains("the tree of the commit to publish"), "{err}");
+        assert!(!err.contains("unvalidated file committed"), "{err}");
+        assert!(!err.contains("bomb"), "{err}");
+
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let control = push_with_post_commit_hook(&git, &engine, open_pr, &hook_shared_subtree(6));
+        let err = assert_hook_refused(&git, &control);
+        assert!(err.contains("unvalidated file committed in HEAD"), "{err}");
+        assert!(!err.contains(TOO_LARGE), "{err}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    #[ignore = "RED: fails until 02-27 Task 1 fix"]
+    fn test_direct_push_refuses_tree_over_the_record_limit() {
+        assert_tree_over_the_record_limit_refused(false);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    #[ignore = "RED: fails until 02-27 Task 1 fix"]
+    fn test_pr_push_refuses_tree_over_the_record_limit() {
+        assert_tree_over_the_record_limit_refused(true);
+    }
+
+    /// The empty-status route's listing is bounded by the same record limit. The fetched
+    /// head is a commit whose templates tree also lists `bomb`, a shared-subtree tree of
+    /// depth 4. Just-under control: a limit of exactly git's record count lists it, and the
+    /// head holds the record. One record fewer refuses it as too large, naming no tree text.
+    #[test]
+    #[cfg(unix)]
+    #[ignore = "RED: fails until 02-27 Task 1 fix"]
+    fn test_fetched_head_holds_refuses_tree_over_the_record_limit() {
+        let git = GitFixture::new();
+        let (repo, file) = gate_repo(&git);
+        let dir = repo.path();
+        fs::write(&file, HOOKED_TEMPLATE).unwrap();
+        let validated = ValidatedBlobs::from_files(std::slice::from_ref(&file));
+        let staged = std::slice::from_ref(&file);
+        let base = git.output(dir, &["rev-parse", "HEAD"]);
+        let root = root_with_shared_subtree(&git, dir, 4);
+        let holding = git_with_input(
+            &git,
+            dir,
+            &["commit-tree", &root, "-p", &base],
+            b"holds the record\n",
+        );
+        git.run(dir, &["update-ref", "refs/heads/main", &holding]);
+        let records = ls_tree_record_count(&git, dir, &holding);
+        assert_eq!(
+            records, 51,
+            "templates, bomb, 46 below it, projects, generic and gitconfig.repo"
+        );
+        let holds = |limit: usize| {
+            SyncEngine::new()
+                .with_extra_env(git.gitconfig_env())
+                .with_listing_record_limit(limit)
+                .require_fetched_head_holds(&checkout_target(dir, &holding), staged, &validated)
+        };
+
+        assert_eq!(holds(records), Ok(()));
+        let err = match holds(records - 1) {
+            Err(err) => err,
+            other => panic!("a limit one under git's record count must refuse, got {other:?}"),
+        };
+        assert!(err.contains(TOO_LARGE), "{err}");
+        assert!(err.contains(EMPTY_STATUS_REFUSAL), "{err}");
+        assert!(err.contains("the fetched head's tree"), "{err}");
+        assert!(!err.contains("bomb"), "{err}");
+    }
+
+    /// The committed gate's validate call with an engine carrying the fixture gitconfig and
+    /// `engine_for` applied, the allowlist `{templates/f}` and the record `f new\n`.
+    fn validate_templates_commit(
+        git: &GitFixture,
+        dir: &Path,
+        commit: &str,
+        fetched: &str,
+        engine_for: impl Fn(SyncEngine) -> SyncEngine,
+    ) -> Result<(), String> {
+        let paths: HashSet<PathBuf> = [PathBuf::from("templates/f")].into_iter().collect();
+        let validated = templates_record(dir, &[("f", b"f new\n")]);
+        let staged_tree = commit_tree_id(git, dir, commit);
+        engine_for(SyncEngine::new().with_extra_env(git.gitconfig_env())).validate_committed_tree(
+            dir,
+            commit,
+            fetched,
+            &paths,
+            &validated,
+            &staged_tree,
+        )
+    }
+
+    /// `templates_repo` with `f` = `f base\n`, and a fetched head on it whose templates tree
+    /// lists `f` at its base blob and `bomb`, a shared-subtree tree of depth 4 whose leaf is
+    /// that blob. Returns the repository, the fetched head, bomb's id and f's new blob.
+    fn fetched_head_with_shared_subtree(
+        git: &GitFixture,
+    ) -> (tempfile::TempDir, String, String, String) {
+        let (repo, base) = templates_repo(git, &[("f", "f base\n")]);
+        let dir = repo.path();
+        let f_base = git.output(dir, &["rev-parse", "HEAD:templates/f"]);
+        let bomb = shared_subtree_tree(git, dir, &f_base, 4);
+        let fetched = commit_of_templates(
+            git,
+            dir,
+            &base,
+            &format!("040000 tree {bomb}\tbomb\n100644 blob {f_base}\tf\n"),
+        );
+        let f_new = write_blob(git, dir, b"f new\n");
+        (repo, fetched, bomb, f_new)
+    }
+
+    /// The fetched head's listing, the one listing_diff reads beside the commit's, is bounded
+    /// by the same limit. The fetched head lists `bomb`, a shared-subtree tree of depth 4; the
+    /// commit changes `f` and deletes bomb. Control, first: a limit of git's record count of
+    /// the commit plus the fetched head lists both, and the deletion is refused as
+    /// unvalidated. One record fewer: the fetched head's listing is refused as too large.
+    #[test]
+    #[ignore = "RED: fails until 02-27 Task 1 fix"]
+    fn test_committed_gate_refuses_fetched_head_tree_over_the_record_limit() {
+        let git = GitFixture::new();
+        let (repo, fetched, _, f_new) = fetched_head_with_shared_subtree(&git);
+        let dir = repo.path();
+        let commit = commit_of_templates(&git, dir, &fetched, &format!("100644 blob {f_new}\tf\n"));
+        let counts = (
+            ls_tree_record_count(&git, dir, &commit),
+            ls_tree_record_count(&git, dir, &fetched),
+        );
+        assert_eq!(
+            counts,
+            (2, 49),
+            "the commit: templates and f; the fetched head: 49"
+        );
+        let limit = counts.0 + counts.1;
+        let validate = |records: usize| {
+            validate_templates_commit(&git, dir, &commit, &fetched, |engine| {
+                engine.with_listing_record_limit(records)
+            })
+        };
+
+        let err = validate(limit).expect_err("the deletion of bomb is unvalidated");
+        assert!(err.contains("unvalidated file committed in HEAD"), "{err}");
+        assert!(!err.contains(TOO_LARGE), "{err}");
+
+        let err = validate(limit - 1).expect_err("one record under the count must refuse");
+        assert!(err.contains(TOO_LARGE), "{err}");
+        assert!(err.contains("the tree of the fetched head"), "{err}");
+        assert!(!err.contains("bomb"), "{err}");
+    }
+
+    /// Both listings of one gate call draw on one budget. The commit keeps the fetched head's
+    /// `bomb` and changes `f`, so each listing lists 49 records, each alone under the limit
+    /// below. Just-under control: a limit of both counts together passes. One fewer refuses
+    /// the fetched head's listing, which a budget per listing would have passed.
+    #[test]
+    #[ignore = "RED: fails until 02-27 Task 1 fix"]
+    fn test_committed_gate_counts_both_listings_against_one_record_limit() {
+        let git = GitFixture::new();
+        let (repo, fetched, bomb, f_new) = fetched_head_with_shared_subtree(&git);
+        let dir = repo.path();
+        let commit = commit_of_templates(
+            &git,
+            dir,
+            &fetched,
+            &format!("040000 tree {bomb}\tbomb\n100644 blob {f_new}\tf\n"),
+        );
+        let (nc, nb) = (
+            ls_tree_record_count(&git, dir, &commit),
+            ls_tree_record_count(&git, dir, &fetched),
+        );
+        assert_eq!((nc, nb), (49, 49));
+        let limit = nc + nb - 1;
+        assert!(
+            nc < limit && nb < limit,
+            "each listing alone fits under {limit}"
+        );
+        let validate = |records: usize| {
+            validate_templates_commit(&git, dir, &commit, &fetched, |engine| {
+                engine.with_listing_record_limit(records)
+            })
+        };
+
+        assert_eq!(validate(nc + nb), Ok(()));
+        let err = match validate(limit) {
+            Err(err) => err,
+            other => panic!("both listings together are over {limit}, got {other:?}"),
+        };
+        assert!(err.contains(TOO_LARGE), "{err}");
+        assert!(err.contains("the tree of the fetched head"), "{err}");
+    }
+
+    /// The listing bytes are bounded too, so long entry names cannot make the listing large
+    /// under the record limit. The commit adds `long`, a tree holding one entry whose name is
+    /// 4096 bytes. Control, first: a byte limit of git's byte count of both listings lists
+    /// them, and the addition is refused as unvalidated. One byte fewer: the fetched head's
+    /// listing runs out of the shared budget. One byte under the commit's own count: the
+    /// commit's listing is refused. No refusal holds the name.
+    #[test]
+    #[ignore = "RED: fails until 02-27 Task 1 fix"]
+    fn test_committed_gate_refuses_commit_tree_over_the_byte_limit() {
+        let git = GitFixture::new();
+        let (repo, base) = templates_repo(&git, &[("f", "f base\n")]);
+        let dir = repo.path();
+        let f_new = write_blob(&git, dir, b"f new\n");
+        let long_name = "n".repeat(4096);
+        let long = git_with_input(
+            &git,
+            dir,
+            &["mktree"],
+            format!("100644 blob {f_new}\t{long_name}\n").as_bytes(),
+        );
+        let commit = commit_of_templates(
+            &git,
+            dir,
+            &base,
+            &format!("100644 blob {f_new}\tf\n040000 tree {long}\tlong\n"),
+        );
+        let (mc, mb) = (
+            ls_tree_byte_count(&git, dir, &commit),
+            ls_tree_byte_count(&git, dir, &base),
+        );
+        let records =
+            ls_tree_record_count(&git, dir, &commit) + ls_tree_record_count(&git, dir, &base);
+        assert!(
+            records < 1 << 18,
+            "{records} records: the record limit must not be what fires"
+        );
+        let validate = |bytes: usize| {
+            validate_templates_commit(&git, dir, &commit, &base, |engine| {
+                engine.with_listing_byte_limit(bytes)
+            })
+        };
+        let refused_as_too_large = |err: &str, route: &str| {
+            assert!(err.contains(TOO_LARGE), "{err}");
+            assert!(err.contains(route), "{err}");
+            assert!(!err.contains("unvalidated file committed"), "{err}");
+            assert!(!err.contains(&long_name), "the refusal holds the long name");
+        };
+
+        let err = validate(mc + mb).expect_err("the long name is an unvalidated addition");
+        assert!(err.contains("unvalidated file committed in HEAD"), "{err}");
+        assert!(!err.contains(TOO_LARGE), "{err}");
+
+        let err = validate(mc + mb - 1).expect_err("one byte under both listings must refuse");
+        refused_as_too_large(&err, "the tree of the fetched head");
+
+        let err = validate(mc - 1).expect_err("one byte under the commit's listing must refuse");
+        refused_as_too_large(&err, "the tree of the commit to publish");
     }
 }
