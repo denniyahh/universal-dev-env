@@ -2513,11 +2513,12 @@ impl SyncEngine {
     /// Validates `commit` (a full object id) before pushing it, as the only commit the
     /// push adds on top of `base` (the fetched head). In the order it checks: it has exactly
     /// one parent, `base`; its message is the sync commit message and its header is free of
-    /// secrets; every blob it changes, read by object id, is on the allowlist `paths`
+    /// secrets; every blob it changes, read by object id and checked against it, is on the allowlist `paths`
     /// (relative to `repo`), free of secrets and identical to what `validated` recorded; its
     /// tree repeats no path and has no path component that is empty, `.` or `..`; it holds
-    /// no empty directory; every path `validated` recorded holds its recorded content; and
-    /// its tree is `staged_tree`, the id [`Self::stage_publication`] recorded. What these
+    /// no empty directory; every path `validated` recorded holds its recorded content, with
+    /// each blob and each tree above it read against its id; and its tree is
+    /// `staged_tree`, the id [`Self::stage_publication`] recorded. What these
     /// checks defend is the closed list in `docs/ARCHITECTURE.md`, section 3, and nothing
     /// beyond it.
     fn validate_committed_tree(
@@ -2738,6 +2739,11 @@ impl SyncEngine {
                 );
             }
         };
+        let Some(listed_trees) = listed_tree_ids(&listing.stdout) else {
+            return Err(format!(
+                "Post-commit publication gate violation: unparseable tree entry in {commit}"
+            ));
+        };
         match count_empty_directories(&listing.stdout) {
             None => {
                 return Err(format!(
@@ -2753,7 +2759,7 @@ impl SyncEngine {
             }
         }
 
-        self.require_validated_content(repo, &listed_blobs, &validated_rel)?;
+        self.require_validated_content(repo, &listed_blobs, &listed_trees, &validated_rel)?;
 
         // Everything above read what the commit holds, and this binds it: no hook that ran
         // after the tree was recorded can have changed a name, a mode or a blob, and a hook
@@ -2776,9 +2782,10 @@ impl SyncEngine {
         &self,
         repo: &Path,
         listed_blobs: &HashMap<&[u8], &[u8]>,
+        listed_trees: &HashMap<&[u8], &[u8]>,
         validated_rel: &HashMap<PathBuf, &str>,
     ) -> Result<(), String> {
-        match self.first_path_not_held(repo, listed_blobs, validated_rel) {
+        match self.first_path_not_held(repo, listed_blobs, listed_trees, validated_rel) {
             Some((path, NotHeld::Content)) => Err(format!(
                 "Post-commit publication gate violation: the commit to publish does not hold the validated content of {}",
                 path.display()
@@ -2793,17 +2800,28 @@ impl SyncEngine {
 
     /// The first path of the record (`validated_rel`) that `listed_blobs`
     /// ([`tree_listing_blobs`]) does not hold as a regular file with its recorded content,
-    /// and why, or `None` when every recorded path is held. Each blob is read against its
-    /// id ([`Self::read_blob_by_id`]), because `cat-file` returns the bytes stored under an
-    /// id without checking that they hash to it. The path comes from the record, never from
-    /// the tree.
+    /// and why, or `None` when every recorded path is held. Each blob, and each tree above
+    /// a recorded path that `listed_trees` ([`listed_tree_ids`]) names, is read against its
+    /// id ([`Self::read_verified_object`]), because `cat-file` returns a blob's stored bytes
+    /// and `ls-tree -r` walks a subtree's stored bytes without checking that they hash to
+    /// the id. git checks the root tree and the commit itself when `ls-tree` reads them
+    /// (measured). The path comes from the record, never from the tree.
     fn first_path_not_held<'r>(
         &self,
         repo: &Path,
         listed_blobs: &HashMap<&[u8], &[u8]>,
+        listed_trees: &HashMap<&[u8], &[u8]>,
         validated_rel: &'r HashMap<PathBuf, &str>,
     ) -> Option<(&'r Path, NotHeld)> {
+        let mut verified = HashSet::new();
         validated_rel.iter().find_map(|(path, digest)| {
+            match self.verify_ancestor_trees(repo, listed_trees, path, &mut verified) {
+                Ok(()) => {}
+                Err(ObjectDefect::IdMismatch) => {
+                    return Some((path.as_path(), NotHeld::IdMismatch));
+                }
+                Err(ObjectDefect::Unreadable) => return Some((path.as_path(), NotHeld::Content)),
+            }
             let Some(oid) = listed_blobs.get(git_path_bytes(path).as_slice()) else {
                 return Some((path.as_path(), NotHeld::Content));
             };
@@ -2815,13 +2833,45 @@ impl SyncEngine {
         })
     }
 
+    /// Reads each proper ancestor directory of `path` that `listed_trees`
+    /// ([`listed_tree_ids`]) names, and whose id is not yet in `verified`, against its id
+    /// ([`Self::read_verified_object`]); each id that passes goes into `verified`. An
+    /// ancestor the listing does not name is skipped: `ls-tree -r -t` names every tree above
+    /// a listed entry, so a path under an unnamed directory is itself not listed. The root
+    /// tree is not in the listing; git checks it when `ls-tree` reads it (measured).
+    fn verify_ancestor_trees<'l>(
+        &self,
+        repo: &Path,
+        listed_trees: &HashMap<&'l [u8], &'l [u8]>,
+        path: &Path,
+        verified: &mut HashSet<&'l [u8]>,
+    ) -> Result<(), ObjectDefect> {
+        for ancestor in path.ancestors().skip(1) {
+            if ancestor.as_os_str().is_empty() {
+                continue;
+            }
+            let Some(&oid) = listed_trees.get(git_path_bytes(ancestor).as_slice()) else {
+                continue;
+            };
+            if verified.contains(oid) {
+                continue;
+            }
+            self.read_verified_object(repo, oid, "tree")?;
+            verified.insert(oid);
+        }
+        Ok(())
+    }
+
     /// What an empty `git status` (or an empty `staged_files`) must satisfy before a push
     /// returns "nothing to push": HEAD is `target.fetched_sha`, its tree, read past replace
     /// refs, holds every recorded path with its recorded content, and every staged path
-    /// with no record (a deletion) is gone from it. With nothing staged and nothing
-    /// recorded there is nothing to check. The fetched head was confirmed against the
-    /// remote by the ensure, so Ok here means the remote's head held the content when read.
-    /// Paths in a refusal come from `validated` and `staged_files`, never from the tree.
+    /// with no record (a deletion) is gone from it. Each blob, and each tree above a
+    /// recorded or deleted path, is read against its id, as
+    /// [`Self::first_path_not_held`] describes; git checks the root tree and the commit
+    /// itself. With nothing staged and nothing recorded there is nothing to check. The
+    /// fetched head was confirmed against the remote by the ensure, so Ok here means the
+    /// remote's head held the content when read. Paths in a refusal come from `validated`
+    /// and `staged_files`, never from the tree.
     fn require_fetched_head_holds(
         &self,
         target: &PublishTarget<'_>,
@@ -2865,13 +2915,19 @@ impl SyncEngine {
                 &listing,
             ));
         }
-        let Ok(listed_blobs) = tree_listing_blobs(&listing.stdout) else {
-            return Err(format!(
+        let unparseable = || {
+            format!(
                 "{PREFIX} the fetched head's tree repeats a path, has a bad path component or cannot be parsed"
-            ));
+            )
+        };
+        let Ok(listed_blobs) = tree_listing_blobs(&listing.stdout) else {
+            return Err(unparseable());
+        };
+        let Some(listed_trees) = listed_tree_ids(&listing.stdout) else {
+            return Err(unparseable());
         };
 
-        match self.first_path_not_held(repo, &listed_blobs, &validated_rel) {
+        match self.first_path_not_held(repo, &listed_blobs, &listed_trees, &validated_rel) {
             Some((path, NotHeld::Content)) => {
                 return Err(format!(
                     "{PREFIX} the fetched head does not hold the validated content of {}; a hook in the cache checkout most likely hid the change",
@@ -2894,10 +2950,25 @@ impl SyncEngine {
                 .filter_map(|record| record.splitn(2, |byte| *byte == b'\t').nth(1))
                 .any(|listed_path| listed_path == path)
         };
+        // A rewritten tree above a deleted path can leave the path out of the listing while
+        // the remote's tree still holds it, so the trees above it are read against their ids.
+        let mut verified = HashSet::new();
         for staged in staged_files {
             let rel = staged.strip_prefix(repo).unwrap_or(staged);
             if validated_rel.contains_key(rel) {
                 continue;
+            }
+            match self.verify_ancestor_trees(repo, &listed_trees, rel, &mut verified) {
+                Ok(()) => {}
+                Err(ObjectDefect::IdMismatch) => {
+                    return Err(format!(
+                        "{PREFIX} an object read for {} {OBJECT_ID_MISMATCH}",
+                        rel.display()
+                    ));
+                }
+                Err(ObjectDefect::Unreadable) => {
+                    return Err(format!("{PREFIX} the fetched head's tree cannot be listed"));
+                }
             }
             if listed(&git_path_bytes(rel)) {
                 return Err(format!(
@@ -3122,6 +3193,24 @@ fn count_empty_directories(listing: &[u8]) -> Option<usize> {
             .filter(|tree| !ancestors.contains(tree))
             .count(),
     )
+}
+
+/// Path to object id of the `tree` records in `ls-tree -r -t -z` output (records
+/// `<mode> SP <type> SP <oid> TAB <path>`, each ended by NUL), parsed as
+/// [`count_empty_directories`] parses them. `None` for a record it cannot split.
+fn listed_tree_ids(listing: &[u8]) -> Option<HashMap<&[u8], &[u8]>> {
+    let mut trees = HashMap::new();
+    for record in listing.split_inclusive(|byte| *byte == 0) {
+        let record = record.strip_suffix(&[0])?;
+        let mut fields = record.splitn(2, |byte| *byte == b'\t');
+        let (meta, path) = (fields.next()?, fields.next()?);
+        let mut meta = meta.split(|byte| *byte == b' ');
+        let (kind, oid) = (meta.nth(1)?, meta.next()?);
+        if kind == b"tree" {
+            trees.insert(path, oid);
+        }
+    }
+    Some(trees)
 }
 
 /// Why [`tree_listing_blobs`] refused a listing.
@@ -13839,6 +13928,42 @@ git replace -f "$C" "$TG"
     }
 
     #[test]
+    fn test_listed_tree_ids() {
+        let (outer, inner, other) = ("a".repeat(40), "b".repeat(40), "c".repeat(40));
+        let listing = [
+            tree_listing_record("040000", "tree", &outer, b"templates"),
+            tree_listing_record("040000", "tree", &inner, b"templates/projects"),
+            tree_listing_record("100644", "blob", &other, b"templates/projects/f"),
+            tree_listing_record("100755", "blob", &other, b"templates/x"),
+            tree_listing_record("160000", "commit", &other, b"templates/module"),
+            tree_listing_record("120000", "blob", &other, b"templates/link"),
+            tree_listing_record("040000", "tree", &other, b"docs"),
+        ]
+        .concat();
+        let expected: HashMap<&[u8], &[u8]> = [
+            (b"templates".as_slice(), outer.as_bytes()),
+            (b"templates/projects".as_slice(), inner.as_bytes()),
+            (b"docs".as_slice(), other.as_bytes()),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(listed_tree_ids(&listing), Some(expected));
+        assert_eq!(listed_tree_ids(b""), Some(HashMap::new()));
+
+        // A record without a tab cannot be split.
+        let no_tab = [
+            tree_listing_record("040000", "tree", &outer, b"templates"),
+            format!("040000 tree {inner} templates/projects\0").into_bytes(),
+        ]
+        .concat();
+        assert_eq!(listed_tree_ids(&no_tab), None);
+        // Nor can a record missing its final NUL.
+        let mut unterminated = tree_listing_record("040000", "tree", &outer, b"templates");
+        unterminated.pop();
+        assert_eq!(listed_tree_ids(&unterminated), None);
+    }
+
+    #[test]
     fn test_tree_listing_blobs() {
         use TreeDefect::{BadComponent, RepeatedPath, Unparseable};
         let id = "c".repeat(40);
@@ -14079,19 +14204,22 @@ git replace -f "$C" "$TG"
             .into_iter()
             .collect();
 
+        // No listed trees: the path's only ancestor, `templates`, is then unnamed and skipped.
+        let no_trees: HashMap<&[u8], &[u8]> = HashMap::new();
+
         // Opposite direction: the same record is satisfied by the blob the tag points at.
         let holds_blob: HashMap<&[u8], &[u8]> = [(b"templates/f".as_slice(), blob.as_bytes())]
             .into_iter()
             .collect();
         engine
-            .require_validated_content(dir, &holds_blob, &record)
+            .require_validated_content(dir, &holds_blob, &no_trees, &record)
             .expect("the blob holds the recorded content");
 
         let holds_tag: HashMap<&[u8], &[u8]> = [(b"templates/f".as_slice(), tag.as_bytes())]
             .into_iter()
             .collect();
         let err = engine
-            .require_validated_content(dir, &holds_tag, &record)
+            .require_validated_content(dir, &holds_tag, &no_trees, &record)
             .expect_err("a tag object must not count as the recorded content");
         assert!(err.contains("does not hold the validated content"), "{err}");
     }
@@ -15074,6 +15202,238 @@ git update-ref HEAD "$N"
             engine.read_verified_object(dir, abbreviated.as_bytes(), "blob"),
             Err(ObjectDefect::IdMismatch)
         );
+    }
+
+    /// The directory of [`GATE_REL`].
+    #[cfg(unix)]
+    const GENERIC_REL: &str = "templates/projects/generic";
+
+    /// Primes the index's cache-tree of `checkout` with `git write-tree`, as a hook can, so a
+    /// rewritten subtree object stays out of `git status` and out of the staged diff.
+    #[cfg(unix)]
+    fn prime_cache_tree(git: &GitFixture, checkout: &Path) {
+        git.run(checkout, &["write-tree"]);
+    }
+
+    /// Gives the generic tree of `checkout`'s HEAD the object file of a tree made with
+    /// `git mktree` from `listing`, so a walk of HEAD reads `listing` there.
+    #[cfg(unix)]
+    fn forge_generic_tree(git: &GitFixture, checkout: &Path, listing: &str) {
+        let generic = git.output(checkout, &["rev-parse", &format!("HEAD:{GENERIC_REL}")]);
+        let forged = git_with_input(git, checkout, &["mktree"], listing.as_bytes());
+        forge_loose_object(checkout, &generic, &forged);
+    }
+
+    /// The `mktree` input of a generic tree listing the [`HOOKED_TEMPLATE`] blob, which it
+    /// writes, at `gitconfig.repo`.
+    #[cfg(unix)]
+    fn generic_listing_of_validated_blob(git: &GitFixture, checkout: &Path) -> String {
+        let validated = write_blob(git, checkout, HOOKED_TEMPLATE.as_bytes());
+        format!("100644 blob {validated}\tgitconfig.repo\n")
+    }
+
+    /// The id of the remote's generic tree on `main`.
+    #[cfg(unix)]
+    fn generic_tree_id(git: &GitFixture, bare: &Path) -> String {
+        git.output(bare, &["rev-parse", &format!("main:{GENERIC_REL}")])
+    }
+
+    /// The fetched head's generic tree object, rewritten in the cache checkout to list the
+    /// validated blob while status is empty: refused by the id check, the remote untouched.
+    /// Control: the same step without the rewrite is refused as not held.
+    #[cfg(unix)]
+    fn assert_no_change_subtree_not_matching_its_id_refused(open_pr: bool) {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let step = |checkout: &Path, managed: &Path| {
+            let pushed = hide_hooked_template(&git, checkout, managed);
+            prime_cache_tree(&git, checkout);
+            let listing = generic_listing_of_validated_blob(&git, checkout);
+            forge_generic_tree(&git, checkout, &listing);
+            pushed
+        };
+        let pushed = push_with_empty_status(&git, &engine, open_pr, &step);
+        let validated = git_with_input(
+            &git,
+            &pushed.checkout,
+            &["hash-object", "--stdin"],
+            HOOKED_TEMPLATE.as_bytes(),
+        );
+        // What a walk without the check sees.
+        let walked = git.output(
+            &pushed.checkout,
+            &[
+                "--no-replace-objects",
+                "ls-tree",
+                "-r",
+                &pushed.fetched_sha,
+                "--",
+                GATE_REL,
+            ],
+        );
+        assert!(
+            walked.contains(&validated),
+            "the forgery is not walked: {walked}"
+        );
+        let err = assert_empty_status_refused(&git, &pushed);
+        assert!(err.contains(EMPTY_STATUS_REFUSAL), "{err}");
+        assert!(err.contains(ID_MISMATCH), "{err}");
+        assert!(err.contains(GATE_REL), "{err}");
+        let generic = generic_tree_id(&git, pushed.bare.path());
+        assert!(
+            remote_object_matches_id(&git, pushed.bare.path(), &generic, "tree"),
+            "the forgery reached the bare remote's object"
+        );
+
+        let step = |checkout: &Path, managed: &Path| {
+            let pushed = hide_hooked_template(&git, checkout, managed);
+            prime_cache_tree(&git, checkout);
+            pushed
+        };
+        let control = push_with_empty_status(&git, &engine, open_pr, &step);
+        let err = assert_empty_status_refused(&git, &control);
+        assert!(err.contains(NOT_HELD), "{err}");
+        assert!(!err.contains(ID_MISMATCH), "{err}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_direct_push_no_changes_refuses_subtree_not_matching_its_id() {
+        assert_no_change_subtree_not_matching_its_id_refused(false);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_pr_push_no_changes_refuses_subtree_not_matching_its_id() {
+        assert_no_change_subtree_not_matching_its_id_refused(true);
+    }
+
+    /// A deleted GATE_REL hidden by assume-unchanged, under a generic tree object rewritten
+    /// to list only another file: the deletion reads as gone while the remote still holds
+    /// the path. Refused by the id check naming the staged path. Control: the same step
+    /// without the rewrite is refused because the path is still present.
+    #[cfg(unix)]
+    fn assert_no_change_subtree_hiding_a_deleted_path_refused(open_pr: bool) {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let delete = |checkout: &Path, managed: &Path| {
+            git.run(checkout, &["update-index", "--assume-unchanged", GATE_REL]);
+            fs::remove_file(managed).unwrap();
+            prime_cache_tree(&git, checkout);
+            (vec![managed.to_path_buf()], ValidatedBlobs::default())
+        };
+        let step = |checkout: &Path, managed: &Path| {
+            let pushed = delete(checkout, managed);
+            let other = write_blob(&git, checkout, b"other\n");
+            forge_generic_tree(
+                &git,
+                checkout,
+                &format!("100644 blob {other}\tother.repo\n"),
+            );
+            pushed
+        };
+        let pushed = push_with_empty_status(&git, &engine, open_pr, &step);
+        let names = git.output(
+            &pushed.checkout,
+            &[
+                "--no-replace-objects",
+                "ls-tree",
+                "-r",
+                "--name-only",
+                &pushed.fetched_sha,
+            ],
+        );
+        assert!(
+            !names.lines().any(|name| name == GATE_REL),
+            "the forgery does not hide the path: {names}"
+        );
+        let err = assert_empty_status_refused(&git, &pushed);
+        assert!(err.contains(EMPTY_STATUS_REFUSAL), "{err}");
+        assert!(err.contains(ID_MISMATCH), "{err}");
+        assert!(err.contains(GATE_REL), "{err}");
+        let generic = generic_tree_id(&git, pushed.bare.path());
+        assert!(
+            remote_object_matches_id(&git, pushed.bare.path(), &generic, "tree"),
+            "the forgery reached the bare remote's object"
+        );
+
+        let control = push_with_empty_status(&git, &engine, open_pr, &delete);
+        let err = assert_empty_status_refused(&git, &control);
+        assert!(
+            err.contains(&format!(
+                "{GATE_REL} is staged for deletion and still present"
+            )),
+            "{err}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_direct_push_no_changes_refuses_subtree_hiding_a_deleted_path() {
+        assert_no_change_subtree_hiding_a_deleted_path_refused(false);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_pr_push_no_changes_refuses_subtree_hiding_a_deleted_path() {
+        assert_no_change_subtree_hiding_a_deleted_path_refused(true);
+    }
+
+    /// The committed route for the tree above GATE_REL: after write-tree primes the
+    /// cache-tree, the generic tree object is rewritten to list the validated blob, and the
+    /// commit, whose new file is in another directory, reuses that tree's id. Refused by the
+    /// id check, the remote untouched. Control: the same steps without the rewrite are
+    /// refused because the commit does not hold the validated content.
+    #[cfg(unix)]
+    fn assert_unchanged_subtree_not_matching_its_id_refused(open_pr: bool) {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let step = |checkout: &Path, managed: &Path| {
+            let pushed = hide_hooked_template_beside_added(&git, checkout, managed);
+            prime_cache_tree(&git, checkout);
+            let listing = generic_listing_of_validated_blob(&git, checkout);
+            forge_generic_tree(&git, checkout, &listing);
+            pushed
+        };
+        let pushed = push_after_step(&git, &engine, open_pr, &step);
+        let err = assert_push_refused(&git, &pushed);
+        assert!(
+            err.contains("Post-commit publication gate violation"),
+            "{err}"
+        );
+        assert!(err.contains(ID_MISMATCH), "{err}");
+        assert!(err.contains(GATE_REL), "{err}");
+        let generic = generic_tree_id(&git, pushed.bare.path());
+        assert!(
+            remote_object_matches_id(&git, pushed.bare.path(), &generic, "tree"),
+            "the forgery reached the bare remote's object"
+        );
+
+        let step = |checkout: &Path, managed: &Path| {
+            let pushed = hide_hooked_template_beside_added(&git, checkout, managed);
+            prime_cache_tree(&git, checkout);
+            pushed
+        };
+        let control = push_after_step(&git, &engine, open_pr, &step);
+        let err = assert_push_refused(&git, &control);
+        assert!(
+            err.contains("the commit to publish does not hold the validated content of"),
+            "{err}"
+        );
+        assert!(err.contains(GATE_REL), "{err}");
+        assert!(!err.contains(ID_MISMATCH), "{err}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_direct_push_refuses_unchanged_subtree_not_matching_its_id() {
+        assert_unchanged_subtree_not_matching_its_id_refused(false);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_pr_push_refuses_unchanged_subtree_not_matching_its_id() {
+        assert_unchanged_subtree_not_matching_its_id_refused(true);
     }
 
     /// post-checkout tail, run by `checkout -B` before ensure's `reset --hard`: points
