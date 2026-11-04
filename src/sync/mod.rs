@@ -2725,7 +2725,9 @@ impl SyncEngine {
             "--full-tree",
             commit,
         ]);
-        let listing = self.run_local(ls_tree, "git ls-tree").map_err(|e| {
+        let listing = self.run_local(ls_tree, "git ls-tree");
+        self.after_tree_listing();
+        let listing = listing.map_err(|e| {
             format!(
                 "Post-commit publication gate violation: failed to list the tree of {commit}: {e}"
             )
@@ -15857,6 +15859,94 @@ git update-ref HEAD "$N"
     #[cfg(unix)]
     fn test_pr_push_refuses_unchanged_subtree_not_matching_its_id() {
         assert_unchanged_subtree_not_matching_its_id_refused(true);
+    }
+
+    /// The committed route: the generic tree object rewritten to list the validated blob, the
+    /// commit (whose new file is in another directory) reusing that tree's id, and the honest
+    /// bytes put back right after the gate's listing is read: refused by the id check, the
+    /// remote untouched. Control: the same steps with the hook unarmed and no rewrite are
+    /// refused because the commit does not hold the validated content.
+    #[cfg(unix)]
+    fn assert_unchanged_subtree_rewritten_only_while_listed_refused(open_pr: bool) {
+        let git = GitFixture::new();
+        let swap = ListingSwap::default();
+        let engine = SyncEngine::new()
+            .with_extra_env(git.gitconfig_env())
+            .with_after_tree_listing(swap.hook());
+        let generic = std::cell::RefCell::new(String::new());
+        let step = |checkout: &Path, managed: &Path| {
+            let pushed = hide_hooked_template_beside_added(&git, checkout, managed);
+            prime_cache_tree(&git, checkout);
+            let listing = generic_listing_of_validated_blob(&git, checkout);
+            let id = checkout_generic_tree_id(&git, checkout);
+            swap.arm(checkout, &id);
+            forge_generic_tree(&git, checkout, &listing);
+            let validated = write_blob(&git, checkout, HOOKED_TEMPLATE.as_bytes());
+            // What a walk without the check sees.
+            let walked = git.output(
+                checkout,
+                &[
+                    "--no-replace-objects",
+                    "ls-tree",
+                    "-r",
+                    "HEAD",
+                    "--",
+                    GATE_REL,
+                ],
+            );
+            assert!(
+                walked.contains(&validated),
+                "the forgery is not walked: {walked}"
+            );
+            *generic.borrow_mut() = id;
+            pushed
+        };
+        let pushed = push_after_step(&git, &engine, open_pr, &step);
+        assert!(swap.calls() >= 1, "the listing hook did not run");
+        assert!(
+            remote_object_matches_id(&git, &pushed.checkout, &generic.borrow(), "tree"),
+            "the hook did not put the honest generic tree back"
+        );
+        let err = assert_push_refused(&git, &pushed);
+        assert!(
+            err.contains("Post-commit publication gate violation"),
+            "{err}"
+        );
+        assert!(err.contains(ID_MISMATCH), "{err}");
+        assert!(err.contains(GATE_REL), "{err}");
+        let remote_generic = generic_tree_id(&git, pushed.bare.path());
+        assert!(
+            remote_object_matches_id(&git, pushed.bare.path(), &remote_generic, "tree"),
+            "the forgery reached the bare remote's object"
+        );
+
+        let step = |checkout: &Path, managed: &Path| {
+            let pushed = hide_hooked_template_beside_added(&git, checkout, managed);
+            prime_cache_tree(&git, checkout);
+            pushed
+        };
+        let control = push_after_step(&git, &engine, open_pr, &step);
+        let err = assert_push_refused(&git, &control);
+        assert!(
+            err.contains("the commit to publish does not hold the validated content of"),
+            "{err}"
+        );
+        assert!(err.contains(GATE_REL), "{err}");
+        assert!(!err.contains(ID_MISMATCH), "{err}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    #[ignore = "RED: fails until 02-24 Task 2 fix"]
+    fn test_direct_push_refuses_unchanged_subtree_rewritten_only_while_listed() {
+        assert_unchanged_subtree_rewritten_only_while_listed_refused(false);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    #[ignore = "RED: fails until 02-24 Task 2 fix"]
+    fn test_pr_push_refuses_unchanged_subtree_rewritten_only_while_listed() {
+        assert_unchanged_subtree_rewritten_only_while_listed_refused(true);
     }
 
     /// The fetched head's root tree object, rewritten in the cache checkout to list an extra
