@@ -1730,6 +1730,437 @@ fn test_force_does_not_bypass_upstream_moved() {
     assert_ne!(mise_ancestor(&project), ancestor_before);
 }
 
+/// A sync world for push tests: a project initialised through the world's own runner
+/// (fake HOME and XDG dirs, the fixture gitconfig as the only global config, repo-local
+/// git variables removed), a bare remote seeded with the project's rendered mise.toml,
+/// and `# local edit` appended to the project's mise.toml.
+#[cfg(unix)]
+struct CliPushWorld {
+    temp: tempfile::TempDir,
+    git: GitFixture,
+    project: PathBuf,
+    bare: PathBuf,
+    bare_url: String,
+    /// mise.toml as init wrote it, which is also the remote template's content.
+    init_mise: String,
+}
+
+/// Builds a [`CliPushWorld`]; `ude init` runs through the world's runner, so no command
+/// the world runs reads the host's HOME, XDG directories or global git config.
+#[cfg(unix)]
+fn cli_push_world() -> CliPushWorld {
+    let temp = tempdir().unwrap();
+    let git = GitFixture::new();
+    let project = temp.path().join("project");
+    // The runner makes the project its working directory, so it must exist first.
+    fs::create_dir_all(&project).unwrap();
+    let init = sync_cli(temp.path())(
+        &project,
+        &[
+            "init",
+            "--path",
+            &project.to_string_lossy(),
+            "--type",
+            "rust",
+        ],
+    );
+    assert_eq!(init.status.code(), Some(0), "ude init: {}", outputs(&init));
+    let init_mise = fs::read_to_string(project.join("mise.toml")).unwrap();
+    let bare = seed_mise_remote(&git, temp.path(), "remote", &init_mise);
+    let bare_url = bare.to_string_lossy().to_string();
+    fs::write(
+        project.join("mise.toml"),
+        format!("{init_mise}# local edit\n"),
+    )
+    .unwrap();
+    CliPushWorld {
+        temp,
+        git,
+        project,
+        bare,
+        bare_url,
+        init_mise,
+    }
+}
+
+#[cfg(unix)]
+impl CliPushWorld {
+    /// Runs `ude` in `dir` as [`sync_cli`] does, with the world's environment.
+    fn ude(&self, dir: &Path, args: &[&str]) -> Output {
+        sync_cli(self.temp.path())(dir, args)
+    }
+
+    /// [`CliPushWorld::ude`] with `extra` applied after the world's variables, as
+    /// [`sync_cli_with_env`] does.
+    #[expect(
+        dead_code,
+        reason = "plans 02-17 to 02-19 run the CLI world with extra env"
+    )]
+    fn ude_with_env(&self, dir: &Path, args: &[&str], extra: Vec<(String, String)>) -> Output {
+        sync_cli_with_env(self.temp.path(), extra)(dir, args)
+    }
+
+    /// The project's mise.toml with the world's local edit.
+    fn local_mise(&self) -> String {
+        format!("{}# local edit\n", self.init_mise)
+    }
+
+    /// `ude sync push --force --remote <bare>` from the project, then `extra_args`.
+    fn push(&self, extra_args: &[&str]) -> Output {
+        let mut args = vec![
+            "sync",
+            "push",
+            "--force",
+            "--remote",
+            self.bare_url.as_str(),
+        ];
+        args.extend_from_slice(extra_args);
+        self.ude(&self.project, &args)
+    }
+
+    /// Every ref of the bare remote with its object id.
+    fn remote_refs(&self) -> String {
+        self.git.output(
+            &self.bare,
+            &["for-each-ref", "--format=%(refname) %(objectname)"],
+        )
+    }
+
+    /// The bare remote holds the object `oid`.
+    fn remote_holds(&self, oid: &str) -> bool {
+        holds_object(&self.git, &self.bare, oid)
+    }
+
+    /// Runs `sync status --remote` once so the cache checkout exists, then installs
+    /// `body` as the executable hook `name` there, behind a one-shot marker
+    /// (`.git/ude-test-hook-ran`). Returns the cache checkout.
+    fn install_cache_hook(&self, name: &str, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let status = self.ude(
+            &self.project,
+            &["sync", "status", "--remote", &self.bare_url],
+        );
+        assert_eq!(status.status.code(), Some(0), "{}", outputs(&status));
+        let checkout = remote_cache_checkout(&self.temp.path().join("cache"));
+        let hook = checkout.join(".git/hooks").join(name);
+        fs::create_dir_all(hook.parent().unwrap()).unwrap();
+        fs::write(
+            &hook,
+            format!(
+                "#!/bin/sh\n[ -e .git/ude-test-hook-ran ] && exit 0\n: > .git/ude-test-hook-ran\n{body}"
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+        checkout
+    }
+
+    /// A second project, with its own fake HOME and cache, initialised and then pulled
+    /// from the world's remote. Returns the pull and the consumer's mise.toml.
+    fn consumer_pull(&self) -> (Output, String) {
+        let root = self.temp.path().join("consumer");
+        let project = root.join("project");
+        fs::create_dir_all(&project).unwrap();
+        let ude = sync_cli(&root);
+        let init = ude(
+            &project,
+            &[
+                "init",
+                "--path",
+                &project.to_string_lossy(),
+                "--type",
+                "rust",
+            ],
+        );
+        assert_eq!(
+            init.status.code(),
+            Some(0),
+            "consumer init: {}",
+            outputs(&init)
+        );
+        let pull = ude(&project, &["sync", "pull", "--remote", &self.bare_url]);
+        let mise = fs::read_to_string(project.join("mise.toml")).unwrap();
+        (pull, mise)
+    }
+}
+
+/// The repository holds the object `oid`.
+#[cfg(unix)]
+fn holds_object(git: &GitFixture, repo: &Path, oid: &str) -> bool {
+    git.cmd(repo)
+        .args(["cat-file", "-e", oid])
+        .output()
+        .unwrap()
+        .status
+        .success()
+}
+
+/// The body of the GitHub PAT shape the CLI push tests use, joined to its prefix at
+/// runtime so no token literal is committed.
+#[cfg(unix)]
+const CLI_TOKEN_BODY: &str = "111122223333444455556666777788889999";
+
+/// A GitHub PAT shape, built at runtime.
+#[cfg(unix)]
+fn cli_token() -> String {
+    let prefix = "ghp_";
+    format!("{prefix}{CLI_TOKEN_BODY}")
+}
+
+/// A 32-character token cycling lower, upper and digit, built at runtime: high entropy
+/// and no named rule's shape.
+#[cfg(unix)]
+fn cycling_token() -> String {
+    (0u8..32)
+        .map(|i| {
+            let k = i / 3;
+            char::from(match i % 3 {
+                0 => b'a' + k,
+                1 => b'A' + k,
+                _ => b'0' + k,
+            })
+        })
+        .collect()
+}
+
+/// post-commit body for the cache checkout: builds a child of UDE's commit whose
+/// template holds `token`, and with `shadow` points `refs/tags/<id of UDE's commit>` at
+/// it. Leaves the token blob and UDE's commit in `.git/ude-test-injected-blob` and
+/// `.git/ude-test-validated`.
+#[cfg(unix)]
+fn injected_token_hook(token: &str, shadow: bool) -> String {
+    let shadow_line = if shadow {
+        "git update-ref \"refs/tags/$C\" \"$N\"\n"
+    } else {
+        ""
+    };
+    format!(
+        r#"F='{MISE_TEMPLATE}'
+C=$(git rev-parse HEAD)
+IB=$(printf '%s\n' '{token}' | git hash-object -w --stdin)
+export GIT_INDEX_FILE=.git/ude-probe-idx
+git read-tree HEAD
+git update-index --add --cacheinfo 100644,"$IB","$F"
+T=$(git write-tree)
+unset GIT_INDEX_FILE
+N=$(git commit-tree "$T" -p "$C" -m injected)
+printf '%s\n' "$IB" > .git/ude-test-injected-blob
+printf '%s\n' "$C" > .git/ude-test-validated
+{shadow_line}"#
+    )
+}
+
+/// An object id the cache-checkout hook left in `.git/<name>`.
+#[cfg(unix)]
+fn cache_recorded_id(checkout: &Path, name: &str) -> String {
+    fs::read_to_string(checkout.join(".git").join(name))
+        .unwrap()
+        .trim()
+        .to_string()
+}
+
+/// A plain push of `<validated id>:refs/heads/control` from the cache checkout to a
+/// fresh bare repository delivers the token, so the hook's shadow tag was in effect.
+#[cfg(unix)]
+fn assert_plain_id_push_delivers_token(world: &CliPushWorld, checkout: &Path) {
+    let validated = cache_recorded_id(checkout, "ude-test-validated");
+    let blob = cache_recorded_id(checkout, "ude-test-injected-blob");
+    let control = tempdir().unwrap();
+    world
+        .git
+        .run(control.path(), &["init", "--bare", "-q", "-b", "main"]);
+    world.git.run(
+        checkout,
+        &[
+            "push",
+            "-q",
+            "--no-follow-tags",
+            &control.path().to_string_lossy(),
+            &format!("{validated}:refs/heads/control"),
+        ],
+    );
+    assert!(
+        holds_object(&world.git, control.path(), &blob),
+        "a plain push of the validated id did not deliver the token blob, so the shadow tag had no effect"
+    );
+    let file = world.git.output(
+        control.path(),
+        &["show", &format!("control:{MISE_TEMPLATE}")],
+    );
+    assert!(file.contains(CLI_TOKEN_BODY), "{file}");
+}
+
+/// The hook ran, the token blob is not on the remote, and the remote's template on
+/// `refname` is the local edit.
+#[cfg(unix)]
+fn assert_cli_push_published_edit(world: &CliPushWorld, checkout: &Path, refname: &str) {
+    assert!(
+        checkout.join(".git/ude-test-hook-ran").exists(),
+        "the cache hook never ran"
+    );
+    let blob = cache_recorded_id(checkout, "ude-test-injected-blob");
+    assert!(
+        !world.remote_holds(&blob),
+        "the remote holds the token blob"
+    );
+    let file = world.git.output(
+        &world.bare,
+        &["show", &format!("{refname}:{MISE_TEMPLATE}")],
+    );
+    assert!(
+        !file.contains(CLI_TOKEN_BODY),
+        "the remote file holds the token"
+    );
+    assert_eq!(format!("{file}\n"), world.local_mise());
+}
+
+/// A consumer's pull exits 0, gets the published edit and no token.
+#[cfg(unix)]
+fn assert_consumer_pull_has_no_token(world: &CliPushWorld) {
+    let (pull, mise) = world.consumer_pull();
+    assert_eq!(pull.status.code(), Some(0), "{}", outputs(&pull));
+    assert!(
+        !mise.contains(CLI_TOKEN_BODY),
+        "the consumer's mise.toml holds the token"
+    );
+    assert_eq!(mise, world.local_mise(), "{}", outputs(&pull));
+}
+
+#[test]
+#[cfg(unix)]
+fn test_cli_direct_push_ignores_tag_named_after_the_commit() {
+    let world = cli_push_world();
+    let checkout =
+        world.install_cache_hook("post-commit", &injected_token_hook(&cli_token(), true));
+    let ancestor_before = mise_ancestor(&world.project);
+
+    let push = world.push(&[]);
+    let text = outputs(&push);
+    assert_eq!(push.status.code(), Some(0), "{text}");
+    assert!(!text.contains(CLI_TOKEN_BODY), "the output holds the token");
+    assert_cli_push_published_edit(&world, &checkout, "refs/heads/main");
+    assert_ne!(mise_ancestor(&world.project), ancestor_before, "{text}");
+    assert_consumer_pull_has_no_token(&world);
+    assert_plain_id_push_delivers_token(&world, &checkout);
+}
+
+#[test]
+#[cfg(unix)]
+fn test_cli_pr_push_ignores_tag_named_after_the_commit() {
+    let world = cli_push_world();
+    let checkout =
+        world.install_cache_hook("post-commit", &injected_token_hook(&cli_token(), true));
+    let ancestor_before = mise_ancestor(&world.project);
+    let main_before = world
+        .git
+        .output(&world.bare, &["rev-parse", "refs/heads/main"]);
+
+    let push = world.push(&["--pr"]);
+    let text = outputs(&push);
+    assert_eq!(push.status.code(), Some(0), "{text}");
+    assert!(!text.contains(CLI_TOKEN_BODY), "the output holds the token");
+    let sync_branches = world.git.output(
+        &world.bare,
+        &[
+            "for-each-ref",
+            "--format=%(refname)",
+            "refs/heads/ude-sync-*",
+        ],
+    );
+    assert_eq!(sync_branches.lines().count(), 1, "{sync_branches}\n{text}");
+    assert_cli_push_published_edit(&world, &checkout, &sync_branches);
+    assert_eq!(
+        world
+            .git
+            .output(&world.bare, &["rev-parse", "refs/heads/main"]),
+        main_before,
+        "the PR push moved main. {text}"
+    );
+    assert_eq!(mise_ancestor(&world.project), ancestor_before, "{text}");
+    assert_plain_id_push_delivers_token(&world, &checkout);
+}
+
+#[test]
+#[cfg(unix)]
+fn test_cli_direct_push_with_post_commit_hook_and_no_shadow_ref_publishes() {
+    let world = cli_push_world();
+    let checkout =
+        world.install_cache_hook("post-commit", &injected_token_hook(&cli_token(), false));
+    let ancestor_before = mise_ancestor(&world.project);
+
+    let push = world.push(&[]);
+    let text = outputs(&push);
+    assert_eq!(push.status.code(), Some(0), "{text}");
+    assert_cli_push_published_edit(&world, &checkout, "refs/heads/main");
+    assert_ne!(mise_ancestor(&world.project), ancestor_before, "{text}");
+    assert_consumer_pull_has_no_token(&world);
+}
+
+/// With no hook, a push of `line` appended to the edit exits 1 and changes no ref of the
+/// remote. Returns the push output.
+#[cfg(unix)]
+fn assert_cli_push_refuses_line(line: &str) -> String {
+    let world = cli_push_world();
+    fs::write(
+        world.project.join("mise.toml"),
+        format!("{}{line}\n", world.local_mise()),
+    )
+    .unwrap();
+    let refs_before = world.remote_refs();
+    let push = world.push(&[]);
+    let text = outputs(&push);
+    assert_eq!(push.status.code(), Some(1), "{text}");
+    assert!(text.contains("Push rejected on mise.toml"), "{text}");
+    assert_eq!(
+        world.remote_refs(),
+        refs_before,
+        "the remote changed. {text}"
+    );
+    text
+}
+
+#[test]
+#[cfg(unix)]
+fn test_cli_direct_push_refuses_token_line_with_no_hook() {
+    let text = assert_cli_push_refuses_line(&format!("# token = {}", cli_token()));
+    assert!(
+        !text.contains(CLI_TOKEN_BODY),
+        "the refusal printed the token"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn test_cli_direct_push_refuses_high_entropy_line_with_no_hook() {
+    // No keyword such as `key` on the line: gitleaks' generic-api-key rule would refuse it
+    // first, and this row is for the entropy rule.
+    let text = assert_cli_push_refuses_line(&format!("# {}", cycling_token()));
+    assert!(text.contains("high-entropy"), "{text}");
+}
+
+#[test]
+#[cfg(unix)]
+fn test_cli_direct_push_publishes_benign_edit_with_no_hook() {
+    let world = cli_push_world();
+    let main_before = world
+        .git
+        .output(&world.bare, &["rev-parse", "refs/heads/main"]);
+    let push = world.push(&[]);
+    let text = outputs(&push);
+    assert_eq!(push.status.code(), Some(0), "{text}");
+    assert_ne!(
+        world
+            .git
+            .output(&world.bare, &["rev-parse", "refs/heads/main"]),
+        main_before,
+        "the remote did not move. {text}"
+    );
+    assert_eq!(
+        format!("{}\n", remote_file(&world.git, &world.bare, MISE_TEMPLATE)),
+        world.local_mise()
+    );
+}
+
 #[test]
 fn test_ude_command_drops_host_typesafe_key() {
     let cmd = ude_command(env!("CARGO_BIN_EXE_ude"));
