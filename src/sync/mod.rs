@@ -14511,14 +14511,22 @@ git update-ref HEAD "$N"
     }
 
     /// A record equal to what the fetched head holds is the legitimate no-change case:
-    /// Ok("No changes..."), the remote's heads unchanged, no sync branch.
+    /// Ok("No changes..."), the remote's heads unchanged, no sync branch. With
+    /// `gone_deletion` the staged list also holds a deletion with no record whose path the
+    /// fetched head no longer lists, while it still lists other paths: still no change.
     #[cfg(unix)]
-    fn assert_no_change_publishes_nothing(open_pr: bool) {
+    fn assert_no_change_publishes_nothing(open_pr: bool, gone_deletion: bool) {
         let git = GitFixture::new();
         let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
         let step = |_: &Path, managed: &Path| {
             let validated = ValidatedBlobs::from_files(&[managed.to_path_buf()]);
-            (vec![managed.to_path_buf()], validated)
+            let mut staged = vec![managed.to_path_buf()];
+            if gone_deletion {
+                let gone = managed.with_file_name("already-deleted.repo");
+                assert!(!gone.exists(), "the deleted path must be absent");
+                staged.push(gone);
+            }
+            (staged, validated)
         };
         let pushed = push_with_empty_status(&git, &engine, open_pr, &step);
         assert_eq!(
@@ -14532,13 +14540,25 @@ git update-ref HEAD "$N"
     #[test]
     #[cfg(unix)]
     fn test_direct_push_no_changes_publishes_nothing_when_content_is_held() {
-        assert_no_change_publishes_nothing(false);
+        assert_no_change_publishes_nothing(false, false);
     }
 
     #[test]
     #[cfg(unix)]
     fn test_pr_push_no_changes_publishes_nothing_when_content_is_held() {
-        assert_no_change_publishes_nothing(true);
+        assert_no_change_publishes_nothing(true, false);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_direct_push_no_changes_publishes_nothing_when_content_is_held_and_deletion_is_gone() {
+        assert_no_change_publishes_nothing(false, true);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_pr_push_no_changes_publishes_nothing_when_content_is_held_and_deletion_is_gone() {
+        assert_no_change_publishes_nothing(true, true);
     }
 
     /// post-checkout tail, run by `checkout -B` before ensure's `reset --hard`: points
