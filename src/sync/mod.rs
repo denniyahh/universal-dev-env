@@ -2077,7 +2077,10 @@ impl SyncEngine {
     /// PR mode: commits on a fresh `ude-sync-<hash>-<epoch>` branch, pushes it and opens
     /// a PR against `branch`. Not subject to the upstream-moved abort (D-18 scope note),
     /// but its commit must sit directly on `fetched_sha`, like a direct push's. The push
-    /// reads no commit-graph, bitmap or grafts file and sees no `GIT_TEST_*` variable.
+    /// goes to `target.remote_url`, and `gh pr create` runs only after
+    /// [`Self::confirm_published`] found the sync branch there at the commit; otherwise the
+    /// local sync branch is removed and nothing is opened. The push reads no commit-graph,
+    /// bitmap or grafts file and sees no `GIT_TEST_*` variable.
     fn push_pr_branch(
         &self,
         target: &PublishTarget<'_>,
@@ -2169,8 +2172,9 @@ impl SyncEngine {
         // test-suite variables have no place in a user's push.
         //
         // Push's object walk also reads the grafts file. The gate's refusal runs before the
-        // push, and a hook, a process it left or a command it wrote into the remote config
-        // can write the file after that, so run_push makes the walk read the null device.
+        // push, and a hook, a process it left or a command it wrote into config (a push to a
+        // URL not starting with `/` still runs `remote.<url>.receivepack`) can write the
+        // file after that, so run_push makes the walk read the null device.
         //
         // With GIT_GRAFT_FILE naming an existing file git prints a deprecation hint on stderr
         // when a push reads objects, and a refusal's excerpt is the last lines of stderr, so
@@ -2188,7 +2192,8 @@ impl SyncEngine {
             "advice.graftFileDeprecated=false",
             "push",
             "--no-follow-tags",
-            "origin",
+            "--",
+            target.remote_url,
             &refspec,
         ]);
         remove_git_test_env(&mut push, std::env::vars_os().map(|(key, _)| key));
@@ -2204,6 +2209,12 @@ impl SyncEngine {
                 format!("git push failed for branch {sync_branch}"),
                 &push_out,
             ));
+        }
+
+        // No PR is opened for a branch the caller's remote does not hold at the commit.
+        if let Err(err) = self.confirm_published(target, &sync_branch, &commit) {
+            self.abandon_sync_branch(remote_checkout, branch, &sync_branch);
+            return Err(err);
         }
 
         // Attempt to create PR via gh CLI if available
@@ -2315,8 +2326,9 @@ impl SyncEngine {
         // test-suite variables have no place in a user's push.
         //
         // Push's object walk also reads the grafts file. The gate's refusal runs before the
-        // push, and a hook, a process it left or a command it wrote into the remote config
-        // can write the file after that, so run_push makes the walk read the null device.
+        // push, and a hook, a process it left or a command it wrote into config (a push to a
+        // URL not starting with `/` still runs `remote.<url>.receivepack`) can write the
+        // file after that, so run_push makes the walk read the null device.
         //
         // With GIT_GRAFT_FILE naming an existing file git prints a deprecation hint on stderr
         // when a push reads objects, and a refusal's excerpt is the last lines of stderr, so
