@@ -4,10 +4,10 @@ current_phase: 02
 current_phase_name: Sanitizer, Boundaries & Security Hardening
 status: verifying
 stopped_at: Completed 02-26-PLAN.md
-last_updated: "2026-11-04T19:44:46.338Z"
+last_updated: "2026-11-04T20:35:35.781Z"
 last_activity: 2026-11-04
 last_activity_desc: Phase 02 execution started
-state_head: 534a3fcf37cdfb04b704d4c7146e403fcf1a97a2
+state_head: 669d8c4f2b920b3c38d86902f03993933472751c
 progress:
   total_phases: 4
   completed_phases: 1
@@ -197,6 +197,7 @@ Recent decisions affecting current work:
 - [Phase 02]: Operator answer 2026-11-04: the staged gate's git diff --cached stays unchecked; 'the id check on the trees the diff reads' is met at the committed (binding) gate per 02-25. Interpretation closed.
 - [Phase 02]: 02-26: all 13 control rows on the final hashed-bytes gate code came out same (no corrected row, T-02-109 unused); scoped mutation run 69 listed, 62 caught, 0 missed, 7 unviable, no test added
 - [Phase 02]: 02-26: DEF-09, DEF-11 and DEF-12 in docs/ARCHITECTURE.md and 02-20-PLAN.md name the swap, commit, root and base-side channels with their tests; NOT-10 unchanged
+- [Phase 02]: Operator 2026-11-04: fix review WR-600 (unbounded in-process tree walk in the publication gate) with gap plan 02-27 before re-verification; cap listing records and one deadline for the whole walk, fixed refusal text; do not widen NOT-14.
 
 ### Pending Todos
 
