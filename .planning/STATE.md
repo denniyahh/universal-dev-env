@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 02
 current_phase_name: Sanitizer, Boundaries & Security Hardening
 status: executing
-stopped_at: Completed 02-21-PLAN.md
-last_updated: "2026-11-04T14:09:22.780Z"
-last_activity: 2026-11-03
+stopped_at: Completed 02-22-PLAN.md
+last_updated: "2026-11-04T14:34:55.466Z"
+last_activity: 2026-11-04
 last_activity_desc: Phase 02 execution started
-state_head: 4f9f043d129b049b2fb6b0a6e3f9a8676374b5b3
+state_head: 6b78831391ea22f935f0d96b24dd8a99a643e885
 progress:
   total_phases: 4
   completed_phases: 1
   total_plans: 34
-  completed_plans: 32
+  completed_plans: 33
   percent: 25
 milestone: null
 ---
@@ -28,10 +28,10 @@ See: `.planning/PROJECT.md` (updated 2026-10-22)
 
 ## Current Position
 
-Phase: 02 (Sanitizer, Boundaries & Security Hardening) — READY TO EXECUTE
-Plan: 21 of 21
+Phase: 02 (Sanitizer, Boundaries & Security Hardening) — EXECUTING
+Plan: 23 of 23
 Status: Ready to execute
-Last activity: 2026-11-03 — Phase 02 execution started
+Last activity: 2026-11-04 — Phase 02 execution started
 
 Progress: [███░░░░░░░] 25%
 
@@ -92,6 +92,7 @@ Progress: [███░░░░░░░] 25%
 | Phase 02 P19 | 20 min | 3 tasks | 2 files |
 | Phase 02 P20 | 7 min | 2 tasks | 2 files |
 | Phase 02 P21 | 2h 40m | 3 tasks | 2 files |
+| Phase 02 P22 | 19 min | 3 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -180,6 +181,8 @@ Recent decisions affecting current work:
 - [Phase 02]: 02-20: the gate's promise is the closed list in docs/ARCHITECTURE.md section 3 (DEF-01..DEF-15 defended with their tests, NOT-01..NOT-15 not); closed by operator decision, not proven exhaustive; ValidatedBlobs, validate_committed_tree and push_to_remote comments point at it
 - [Phase 02]: 02-21: 46 control rows on the final gate code, 35 same and 11 corrected by added names only (none dropped, no T-02-88); re-run rows 10, 11, 29, 34-40 and 43 at re-verification
 - [Phase 02]: 02-21: scoped mutation run 122 listed, 103 caught, 0 missed, 19 unviable after one survivor (== to != in require_fetched_head_holds' deletion check) was killed by two filter-selected no-change tests
+- [Phase 02]: 02-22: blobs and the trees above recorded or deleted paths are hashed with git hash-object in the cache checkout (own object format, no write flag) and compared whole with the id on both push routes; a mismatch is refused with its own text naming only a path from the record, the staged list or an allowlisted changed entry
+- [Phase 02]: 02-22: the fetched root tree and the commit get pin rows, not code: git refuses a rewritten root tree itself (git status exit 128, hash mismatch)
 
 ### Pending Todos
 
@@ -224,6 +227,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-04T06:19:31.175Z
-Stopped at: Completed 02-21-PLAN.md
+Last session: 2026-11-04T14:34:55.188Z
+Stopped at: Completed 02-22-PLAN.md
 Resume file: None
