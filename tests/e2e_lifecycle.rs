@@ -2204,6 +2204,10 @@ fn assert_cli_push_refused_moved_base(
         "the cache hook never ran. {text}"
     );
     assert_eq!(push.status.code(), Some(2), "{text}");
+    assert!(
+        text.contains("fetched head is not the commit the remote branch holds"),
+        "refused for another reason. {text}"
+    );
     let blob = cache_recorded_id(checkout, "ude-test-injected-blob");
     assert!(
         !world.remote_holds(&blob),

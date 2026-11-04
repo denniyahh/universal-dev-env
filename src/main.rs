@@ -1040,7 +1040,7 @@ fn main() {
                 }
                 cli::SyncAction::Push { force, pr } => {
                     let (root_template_dir, remote_checkout_root, remote_cache) =
-                        open_sync_templates(&engine, remote_url.as_deref(), &branch, &cache_dir);
+                        open_push_templates(&engine, remote_url.as_deref(), &branch, &cache_dir);
                     // The same deletion check as status and pull, so push agrees with them.
                     let engine = match &remote_cache {
                         Some(cache) => {
@@ -1601,6 +1601,46 @@ fn open_sync_templates(
             (tmpl_dir, Some(checkout_dir), Some(cache))
         }
         Err(e) => {
+            eprintln!(
+                "  {} Failed to sync with remote {}: {}",
+                "✗".red(),
+                process::redact_userinfo(r_url),
+                e
+            );
+            std::process::exit(EXIT_HARD_FAILURE);
+        }
+    }
+}
+
+/// [`open_sync_templates`] for `ude sync push`: a remote is opened through
+/// [`sync::SyncEngine::ensure_remote_repo_for_push`], so the fetched head the push builds
+/// on is the commit the remote reports. A remote that moved during the fetch exits with
+/// [`EXIT_DRIFT`] and the pull-first line; any other failure exits with
+/// [`EXIT_HARD_FAILURE`]. Without a remote this is [`open_sync_templates`].
+fn open_push_templates(
+    engine: &sync::SyncEngine,
+    remote_url: Option<&str>,
+    branch: &str,
+    cache_dir: &Path,
+) -> (PathBuf, Option<PathBuf>, Option<sync::RemoteCache>) {
+    let Some(r_url) = remote_url else {
+        return open_sync_templates(engine, remote_url, branch, cache_dir);
+    };
+    match engine.ensure_remote_repo_for_push(r_url, branch, cache_dir) {
+        Ok(cache) => {
+            let tmpl_dir = cache.templates_dir.clone();
+            let checkout_dir = cache.checkout_dir.clone();
+            (tmpl_dir, Some(checkout_dir), Some(cache))
+        }
+        Err(sync::PushRemoteError::UpstreamMoved { branch }) => {
+            eprintln!(
+                "  {} Upstream branch {branch} moved since UDE fetched it; nothing was published.",
+                "✗".red()
+            );
+            eprintln!("  upstream changed, run ude sync pull");
+            std::process::exit(EXIT_DRIFT);
+        }
+        Err(sync::PushRemoteError::Failed(e)) => {
             eprintln!(
                 "  {} Failed to sync with remote {}: {}",
                 "✗".red(),

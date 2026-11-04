@@ -354,10 +354,21 @@ pub struct RemoteCache {
     /// derive it from `templates_dir`: for a remote without `templates/` the two are
     /// the same directory.
     pub checkout_dir: PathBuf,
-    /// The remote branch head UDE fetched (`refs/remotes/origin/<branch>`). Every push,
-    /// direct or PR, must publish exactly one commit whose only parent is this commit
-    /// (branch continuity, D-18).
+    /// The remote branch head UDE fetched (`refs/remotes/origin/<branch>` in the cache
+    /// checkout). Every push, direct or PR, must publish exactly one commit whose only
+    /// parent is this commit (branch continuity, D-18).
+    ///
+    /// Through [`SyncEngine::ensure_remote_repo_for_push`] it is also equal to the head
+    /// `git ls-remote` reported for [`RemoteCache::remote_url`] from the filesystem root
+    /// before the fetch, so no ref or config in the checkout chose it. Through
+    /// [`SyncEngine::ensure_remote_repo`] (status and pull) it is the checkout's own ref,
+    /// which a hook or config in the checkout can move.
     pub fetched_sha: String,
+    /// The caller's remote URL, with a relative local path made absolute against the
+    /// process's working directory (see [`absolute_remote_url`]). Reads and pushes from
+    /// outside the checkout use it so they reach the repository the clone used; the cache
+    /// key keeps the caller's spelling.
+    pub remote_url: String,
     /// The cache lock; hold it for the whole sync action.
     pub lock: RemoteLockGuard,
 }
@@ -374,9 +385,13 @@ struct StagedPublication {
 /// Why [`SyncEngine::push_to_remote`] published nothing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PushRemoteError {
-    /// The push was refused as not a fast-forward and the remote branch is not confirmed at
-    /// the commit UDE fetched, so it most likely moved after the fetch. The cache commit was
-    /// rolled back; the user should pull first (D-18).
+    /// The remote branch moved while UDE was fetching or publishing; nothing was published
+    /// and the user should pull first (D-18). Either
+    /// [`SyncEngine::ensure_remote_repo_for_push`] found the fetched head different from
+    /// the head read before the fetch and a second read equal to it (the remote moved
+    /// during the fetch), or the push was refused as not a fast-forward and the remote
+    /// branch is not confirmed at the commit UDE fetched (the cache commit was rolled
+    /// back).
     UpstreamMoved {
         /// The remote branch that moved.
         branch: String,
@@ -1085,8 +1100,75 @@ impl SyncEngine {
             templates_dir,
             checkout_dir: target_checkout,
             fetched_sha,
+            remote_url: absolute_remote_url(remote_url),
             lock: lock_guard,
         })
+    }
+
+    /// [`SyncEngine::ensure_remote_repo`] for a push: the fetched head must be the commit
+    /// the remote branch holds, as `git ls-remote` reports it for the caller's URL from
+    /// outside the checkout before the fetch (operator decision 2026-11-02, cause 2).
+    ///
+    /// A hook or config in the cache checkout can move or redirect the tracking ref, which
+    /// would make an injected commit the base the push builds on. On a difference a second
+    /// read tells the two cases apart: equal to the fetched head means the remote really
+    /// moved during the fetch ([`PushRemoteError::UpstreamMoved`]); anything else is a
+    /// [`PushRemoteError::Failed`] that names no ref or id from the checkout.
+    pub fn ensure_remote_repo_for_push(
+        &self,
+        remote_url: &str,
+        branch: &str,
+        cache_dir: &Path,
+    ) -> Result<RemoteCache, PushRemoteError> {
+        let head_before = self
+            .remote_head(&absolute_remote_url(remote_url), branch)
+            .map_err(PushRemoteError::Failed)?;
+        // The caller's spelling, so the cache key (and the cache directory) is unchanged.
+        let cache = self
+            .ensure_remote_repo(remote_url, branch, cache_dir)
+            .map_err(PushRemoteError::Failed)?;
+        if head_before.as_deref() == Some(cache.fetched_sha.as_str()) {
+            return Ok(cache);
+        }
+        let head_again = self
+            .remote_head(&cache.remote_url, branch)
+            .map_err(PushRemoteError::Failed)?;
+        if head_again.as_deref() == Some(cache.fetched_sha.as_str()) {
+            return Err(PushRemoteError::UpstreamMoved {
+                branch: branch.to_string(),
+            });
+        }
+        Err(PushRemoteError::Failed(
+            "the cache checkout's fetched head is not the commit the remote branch holds; \
+             a hook or config in the cache checkout most likely moved or redirected it; \
+             nothing was published"
+                .to_string(),
+        ))
+    }
+
+    /// The commit `refs/heads/<branch>` is at on `remote_url`, read with `git ls-remote`
+    /// from the filesystem root so no repository's config or hooks take part; `None` when
+    /// no listed line has exactly that refname (ls-remote matches patterns by tail).
+    fn remote_head(&self, remote_url: &str, branch: &str) -> Result<Option<String>, String> {
+        let refname = format!("refs/heads/{branch}");
+        let mut ls_remote = self.git(Some(Path::new(std::path::MAIN_SEPARATOR_STR)));
+        ls_remote.args(["ls-remote", "--refs", "--", remote_url, &refname]);
+        let out = self.run_network(ls_remote, "git ls-remote")?;
+        if !out.status.success() {
+            return Err(with_excerpt(
+                format!(
+                    "git ls-remote failed with exit status {:?}",
+                    out.status.code()
+                ),
+                &out,
+            ));
+        }
+        Ok(String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .find_map(|line| {
+                let (id, name) = line.split_once('\t')?;
+                (name == refname).then(|| id.to_string())
+            }))
     }
 
     /// The commit `refs/remotes/origin/<branch>` points at in `checkout`.
@@ -2812,6 +2894,23 @@ fn git_path_bytes(path: &Path) -> Vec<u8> {
         .map(|component| component.as_os_str().as_encoded_bytes())
         .collect();
     components.join(&b'/')
+}
+
+/// `remote_url` unchanged, unless it is a relative path that exists, which is made
+/// absolute against the process's working directory. `git clone` stores a relative path
+/// absolute, but a read run from another directory (the filesystem root) would resolve it
+/// there; URLs, scp-style addresses and paths that do not exist stay as given, and so
+/// does a path whose absolute form is not UTF-8.
+fn absolute_remote_url(remote_url: &str) -> String {
+    let path = Path::new(remote_url);
+    if path.is_relative()
+        && path.exists()
+        && let Ok(absolute) = std::path::absolute(path)
+        && let Some(absolute) = absolute.to_str()
+    {
+        return absolute.to_string();
+    }
+    remote_url.to_string()
 }
 
 /// Appends the redacted stderr excerpt of a failed git/gh run to `message`.
