@@ -2666,6 +2666,102 @@ fn test_cli_direct_push_refuses_index_flag_and_keeps_state() {
     assert_cli_index_flag_refused(&[]);
 }
 
+#[test]
+#[cfg(unix)]
+fn test_cli_pr_push_refuses_index_flag_and_keeps_state() {
+    assert_cli_index_flag_refused(&["--pr"]);
+}
+
+/// Control for the index-flag rows: the same post-index-change hook with no flag lets
+/// the push publish (exit 0, the edit on the remote's main, the ancestor advanced).
+#[test]
+#[cfg(unix)]
+fn test_cli_direct_push_with_noop_index_hook_publishes() {
+    let world = cli_push_world();
+    let checkout = world.install_cache_hook("post-index-change", ":\n");
+    let ancestor_before = mise_ancestor(&world.project);
+
+    let push = world.push(&[]);
+    let text = outputs(&push);
+    assert!(
+        checkout.join(".git/ude-test-hook-ran").exists(),
+        "the cache hook never ran. {text}"
+    );
+    assert_eq!(push.status.code(), Some(0), "{text}");
+    assert_eq!(
+        format!("{}\n", remote_file(&world.git, &world.bare, MISE_TEMPLATE)),
+        world.local_mise(),
+        "{text}"
+    );
+    assert_ne!(mise_ancestor(&world.project), ancestor_before, "{text}");
+}
+
+/// The hook text the parent-line rows put in a `parent` header, as a printf format:
+/// `\033` is ESC.
+#[cfg(unix)]
+const CLI_HOOK_PARENT_TEXT: &str = r"HOOK_CHOSEN_TEXT_\033[31m";
+
+/// `ude sync push` with a post-commit hook that points HEAD at a commit whose only
+/// `parent` line, after `author`, holds [`CLI_HOOK_PARENT_TEXT`]: exit 2 with the
+/// continuity refusal, the hook's text and any ESC byte absent from stdout and stderr,
+/// no remote ref moved and the ancestor unchanged.
+#[cfg(unix)]
+fn assert_cli_refusal_prints_no_hook_bytes(extra_args: &[&str]) {
+    let world = cli_push_world();
+    let checkout = world.install_cache_hook(
+        "post-commit",
+        &format!(
+            r#"T=$(git rev-parse 'HEAD^{{tree}}')
+N=$(printf 'tree %s\nauthor a <a@b> 1 +0000\ncommitter a <a@b> 1 +0000\nparent {CLI_HOOK_PARENT_TEXT}\n\nchore(sync): synchronize environment refinements from local workstation\n' "$T" | git hash-object --literally -w -t commit --stdin)
+git update-ref HEAD "$N"
+"#
+        ),
+    );
+    let refs_before = world.remote_refs();
+    let ancestor_before = mise_ancestor(&world.project);
+
+    let push = world.push(extra_args);
+    let text = outputs(&push);
+    assert!(
+        checkout.join(".git/ude-test-hook-ran").exists(),
+        "the cache hook never ran. {text}"
+    );
+    assert_eq!(push.status.code(), Some(2), "{text:?}");
+    assert!(
+        text.contains("is not the fetched head"),
+        "refused for another reason. {text:?}"
+    );
+    for (name, stream) in [("stdout", &push.stdout), ("stderr", &push.stderr)] {
+        let stream_text = String::from_utf8_lossy(stream);
+        assert!(
+            !stream_text.contains("HOOK_CHOSEN_TEXT_"),
+            "{name} holds the hook's text: {stream_text:?}"
+        );
+        assert!(
+            !stream.contains(&0x1b),
+            "{name} holds an ESC byte: {stream_text:?}"
+        );
+    }
+    assert_eq!(
+        world.remote_refs(),
+        refs_before,
+        "a remote ref moved. {text}"
+    );
+    assert_eq!(mise_ancestor(&world.project), ancestor_before, "{text}");
+}
+
+#[test]
+#[cfg(unix)]
+fn test_cli_direct_push_refusal_prints_no_hook_bytes() {
+    assert_cli_refusal_prints_no_hook_bytes(&[]);
+}
+
+#[test]
+#[cfg(unix)]
+fn test_cli_pr_push_refusal_prints_no_hook_bytes() {
+    assert_cli_refusal_prints_no_hook_bytes(&["--pr"]);
+}
+
 /// A `remote.origin.uploadpack` wrapper in the cache checkout moves the bare's main
 /// during the push's fetch, so the remote really moved: exit 1 with the pull-first line,
 /// and nothing published. The head reads run from the filesystem root with the URL, so

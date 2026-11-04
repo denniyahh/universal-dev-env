@@ -14144,6 +14144,81 @@ git replace -f "$C" "$TG"
         );
     }
 
+    /// post-commit tail: points HEAD at a commit over UDE's tree whose only `parent` line,
+    /// holding `text` (a printf format), comes after `author`. Git reads no parent from
+    /// such a commit, and raw_commit_parents reads one, so the gate reaches its
+    /// one-parent arm with the hook's bytes.
+    #[cfg(unix)]
+    fn hook_parent_line(text: &str) -> String {
+        format!(
+            r#"T=$(git rev-parse 'HEAD^{{tree}}')
+N=$(printf 'tree %s\nauthor a <a@b> 1 +0000\ncommitter a <a@b> 1 +0000\nparent {text}\n\n{SYNC_COMMIT_MESSAGE}\n' "$T" | git hash-object --literally -w -t commit --stdin)
+git update-ref HEAD "$N"
+"#
+        )
+    }
+
+    /// A hook-built `parent` line is refused by the continuity check, which names the
+    /// fetched head and prints neither `absent` nor an ESC byte; nothing is published.
+    #[cfg(unix)]
+    fn assert_parent_line_refused(open_pr: bool, text: &str, absent: &str) {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let pushed = push_with_post_commit_hook(&git, &engine, open_pr, &hook_parent_line(text));
+        assert!(pushed.hook_ran, "the post-commit hook never ran");
+        assert_remote_unchanged(&git, &pushed);
+        let fetched_sha = pushed.fetched_sha.clone();
+        let err = push_failure(pushed.res);
+        assert!(err.contains("Branch continuity check failed"), "{err:?}");
+        assert!(
+            err.contains(&format!("is not the fetched head {fetched_sha}")),
+            "{err:?}"
+        );
+        assert!(
+            !err.contains(absent),
+            "the refusal printed the hook's text: {err:?}"
+        );
+        assert!(
+            !err.contains('\u{1b}'),
+            "the refusal printed an ESC byte: {err:?}"
+        );
+    }
+
+    /// The parent text of the escape-sequence rows, as a printf format: `\033` is ESC.
+    #[cfg(unix)]
+    const HOOK_PARENT_ESCAPE: &str = r"HOOK_CHOSEN_TEXT_\033[31m";
+
+    #[test]
+    #[cfg(unix)]
+    fn test_direct_push_refusal_omits_hook_text_in_parent_line() {
+        assert_parent_line_refused(false, HOOK_PARENT_ESCAPE, "HOOK_CHOSEN_TEXT_");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_pr_push_refusal_omits_hook_text_in_parent_line() {
+        assert_parent_line_refused(true, HOOK_PARENT_ESCAPE, "HOOK_CHOSEN_TEXT_");
+    }
+
+    /// A GitHub PAT shape as the parent text, built at runtime.
+    #[cfg(unix)]
+    fn hook_parent_token() -> String {
+        let prefix = "ghp_";
+        format!("{prefix}{HOOK_TOKEN_BODY}")
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_direct_push_refusal_omits_token_in_parent_line() {
+        assert_parent_line_refused(false, &hook_parent_token(), HOOK_TOKEN_BODY);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_pr_push_refusal_omits_token_in_parent_line() {
+        assert_parent_line_refused(true, &hook_parent_token(), HOOK_TOKEN_BODY);
+    }
+
     /// The opening of every refusal on the empty-status route.
     #[cfg(unix)]
     const EMPTY_STATUS_REFUSAL: &str = "git status reports nothing to push";
