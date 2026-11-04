@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 02
 current_phase_name: Sanitizer, Boundaries & Security Hardening
 status: executing
-stopped_at: Completed 02-23-PLAN.md
-last_updated: "2026-11-04T17:02:44.666Z"
+stopped_at: Completed 02-24-PLAN.md
+last_updated: "2026-11-04T17:35:24.689Z"
 last_activity: 2026-11-04
 last_activity_desc: Phase 02 execution started
-state_head: e39e8603d0631e03041cd1551c2699c9f5511da6
+state_head: fb5a976b9336ff9fcd4cc2ddf0f2fc6c51d35270
 progress:
   total_phases: 4
   completed_phases: 1
   total_plans: 37
-  completed_plans: 34
+  completed_plans: 35
   percent: 25
 milestone: null
 ---
@@ -28,8 +28,8 @@ See: `.planning/PROJECT.md` (updated 2026-10-22)
 
 ## Current Position
 
-Phase: 02 (Sanitizer, Boundaries & Security Hardening) — READY TO EXECUTE
-Plan: 23 of 23
+Phase: 02 (Sanitizer, Boundaries & Security Hardening) — EXECUTING
+Plan: 25 of 26
 Status: Ready to execute
 Last activity: 2026-11-04 — Phase 02 execution started
 
@@ -94,6 +94,7 @@ Progress: [███░░░░░░░] 25%
 | Phase 02 P21 | 2h 40m | 3 tasks | 2 files |
 | Phase 02 P22 | 19 min | 3 tasks | 2 files |
 | Phase 02 P23 | 31 min | 3 tasks | 3 files |
+| Phase 02 P24 | 26 min | 3 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -187,6 +188,8 @@ Recent decisions affecting current work:
 - [Phase 02]: 02-23: all 10 control rows on the final id-check code came out same (no corrected row, T-02-96 unused); scoped mutation run 49 listed, 35 caught, 0 missed, 14 unviable, no test added
 - [Phase 02]: 02-23: DEF-11 and DEF-12 in docs/ARCHITECTURE.md and 02-20-PLAN.md name the object-id channel (a blob or tree whose stored bytes do not match its id) with its tests; NOT-10 unchanged
 - [Phase 02]: Operator override 2026-11-04: TDD gate block on 02-22 (GREEN before RED; plan said do not commit RED) accepted, no history rewrite. Evidence: 11 uncommitted RED runs in target/gsd-red/02-22-* (RED_EVIDENCE_OK) and 02-23's 10 controls on the final code
+- [Phase 02]: 02-24: both publication routes build their tree listing in process from tree bytes hashed against their ids (verified_tree_listing), root included, from a commit read the same way; git ls-tree no longer runs on either route (closes WR-500)
+- [Phase 02]: 02-24: the per-task RED-commit gate tripped on Tasks 1 and 2 (Rust gap #4379); continued on the operator-approved substitute evidence (RED commits c9e74a0 and 0737048 with their markers, all RED records RED_EVIDENCE_OK); last_gate_trip not written because STATE.md has no such field
 
 ### Pending Todos
 
@@ -231,6 +234,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-04T15:10:22.044Z
-Stopped at: Completed 02-23-PLAN.md
+Last session: 2026-11-04T17:35:24.462Z
+Stopped at: Completed 02-24-PLAN.md
 Resume file: None
