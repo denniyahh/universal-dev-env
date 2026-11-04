@@ -13929,4 +13929,894 @@ git replace -f "$C" "$TG"
             "{tree}"
         );
     }
+
+    /// Shell lines that write `templates/leak.txt` into a child of
+    /// `refs/remotes/origin/main` and move that tracking ref to it, so the fetched head is a
+    /// commit the remote never held; with `reset` the worktree is also reset to it. The
+    /// blob's id goes to `.git/ude-test-injected-blob`. Runs in a cache checkout's root.
+    #[cfg(unix)]
+    fn moved_tracking_ref_tail(reset: bool) -> String {
+        let reset_line = if reset {
+            "git reset -q --hard \"$N\"\n"
+        } else {
+            ""
+        };
+        format!(
+            r#"IB=$(printf 'INJECTED_BY_HOOK\n' | git hash-object -w --stdin)
+printf '%s\n' "$IB" > .git/ude-test-injected-blob
+export GIT_INDEX_FILE=.git/ude-probe-idx
+git read-tree refs/remotes/origin/main
+git update-index --add --cacheinfo 100644,"$IB",templates/leak.txt
+T=$(git write-tree)
+unset GIT_INDEX_FILE
+N=$(git commit-tree "$T" -p refs/remotes/origin/main -m injected-base)
+git update-ref refs/remotes/origin/main "$N"
+{reset_line}"#
+        )
+    }
+
+    /// What a test inspects after [`push_after_hooked_ensure`].
+    #[cfg(unix)]
+    struct EnsuredPush {
+        /// The ensure's refusal, or the push's result.
+        res: Result<String, PushRemoteError>,
+        bare: tempfile::TempDir,
+        _cache: tempfile::TempDir,
+        /// The cache checkout, found on disk: a refusing ensure returns no cache.
+        checkout: PathBuf,
+        /// The remote's heads just before the ensure under test.
+        heads_before: Vec<(String, String)>,
+        /// The fetched head the ensure under test returned, if it returned a cache.
+        fetched_sha: Option<String>,
+    }
+
+    /// A channel's setup, run as `setup(bare, checkout)` after a first ensure.
+    #[cfg(unix)]
+    type ChannelSetup<'a> = &'a dyn Fn(&Path, &Path);
+
+    /// The single cache checkout under `cache` (named `remote-*`, not its `.lock`).
+    #[cfg(unix)]
+    fn only_cache_checkout(cache: &Path) -> PathBuf {
+        let checkouts: Vec<PathBuf> = fs::read_dir(cache)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                let name = path.file_name().unwrap().to_string_lossy();
+                name.starts_with("remote-") && !name.ends_with(".lock")
+            })
+            .collect();
+        assert_eq!(checkouts.len(), 1, "{checkouts:?}");
+        checkouts.into_iter().next().unwrap()
+    }
+
+    /// Seeds a bare remote; with `setup`, runs [`SyncEngine::ensure_remote_repo`] once and
+    /// then `setup(bare, checkout)`; without it the ensure under test clones. The ensure
+    /// under test is [`SyncEngine::ensure_remote_repo_for_push`] when `checked`, plain
+    /// [`SyncEngine::ensure_remote_repo`] otherwise (the delivering control). On Ok it
+    /// writes [`HOOKED_TEMPLATE`] over the managed template and pushes it.
+    #[cfg(unix)]
+    fn push_after_hooked_ensure(
+        git: &GitFixture,
+        engine: &SyncEngine,
+        open_pr: bool,
+        setup: Option<ChannelSetup<'_>>,
+        checked: bool,
+    ) -> EnsuredPush {
+        let bare = seeded_bare_remote(git);
+        let cache = tempdir().unwrap();
+        let url = bare.path().to_str().unwrap();
+        if let Some(setup) = setup {
+            let first = engine
+                .ensure_remote_repo(url, "main", cache.path())
+                .unwrap();
+            let checkout = first.checkout_dir.clone();
+            drop(first);
+            setup(bare.path(), &checkout);
+        }
+        let heads_before = remote_heads(git, bare.path());
+        let ensured = if checked {
+            engine.ensure_remote_repo_for_push(url, "main", cache.path())
+        } else {
+            engine
+                .ensure_remote_repo(url, "main", cache.path())
+                .map_err(PushRemoteError::Failed)
+        };
+        let checkout = only_cache_checkout(cache.path());
+        let (res, fetched_sha) = match ensured {
+            Err(e) => (Err(e), None),
+            Ok(cached) => {
+                let managed = cached.templates_dir.join("projects/generic/gitconfig.repo");
+                fs::write(&managed, HOOKED_TEMPLATE).unwrap();
+                let validated = ValidatedBlobs::from_files(std::slice::from_ref(&managed));
+                let res = engine.push_to_remote(
+                    &cached.checkout_dir,
+                    "main",
+                    open_pr,
+                    std::slice::from_ref(&managed),
+                    &validated,
+                    &cached.fetched_sha,
+                );
+                (res, Some(cached.fetched_sha.clone()))
+            }
+        };
+        EnsuredPush {
+            res,
+            bare,
+            _cache: cache,
+            checkout,
+            heads_before,
+            fetched_sha,
+        }
+    }
+
+    /// The text of the head check's refusal of a moved or redirected base.
+    #[cfg(unix)]
+    const MOVED_BASE_REFUSAL: &str = "fetched head is not the commit the remote branch holds";
+
+    /// The hook's marker exists in the cache checkout.
+    #[cfg(unix)]
+    fn assert_hook_ran(pushed: &EnsuredPush) {
+        assert!(
+            pushed.checkout.join(".git/ude-test-hook-ran").exists(),
+            "the hook never ran; result: {:?}",
+            pushed.res
+        );
+    }
+
+    /// The checked route refused with the head check's text: the hook ran, no remote head
+    /// moved, and the injected blob is not on the remote.
+    #[cfg(unix)]
+    fn assert_checked_refused(git: &GitFixture, pushed: &EnsuredPush) {
+        assert_hook_ran(pushed);
+        match &pushed.res {
+            Err(PushRemoteError::Failed(e)) => {
+                assert!(e.contains(MOVED_BASE_REFUSAL), "{e}");
+            }
+            other => panic!("expected the head check's refusal, got {other:?}"),
+        }
+        assert_eq!(
+            remote_heads(git, pushed.bare.path()),
+            pushed.heads_before,
+            "a remote head moved"
+        );
+        let blob = fs::read_to_string(pushed.checkout.join(".git/ude-test-injected-blob"))
+            .unwrap()
+            .trim()
+            .to_string();
+        assert!(
+            !holds_object(git, pushed.bare.path(), &blob),
+            "the remote holds the injected blob"
+        );
+    }
+
+    /// The delivering control: without the head check the same state publishes, the
+    /// fetched head is not the remote's head before the push, and `destination` (the
+    /// repository the push reached) holds the injected blob.
+    #[cfg(unix)]
+    fn assert_control_delivers(git: &GitFixture, pushed: &EnsuredPush, destination: &Path) {
+        assert_hook_ran(pushed);
+        assert!(pushed.res.is_ok(), "{:?}", pushed.res);
+        let main_before = pushed
+            .heads_before
+            .iter()
+            .find(|(name, _)| name == "refs/heads/main")
+            .map(|(_, id)| id.clone());
+        assert_ne!(
+            pushed.fetched_sha, main_before,
+            "the fetched head was the remote's head, so the hook moved nothing"
+        );
+        let blob = fs::read_to_string(pushed.checkout.join(".git/ude-test-injected-blob"))
+            .unwrap()
+            .trim()
+            .to_string();
+        assert!(
+            holds_object(git, destination, &blob),
+            "the control did not deliver the injected blob"
+        );
+    }
+
+    /// Installs the executable hook `name` in `checkout` behind `guard` and the one-shot
+    /// marker `.git/ude-test-hook-ran`, then `tail`.
+    #[cfg(unix)]
+    fn install_checkout_hook(checkout: &Path, name: &str, guard: &str, tail: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        let hook = checkout.join(".git/hooks").join(name);
+        fs::create_dir_all(hook.parent().unwrap()).unwrap();
+        fs::write(
+            &hook,
+            format!(
+                "#!/bin/sh\n{guard}\n[ -e .git/ude-test-hook-ran ] && exit 0\n: > .git/ude-test-hook-ran\n{tail}"
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// Runs `script` with `sh` in `dir`, with the fixture's git environment.
+    #[cfg(unix)]
+    fn sh_in(git: &GitFixture, dir: &Path, script: &str) {
+        let mut cmd = Command::new("sh");
+        cmd.current_dir(dir).arg("-c").arg(script);
+        for name in process::GIT_LOCAL_ENV_VARS {
+            cmd.env_remove(name);
+        }
+        let out = cmd
+            .envs(git.gitconfig_env())
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "sh step failed ({}): {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// Runs the channel `setup` through the checked route (refused) and through plain
+    /// ensure (the control, delivering to the remote).
+    #[cfg(unix)]
+    fn assert_channel_refused_with_control(open_pr: bool, setup: &dyn Fn(&Path, &Path)) {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let checked = push_after_hooked_ensure(&git, &engine, open_pr, Some(setup), true);
+        assert_checked_refused(&git, &checked);
+        let control = push_after_hooked_ensure(&git, &engine, open_pr, Some(setup), false);
+        assert_control_delivers(&git, &control, control.bare.path());
+    }
+
+    /// Setup: a post-checkout hook in the checkout runs `tail`.
+    #[cfg(unix)]
+    fn post_checkout_setup(tail: String) -> impl Fn(&Path, &Path) {
+        move |_bare: &Path, checkout: &Path| {
+            install_checkout_hook(checkout, "post-checkout", "", &tail);
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_direct_push_refuses_tracking_ref_moved_by_post_checkout_hook() {
+        assert_channel_refused_with_control(
+            false,
+            &post_checkout_setup(moved_tracking_ref_tail(false)),
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_pr_push_refuses_tracking_ref_moved_by_post_checkout_hook() {
+        assert_channel_refused_with_control(
+            true,
+            &post_checkout_setup(moved_tracking_ref_tail(false)),
+        );
+    }
+
+    /// The moved base's blob is a GitHub PAT shape: refused by the head check, delivered
+    /// by plain ensure, because the gate lists changes from the fetched head and never sees
+    /// a file of the base.
+    #[cfg(unix)]
+    fn assert_token_on_moved_tracking_ref_refused(open_pr: bool) {
+        let tail = with_injected_token(&moved_tracking_ref_tail(false));
+        assert!(tail.contains(HOOK_TOKEN_BODY), "{tail}");
+        assert_channel_refused_with_control(open_pr, &post_checkout_setup(tail));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_direct_push_refuses_token_on_moved_tracking_ref() {
+        assert_token_on_moved_tracking_ref_refused(false);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_pr_push_refuses_token_on_moved_tracking_ref() {
+        assert_token_on_moved_tracking_ref_refused(true);
+    }
+
+    /// The clone path: a global `core.hooksPath` post-checkout hook runs in the clone,
+    /// moves the tracking ref and resets the worktree to it. There is no earlier ensure.
+    #[cfg(unix)]
+    fn assert_tracking_ref_moved_on_clone_path_refused(open_pr: bool) {
+        use std::os::unix::fs::PermissionsExt;
+        let git = GitFixture::new();
+        let hooks = tempdir().unwrap();
+        let hook = hooks.path().join("post-checkout");
+        fs::write(
+            &hook,
+            format!(
+                "#!/bin/sh\n[ -e .git/ude-test-hook-ran ] && exit 0\n: > .git/ude-test-hook-ran\n{}",
+                moved_tracking_ref_tail(true)
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+        let global = hooks.path().join("gitconfig");
+        fs::write(
+            &global,
+            format!(
+                "{FIXTURE_GITCONFIG}[core]\n\thooksPath = {}\n",
+                hooks.path().display()
+            ),
+        )
+        .unwrap();
+        let engine = SyncEngine::new().with_extra_env(vec![
+            ("GIT_CONFIG_GLOBAL".into(), global.into()),
+            ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+            (
+                "GIT_CEILING_DIRECTORIES".into(),
+                std::env::temp_dir().into(),
+            ),
+        ]);
+        let checked = push_after_hooked_ensure(&git, &engine, open_pr, None, true);
+        assert_checked_refused(&git, &checked);
+        let control = push_after_hooked_ensure(&git, &engine, open_pr, None, false);
+        assert_control_delivers(&git, &control, control.bare.path());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_direct_push_refuses_tracking_ref_moved_on_clone_path() {
+        assert_tracking_ref_moved_on_clone_path_refused(false);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_pr_push_refuses_tracking_ref_moved_on_clone_path() {
+        assert_tracking_ref_moved_on_clone_path_refused(true);
+    }
+
+    /// Setup: a reference-transaction hook moves the tracking ref once a transaction of
+    /// the next ensure is committed. The marker matters: `git update-ref` re-enters it.
+    #[cfg(unix)]
+    fn reference_transaction_setup(_bare: &Path, checkout: &Path) {
+        install_checkout_hook(
+            checkout,
+            "reference-transaction",
+            "[ \"$1\" = committed ] || exit 0",
+            &moved_tracking_ref_tail(false),
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_direct_push_refuses_tracking_ref_moved_by_reference_transaction_hook() {
+        assert_channel_refused_with_control(false, &reference_transaction_setup);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_pr_push_refuses_tracking_ref_moved_by_reference_transaction_hook() {
+        assert_channel_refused_with_control(true, &reference_transaction_setup);
+    }
+
+    /// Setup, as an earlier hook would leave it: the tracking ref already moved, and
+    /// `remote.origin.fetch` maps nothing onto it, so the next fetch leaves it in place.
+    /// No hook runs during the ensure under test; the setup writes the marker itself.
+    #[cfg(unix)]
+    fn fetch_config_setup(git: &GitFixture) -> impl Fn(&Path, &Path) + '_ {
+        move |_bare: &Path, checkout: &Path| {
+            sh_in(
+                git,
+                checkout,
+                &format!(
+                    ": > .git/ude-test-hook-ran\n{}",
+                    moved_tracking_ref_tail(false)
+                ),
+            );
+            git.run(
+                checkout,
+                &[
+                    "config",
+                    "remote.origin.fetch",
+                    "+refs/heads/does-not-exist:refs/remotes/origin/nothing",
+                ],
+            );
+        }
+    }
+
+    /// The fetch config channel, both routes; each run checks the config was still in
+    /// place after the ensure.
+    #[cfg(unix)]
+    fn assert_fetch_config_refused(open_pr: bool) {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let setup = fetch_config_setup(&git);
+        let kept = |pushed: &EnsuredPush| {
+            assert_eq!(
+                git.output(&pushed.checkout, &["config", "remote.origin.fetch"]),
+                "+refs/heads/does-not-exist:refs/remotes/origin/nothing"
+            );
+        };
+        let checked = push_after_hooked_ensure(&git, &engine, open_pr, Some(&setup), true);
+        kept(&checked);
+        assert_checked_refused(&git, &checked);
+        let control = push_after_hooked_ensure(&git, &engine, open_pr, Some(&setup), false);
+        kept(&control);
+        assert_control_delivers(&git, &control, control.bare.path());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_direct_push_refuses_tracking_ref_kept_by_hook_written_fetch_config() {
+        assert_fetch_config_refused(false);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_pr_push_refuses_tracking_ref_kept_by_hook_written_fetch_config() {
+        assert_fetch_config_refused(true);
+    }
+
+    /// A bare clone of `bare` at `<checkout>/.git/ude-test-other.git` whose main is a child
+    /// of the remote's main holding `templates/leak.txt`; the blob's id goes to
+    /// `<checkout>/.git/ude-test-injected-blob`.
+    #[cfg(unix)]
+    fn other_remote_with_injected_base(git: &GitFixture, bare: &Path, checkout: &Path) -> PathBuf {
+        let other = checkout.join(".git/ude-test-other.git");
+        git.run(
+            checkout,
+            &[
+                "clone",
+                "-q",
+                "--bare",
+                bare.to_str().unwrap(),
+                other.to_str().unwrap(),
+            ],
+        );
+        sh_in(
+            git,
+            &other,
+            r#"IB=$(printf 'INJECTED_BY_HOOK\n' | git hash-object -w --stdin)
+export GIT_INDEX_FILE=ude-probe-idx
+git read-tree main
+git update-index --add --cacheinfo 100644,"$IB",templates/leak.txt
+T=$(git write-tree)
+unset GIT_INDEX_FILE
+N=$(git commit-tree "$T" -p main -m injected-base)
+git update-ref refs/heads/main "$N"
+"#,
+        );
+        let blob = git.output(&other, &["rev-parse", "main:templates/leak.txt"]);
+        fs::write(
+            checkout.join(".git/ude-test-injected-blob"),
+            format!("{blob}\n"),
+        )
+        .unwrap();
+        let base = git.output(&other, &["rev-parse", "main"]);
+        fs::write(checkout.join(".git/ude-test-injected-base"), base).unwrap();
+        other
+    }
+
+    /// A redirect channel: `config(checkout, other)` points the checkout's fetch (and,
+    /// today, its push) at another repository holding an injected base. The checked route
+    /// refuses; the control fetches the injected base and publishes a commit on top of it.
+    /// That push reaches the other repository, not the caller's (the push destination is
+    /// plan 02-18's), and the other repository held the blob already, so here the
+    /// control's evidence is the fetched head and the published commit's parent.
+    #[cfg(unix)]
+    fn assert_redirect_refused(open_pr: bool, config: &dyn Fn(&GitFixture, &Path, &Path)) {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let setup = |bare: &Path, checkout: &Path| {
+            let other = other_remote_with_injected_base(&git, bare, checkout);
+            fs::write(checkout.join(".git/ude-test-hook-ran"), "").unwrap();
+            config(&git, checkout, &other);
+        };
+        let checked = push_after_hooked_ensure(&git, &engine, open_pr, Some(&setup), true);
+        assert_checked_refused(&git, &checked);
+        let control = push_after_hooked_ensure(&git, &engine, open_pr, Some(&setup), false);
+        let other = control.checkout.join(".git/ude-test-other.git");
+        let base =
+            fs::read_to_string(control.checkout.join(".git/ude-test-injected-base")).unwrap();
+        assert_eq!(
+            control.fetched_sha.as_deref(),
+            Some(base.as_str()),
+            "the control did not fetch the other repository's injected base"
+        );
+        assert_control_delivers(&git, &control, &other);
+        let published = remote_heads(&git, &other)
+            .into_iter()
+            .find(|(name, _)| open_pr != (name == "refs/heads/main"))
+            .map(|(_, id)| id)
+            .unwrap();
+        assert_eq!(
+            git.output(&other, &["rev-parse", &format!("{published}~1")]),
+            control.fetched_sha.clone().unwrap(),
+            "the control's commit does not build on the injected base"
+        );
+    }
+
+    /// Writes `remote.origin.url` in the checkout, as a hook could.
+    #[cfg(unix)]
+    fn origin_url_config(git: &GitFixture, checkout: &Path, other: &Path) {
+        git.run(
+            checkout,
+            &["config", "remote.origin.url", other.to_str().unwrap()],
+        );
+    }
+
+    /// Writes `url.<other>.insteadOf <remote>` in the checkout, as a hook could.
+    #[cfg(unix)]
+    fn instead_of_config(git: &GitFixture, checkout: &Path, other: &Path) {
+        let origin = git.output(checkout, &["config", "remote.origin.url"]);
+        git.run(
+            checkout,
+            &[
+                "config",
+                &format!("url.{}.insteadOf", other.display()),
+                &origin,
+            ],
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_direct_push_refuses_fetch_redirected_by_hook_written_origin_url() {
+        assert_redirect_refused(false, &origin_url_config);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_pr_push_refuses_fetch_redirected_by_hook_written_origin_url() {
+        assert_redirect_refused(true, &origin_url_config);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_direct_push_refuses_fetch_redirected_by_hook_written_instead_of() {
+        assert_redirect_refused(false, &instead_of_config);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_pr_push_refuses_fetch_redirected_by_hook_written_instead_of() {
+        assert_redirect_refused(true, &instead_of_config);
+    }
+
+    /// Setup: the managed template runs through a filter whose `kind` (`clean` or
+    /// `smudge`) side passes the bytes through and, once, moves the tracking ref. With
+    /// `clean` the file is made stat-dirty (mtime set back), so `git checkout -B` re-hashes
+    /// it; with `smudge` its content is changed, so `git reset --hard` rewrites it.
+    #[cfg(unix)]
+    fn filter_setup<'a>(git: &'a GitFixture, kind: &'static str) -> impl Fn(&Path, &Path) + 'a {
+        move |_bare: &Path, checkout: &Path| {
+            use std::os::unix::fs::PermissionsExt;
+            let script = checkout.join(".git/ude-test-filter.sh");
+            fs::write(
+                &script,
+                format!(
+                    "#!/bin/sh\nif [ ! -e .git/ude-test-hook-ran ]; then\n: > .git/ude-test-hook-ran\n{{\n{}}} >&2\nfi\ncat\n",
+                    moved_tracking_ref_tail(false)
+                ),
+            )
+            .unwrap();
+            fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+            git.run(
+                checkout,
+                &[
+                    "config",
+                    &format!("filter.udetest.{kind}"),
+                    script.to_str().unwrap(),
+                ],
+            );
+            fs::write(
+                checkout.join(".git/info/attributes"),
+                "templates/projects/generic/gitconfig.repo filter=udetest\n",
+            )
+            .unwrap();
+            let managed = checkout.join("templates/projects/generic/gitconfig.repo");
+            if kind == "smudge" {
+                fs::write(&managed, "[core]\n  autocrlf = dirty\n").unwrap();
+            } else {
+                let old = std::time::SystemTime::now() - Duration::from_secs(3600);
+                fs::File::options()
+                    .write(true)
+                    .open(&managed)
+                    .unwrap()
+                    .set_modified(old)
+                    .unwrap();
+            }
+        }
+    }
+
+    /// The clean filter channel, both routes.
+    #[cfg(unix)]
+    fn assert_clean_filter_refused(open_pr: bool) {
+        let git = GitFixture::new();
+        let setup = filter_setup(&git, "clean");
+        assert_channel_refused_with_control(open_pr, &setup);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_direct_push_refuses_tracking_ref_moved_by_clean_filter() {
+        assert_clean_filter_refused(false);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_pr_push_refuses_tracking_ref_moved_by_clean_filter() {
+        assert_clean_filter_refused(true);
+    }
+
+    /// A smudge filter moves the ref during `git reset --hard`, after the reset chose its
+    /// commit, so HEAD stays at the remote's head while the tracking ref moves. The checked
+    /// route refuses at the head check; plain ensure is refused too, by the gate's
+    /// continuity check (the commit's parent is not the fetched head). There is therefore
+    /// no delivering control for this channel; the unchecked run pins that it publishes
+    /// nothing either.
+    #[cfg(unix)]
+    fn assert_smudge_filter_refused(open_pr: bool) {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let setup = filter_setup(&git, "smudge");
+        let checked = push_after_hooked_ensure(&git, &engine, open_pr, Some(&setup), true);
+        assert_checked_refused(&git, &checked);
+        let unchecked = push_after_hooked_ensure(&git, &engine, open_pr, Some(&setup), false);
+        assert_hook_ran(&unchecked);
+        assert!(
+            matches!(unchecked.res, Err(PushRemoteError::Failed(_))),
+            "{:?}",
+            unchecked.res
+        );
+        assert_eq!(
+            remote_heads(&git, unchecked.bare.path()),
+            unchecked.heads_before
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_direct_push_refuses_tracking_ref_moved_by_smudge_filter() {
+        assert_smudge_filter_refused(false);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_pr_push_refuses_tracking_ref_moved_by_smudge_filter() {
+        assert_smudge_filter_refused(true);
+    }
+
+    /// A tag named `origin/main` makes `git checkout -B main origin/main` fail, so the
+    /// ensure refuses before any read of the base matters; nothing moves on the remote.
+    #[test]
+    #[cfg(unix)]
+    fn test_push_refuses_tag_named_after_the_tracking_ref() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let setup = |_bare: &Path, checkout: &Path| {
+            sh_in(&git, checkout, &moved_tracking_ref_tail(false));
+            let injected = git.output(checkout, &["rev-parse", "refs/remotes/origin/main"]);
+            git.run(
+                checkout,
+                &["update-ref", "refs/remotes/origin/main", "main"],
+            );
+            git.run(
+                checkout,
+                &["update-ref", "refs/tags/origin/main", &injected],
+            );
+        };
+        let pushed = push_after_hooked_ensure(&git, &engine, false, Some(&setup), true);
+        assert!(
+            git.output(
+                &pushed.checkout,
+                &["rev-parse", "--verify", "refs/tags/origin/main"]
+            )
+            .len()
+                >= 40,
+            "the tag is missing"
+        );
+        let err = push_failure(pushed.res);
+        assert!(err.contains("git checkout -B main failed"), "{err}");
+        assert_eq!(remote_heads(&git, pushed.bare.path()), pushed.heads_before);
+    }
+
+    /// A `remote.origin.uploadpack` wrapper moves the bare's main to a commit built in the
+    /// bare, then serves the fetch, so the remote really moved during the fetch: the first
+    /// read saw the old head and the second read sees the fetched one.
+    #[test]
+    #[cfg(unix)]
+    fn test_ensure_for_push_reports_real_upstream_move_as_upstream_moved() {
+        use std::os::unix::fs::PermissionsExt;
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let setup = |bare: &Path, checkout: &Path| {
+            let tree = git.output(bare, &["rev-parse", "main^{tree}"]);
+            let moved = git.output(
+                bare,
+                &[
+                    "commit-tree",
+                    &tree,
+                    "-p",
+                    "main",
+                    "-m",
+                    "concurrent publish",
+                ],
+            );
+            let marker = checkout.join(".git/ude-test-hook-ran");
+            let wrapper = checkout.join(".git/ude-test-upload-pack.sh");
+            fs::write(
+                &wrapper,
+                format!(
+                    "#!/bin/sh\nif [ ! -e '{marker}' ]; then\n: > '{marker}'\ngit --git-dir='{bare}' update-ref refs/heads/main {moved}\nfi\nexec git upload-pack \"$@\"\n",
+                    marker = marker.display(),
+                    bare = bare.display(),
+                ),
+            )
+            .unwrap();
+            fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+            git.run(
+                checkout,
+                &[
+                    "config",
+                    "remote.origin.uploadpack",
+                    wrapper.to_str().unwrap(),
+                ],
+            );
+            fs::write(checkout.join(".git/ude-test-moved-to"), &moved).unwrap();
+        };
+        let pushed = push_after_hooked_ensure(&git, &engine, false, Some(&setup), true);
+        assert_hook_ran(&pushed);
+        assert_eq!(
+            pushed.res,
+            Err(PushRemoteError::UpstreamMoved {
+                branch: "main".to_string()
+            })
+        );
+        let moved = fs::read_to_string(pushed.checkout.join(".git/ude-test-moved-to")).unwrap();
+        assert_eq!(
+            remote_heads(&git, pushed.bare.path()),
+            vec![("refs/heads/main".to_string(), moved)],
+            "the remote's main must be the wrapper's commit, with nothing on top"
+        );
+    }
+
+    /// A post-checkout hook that moves no ref: the checked route publishes, with the
+    /// fetched head equal to the remote's head before the push.
+    #[cfg(unix)]
+    fn assert_benign_post_checkout_hook_publishes(open_pr: bool) {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let setup = post_checkout_setup("echo benign >/dev/null\n".to_string());
+        let pushed = push_after_hooked_ensure(&git, &engine, open_pr, Some(&setup), true);
+        assert_hook_ran(&pushed);
+        assert!(pushed.res.is_ok(), "{:?}", pushed.res);
+        let main_before = pushed
+            .heads_before
+            .iter()
+            .find(|(name, _)| name == "refs/heads/main")
+            .map(|(_, id)| id.clone());
+        assert_eq!(pushed.fetched_sha, main_before);
+        assert_ne!(
+            remote_heads(&git, pushed.bare.path()),
+            pushed.heads_before,
+            "nothing was published"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_direct_push_with_head_check_publishes_with_benign_post_checkout_hook() {
+        assert_benign_post_checkout_hook_publishes(false);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_pr_push_with_head_check_publishes_with_benign_post_checkout_hook() {
+        assert_benign_post_checkout_hook_publishes(true);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_remote_head() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let bare = seeded_bare_remote(&git);
+        let url = bare.path().to_str().unwrap();
+        let main = git.output(bare.path(), &["rev-parse", "refs/heads/main"]);
+        let tree = git.output(bare.path(), &["rev-parse", "main^{tree}"]);
+        let other = git.output(
+            bare.path(),
+            &["commit-tree", &tree, "-p", "main", "-m", "x"],
+        );
+        git.run(
+            bare.path(),
+            &["update-ref", "refs/heads/a/refs/heads/main", &other],
+        );
+        // The row below is only worth something if ls-remote lists the decoy first.
+        let raw = git.output(
+            Path::new("/"),
+            &["ls-remote", "--refs", "--", url, "refs/heads/main"],
+        );
+        assert_eq!(
+            raw.lines().next(),
+            Some(format!("{other}\trefs/heads/a/refs/heads/main").as_str()),
+            "{raw}"
+        );
+
+        let head = engine.remote_head(url, "main");
+        let missing_branch = engine.remote_head(url, "does-not-exist");
+        let unreachable = engine.remote_head(&format!("{url}-missing"), "main");
+        let rows = [
+            (
+                "main's head, past a branch whose name ends in refs/heads/main",
+                head.as_ref() == Ok(&Some(main.clone())),
+                format!("{head:?}"),
+            ),
+            (
+                "a branch that does not exist",
+                missing_branch == Ok(None),
+                format!("{missing_branch:?}"),
+            ),
+            (
+                "an unreachable URL",
+                unreachable.is_err(),
+                format!("{unreachable:?}"),
+            ),
+            (
+                "the id is whole, not a prefix of it",
+                head.as_ref().is_ok_and(|id| {
+                    id.as_deref() != Some(&main[..12])
+                        && id.as_ref().is_some_and(|id| id.len() == main.len())
+                }),
+                format!("{head:?}"),
+            ),
+        ];
+        let failures: Vec<String> = rows
+            .iter()
+            .filter(|(_, ok, _)| !ok)
+            .map(|(name, _, got)| format!("{name}: got {got}"))
+            .collect();
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+
+    /// `url.<other>.insteadOf` in a checkout's config redirects `ls-remote` run in that
+    /// checkout (the negative control), not remote_head, which runs from the root.
+    #[test]
+    #[cfg(unix)]
+    fn test_remote_head_ignores_repository_config() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let bare = seeded_bare_remote(&git);
+        let url = bare.path().to_str().unwrap();
+        let real = git.output(bare.path(), &["rev-parse", "refs/heads/main"]);
+        let checkout = tempdir().unwrap();
+        git.run(checkout.path(), &["clone", "-q", url, "."]);
+        let other = other_remote_with_injected_base(&git, bare.path(), checkout.path());
+        let injected = git.output(&other, &["rev-parse", "main"]);
+        assert_ne!(injected, real);
+        instead_of_config(&git, checkout.path(), &other);
+
+        let in_checkout = git.output(
+            checkout.path(),
+            &["ls-remote", "--refs", "--", url, "refs/heads/main"],
+        );
+        assert_eq!(in_checkout, format!("{injected}\trefs/heads/main"));
+        assert_eq!(engine.remote_head(url, "main"), Ok(Some(real)));
+    }
+
+    #[test]
+    fn test_absolute_remote_url() {
+        let cwd = std::env::current_dir().unwrap();
+        assert!(
+            Path::new("src").exists(),
+            "the test runs from the crate root"
+        );
+        let mut failures = Vec::new();
+        let rows = [
+            ("src", cwd.join("src").to_str().unwrap().to_string()),
+            (cwd.to_str().unwrap(), cwd.to_str().unwrap().to_string()),
+            ("https://host/x.git", "https://host/x.git".to_string()),
+            ("git@host:x/y.git", "git@host:x/y.git".to_string()),
+            ("no-such-dir/x.git", "no-such-dir/x.git".to_string()),
+        ];
+        for (input, want) in rows {
+            let got = absolute_remote_url(input);
+            if got != want {
+                failures.push(format!("{input}: got {got}, want {want}"));
+            }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
 }
