@@ -2161,6 +2161,85 @@ fn test_cli_direct_push_publishes_benign_edit_with_no_hook() {
     );
 }
 
+/// Hook body for the cache checkout: writes `templates/leak.txt` into a child of
+/// `refs/remotes/origin/main` and moves that tracking ref to it, so the checkout's fetched
+/// head is a commit the remote never held. With `reset` the checkout is also reset to it
+/// (the clone path, where nothing after the hook resets the worktree). Leaves the leak
+/// blob's id in `.git/ude-test-injected-blob`.
+#[cfg(unix)]
+fn moved_tracking_ref_hook(reset: bool) -> String {
+    let reset_line = if reset {
+        "git reset -q --hard \"$N\"\n"
+    } else {
+        ""
+    };
+    format!(
+        r#"IB=$(printf 'INJECTED_BY_HOOK\n' | git hash-object -w --stdin)
+printf '%s\n' "$IB" > .git/ude-test-injected-blob
+export GIT_INDEX_FILE=.git/ude-probe-idx
+git read-tree refs/remotes/origin/main
+git update-index --add --cacheinfo 100644,"$IB",templates/leak.txt
+T=$(git write-tree)
+unset GIT_INDEX_FILE
+N=$(git commit-tree "$T" -p refs/remotes/origin/main -m injected-base)
+git update-ref refs/remotes/origin/main "$N"
+{reset_line}"#
+    )
+}
+
+/// A push refused because the cache checkout's fetched head is not the remote's head:
+/// exit 2, the hook ran, neither templates/leak.txt nor its blob reached the remote, no
+/// remote ref moved, and the project's ancestor is unchanged.
+#[cfg(unix)]
+fn assert_cli_push_refused_moved_base(
+    world: &CliPushWorld,
+    checkout: &Path,
+    push: &Output,
+    refs_before: &str,
+    ancestor_before: &str,
+) {
+    let text = outputs(push);
+    assert!(
+        checkout.join(".git/ude-test-hook-ran").exists(),
+        "the cache hook never ran. {text}"
+    );
+    assert_eq!(push.status.code(), Some(2), "{text}");
+    let blob = cache_recorded_id(checkout, "ude-test-injected-blob");
+    assert!(
+        !world.remote_holds(&blob),
+        "the remote holds the injected blob. {text}"
+    );
+    let tree = world
+        .git
+        .output(&world.bare, &["ls-tree", "-r", "--name-only", "main"]);
+    assert!(
+        !tree.lines().any(|path| path == "templates/leak.txt"),
+        "templates/leak.txt reached the remote. {text}"
+    );
+    assert_eq!(
+        world.remote_refs(),
+        refs_before,
+        "a remote ref moved. {text}"
+    );
+    assert_eq!(
+        mise_ancestor(&world.project),
+        ancestor_before,
+        "a refused push must not advance ancestor state. {text}"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn test_cli_direct_push_refuses_tracking_ref_moved_by_post_checkout_hook() {
+    let world = cli_push_world();
+    let checkout = world.install_cache_hook("post-checkout", &moved_tracking_ref_hook(false));
+    let refs_before = world.remote_refs();
+    let ancestor_before = mise_ancestor(&world.project);
+
+    let push = world.push(&[]);
+    assert_cli_push_refused_moved_base(&world, &checkout, &push, &refs_before, &ancestor_before);
+}
+
 #[test]
 fn test_ude_command_drops_host_typesafe_key() {
     let cmd = ude_command(env!("CARGO_BIN_EXE_ude"));
