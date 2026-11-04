@@ -71,7 +71,7 @@ Plans:
   3. Path parameterization matches only full word and punctuation boundaries (`\b`, path delimiters), preventing corruption of partial substring tokens.
   4. Sanitizer round-tripping verifies that templated tokens substitute back cleanly to local machine environments on initialization.
 
-**Plans**: 15/15 plans executed
+**Plans**: 15/21 plans executed
 
 Plans:
 **Wave 1**
@@ -112,6 +112,24 @@ Plans:
 
 **Wave 12** *(gap closure; blocked on Wave 11 completion)*
 - [x] 02-15: Per-check, per-read and per-option controls, scoped mutation run and phase final gates, including a hermeticity gate that inspects its decoy, on the gate's final state; no production code (SEC-04, SEC-02).
+
+**Wave 13** *(gap closure, operator decision 2026-11-02; blocked on Wave 12 completion)*
+- [ ] 02-16: Both pushes name their source `<id>^{commit}` under `--no-replace-objects`, so no local ref or replace ref can stand in for the validated commit, in direct and PR mode, with hook tests for each ref namespace, a token and each rebuilt commit, and CLI rows (review CR-300; re-verification gaps 1, 2, 3, 4) (SEC-04, SEC-02).
+
+**Wave 14** *(gap closure; blocked on Wave 13 completion)*
+- [ ] 02-17: `ude sync push` takes the base from the remote: `git ls-remote` with the caller's URL from the filesystem root before the fetch, refused when the fetched head differs, `pull first` wording when the remote simply moved; every route on the operator's list has a test and a delivering control; global `url.*.insteadOf` stays an accepted residual (review CR-301; gaps 1, 2, 4) (SEC-04, SEC-02).
+
+**Wave 15** *(gap closure; blocked on Wave 14 completion)*
+- [ ] 02-18: Both pushes go to the caller's URL through `PublishTarget`, and Ok requires `git ls-remote` from outside the checkout to report the ref at the commit, so a hook-written pushurl or `url.*.pushInsteadOf` cannot produce Ok (review WR-301; gap 5) (SEC-04, SEC-02).
+
+**Wave 16** *(gap closure; blocked on Wave 15 completion)*
+- [ ] 02-19: Empty `git status` with a validated record requires the fetched head to hold that record and deleted paths to be gone, and the continuity refusal prints no hook-chosen bytes (review WR-300, WR-302; gaps 5, 6) (SEC-04, SEC-02).
+
+**Wave 17** *(gap closure; blocked on Wave 16 completion)*
+- [ ] 02-20: The closed list of what the gate promises: DEF rows with the tests that pin each, NOT rows with their reason or status, in docs/ARCHITECTURE.md, with a rule that classifies any later finding; reconciles the absolute wording of 02-13 and 02-08 without weakening a fix (SEC-04, SEC-02).
+
+**Wave 18** *(gap closure; blocked on Wave 17 completion)*
+- [ ] 02-21: Controls, mutation run, hermeticity and phase final gates on the gate's final state, as 02-15 did them; hand edits carried forward; SEC-01 and SEC-03 carried, regression-only; no production code (SEC-04, SEC-02).
 
 ### Phase 3: Doctor & CLI Hardening
 
@@ -159,7 +177,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Sync Engine & State Hermeticity | 11/11 | Complete    | 2026-10-22 |
-| 2. Sanitizer, Boundaries & Security Hardening | 15/15 | In Progress | - |
+| 2. Sanitizer, Boundaries & Security Hardening | 15/21 | In Progress | - |
 | 3. Doctor & CLI Hardening | 0/4 | Not started | - |
 | 4. Templates, Archetypes & Manifest Decoupling | 0/3 | Not started | - |
 
