@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 02
 current_phase_name: Sanitizer, Boundaries & Security Hardening
 status: executing
-stopped_at: Completed 02-24-PLAN.md
-last_updated: "2026-11-04T17:35:24.689Z"
+stopped_at: Completed 02-25-PLAN.md
+last_updated: "2026-11-04T18:01:22.030Z"
 last_activity: 2026-11-04
 last_activity_desc: Phase 02 execution started
-state_head: fb5a976b9336ff9fcd4cc2ddf0f2fc6c51d35270
+state_head: 79ff523a5a3314522f09eeb349ea20439830361f
 progress:
   total_phases: 4
   completed_phases: 1
   total_plans: 37
-  completed_plans: 35
+  completed_plans: 36
   percent: 25
 milestone: null
 ---
@@ -29,7 +29,7 @@ See: `.planning/PROJECT.md` (updated 2026-10-22)
 ## Current Position
 
 Phase: 02 (Sanitizer, Boundaries & Security Hardening) — EXECUTING
-Plan: 25 of 26
+Plan: 26 of 26
 Status: Ready to execute
 Last activity: 2026-11-04 — Phase 02 execution started
 
@@ -95,6 +95,7 @@ Progress: [███░░░░░░░] 25%
 | Phase 02 P22 | 19 min | 3 tasks | 2 files |
 | Phase 02 P23 | 31 min | 3 tasks | 3 files |
 | Phase 02 P24 | 26 min | 3 tasks | 2 files |
+| Phase 02 P25 | 19 min | 2 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -190,6 +191,8 @@ Recent decisions affecting current work:
 - [Phase 02]: Operator override 2026-11-04: TDD gate block on 02-22 (GREEN before RED; plan said do not commit RED) accepted, no history rewrite. Evidence: 11 uncommitted RED runs in target/gsd-red/02-22-* (RED_EVIDENCE_OK) and 02-23's 10 controls on the final code
 - [Phase 02]: 02-24: both publication routes build their tree listing in process from tree bytes hashed against their ids (verified_tree_listing), root included, from a commit read the same way; git ls-tree no longer runs on either route (closes WR-500)
 - [Phase 02]: 02-24: the per-task RED-commit gate tripped on Tasks 1 and 2 (Rust gap #4379); continued on the operator-approved substitute evidence (RED commits c9e74a0 and 0737048 with their markers, all RED records RED_EVIDENCE_OK); last_gate_trip not written because STATE.md has no such field
+- [Phase 02]: 02-25: the committed gate's change list is listing_diff over two verified listings (fetched head and commit, one map); git diff-tree no longer runs there. A fetched-head tree not matching its id is refused naming a recorded or allowlisted path. The per-task RED-commit gate tripped before GREEN (Rust gap #4379); continued on the operator-approved substitute evidence (bdf59f8, 3 markers, 3 records RED_EVIDENCE_OK); last_gate_trip not written (field absent)
+- [Phase 02]: 02-25 interpretation open to operator objection: 'the trees those diffs read' is met at the committed gate (binding), not at the staged gate's git diff --cached (T-02-105)
 
 ### Pending Todos
 
@@ -234,6 +237,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-04T17:35:24.462Z
-Stopped at: Completed 02-24-PLAN.md
+Last session: 2026-11-04T18:01:21.804Z
+Stopped at: Completed 02-25-PLAN.md
 Resume file: None
