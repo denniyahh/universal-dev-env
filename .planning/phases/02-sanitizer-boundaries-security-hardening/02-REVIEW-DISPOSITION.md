@@ -3,6 +3,30 @@ phase: 02
 review: 02-REVIEW.md
 titles: json
 findings:
+  - id: CR-400
+    severity: critical
+    disposition: open
+    title: "The gate trusts local copies of objects the remote already holds, so a changed local object store gets Ok while the remote lacks the record"
+  - id: WR-400
+    severity: warning
+    disposition: open
+    title: "The push blames \"a hook or config in the cache checkout\" for benign mismatches, and a relative remote path can make every push fail permanently"
+  - id: IN-400
+    severity: info
+    disposition: open
+    title: "`open_push_templates` returns a checkout path nobody uses"
+  - id: IN-401
+    severity: info
+    disposition: open
+    title: "DEF-02 says every gate read runs past replace refs, but the staged gate's reads do not"
+  - id: IN-402
+    severity: info
+    disposition: open
+    title: "The \"not at the validated commit\" message is also used when the read-back itself failed"
+  - id: IN-403
+    severity: info
+    disposition: open
+    title: "The empty-status deletion check passes silently for a staged path outside the checkout"
   - id: CR-300
     severity: critical
     disposition: open
@@ -139,22 +163,28 @@ findings:
     severity: info
     disposition: open
     title: "The vendored rule pin is enforced only under `cargo test`, and line-ending conversion would break it"
-open: 32
-total: 34
-recorded: 2026-11-02T19:31:26.995Z
+open: 38
+total: 40
+recorded: 2026-11-04T06:57:25.413Z
 ---
 
 # Phase 02: Code Review Disposition
 
 | Finding | Severity | Disposition | Source |
 |---------|----------|-------------|--------|
-| CR-300 | critical | open | - |
-| CR-301 | critical | open | - |
-| WR-300 | warning | open | - |
-| WR-301 | warning | open | - |
-| WR-302 | warning | open | - |
-| IN-300 | info | open | - |
-| IN-301 | info | open | - |
+| CR-400 | critical | open | - |
+| WR-400 | warning | open | - |
+| IN-400 | info | open | - |
+| IN-401 | info | open | - |
+| IN-402 | info | open | - |
+| IN-403 | info | open | - |
+| CR-300 | critical | open | - (not in the current review) |
+| CR-301 | critical | open | - (not in the current review) |
+| WR-300 | warning | open | - (not in the current review) |
+| WR-301 | warning | open | - (not in the current review) |
+| WR-302 | warning | open | - (not in the current review) |
+| IN-300 | info | open | - (not in the current review) |
+| IN-301 | info | open | - (not in the current review) |
 | CR-200 | critical | open | - (not in the current review) |
 | CR-201 | critical | open | - (not in the current review) |
 | WR-200 | warning | open | - (not in the current review) |
