@@ -1797,8 +1797,8 @@ impl CliPushWorld {
     }
 
     /// [`CliPushWorld::ude`] from the project with a `git` shim first on `PATH` that logs
-    /// the arguments of each git process it starts, one line each. Returns the output and
-    /// the lines this run logged.
+    /// the working directory and the arguments of each git process it starts, one line
+    /// each, as `<dir>\t<args>`. Returns the output and the lines this run logged.
     fn ude_logging_git(&self, args: &[&str]) -> (Output, Vec<String>) {
         use std::os::unix::fs::PermissionsExt;
         let host_path = std::env::var_os("PATH").expect("PATH is set");
@@ -1813,7 +1813,7 @@ impl CliPushWorld {
         fs::write(
             &shim,
             format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{log}'\nexec '{real}' \"$@\"\n",
+                "#!/bin/sh\nprintf '%s\\t%s\\n' \"$(pwd)\" \"$*\" >> '{log}'\nexec '{real}' \"$@\"\n",
                 log = log.display(),
                 real = real_git.display()
             ),
@@ -2419,6 +2419,205 @@ fn test_cli_status_and_pull_run_no_ls_remote() {
     let (push, lines) = world.ude_logging_git(&["sync", "push", "--force", "--remote", url]);
     assert_eq!(push.status.code(), Some(0), "{}", outputs(&push));
     assert!(lines.iter().any(is_ls_remote), "push: {lines:#?}");
+}
+
+/// An empty bare repository at `<temp>/other.git` that a hook-written config points the
+/// push at.
+#[cfg(unix)]
+fn cli_redirect_target(world: &CliPushWorld) -> PathBuf {
+    let other = world.temp.path().join("other.git");
+    fs::create_dir_all(&other).unwrap();
+    world
+        .git
+        .run(&other, &["init", "-q", "--bare", "-b", "main"]);
+    other
+}
+
+/// Installs a post-commit hook in the cache checkout that runs `config_line` with `O` the
+/// other repository and `U` the caller's URL, and records UDE's commit in
+/// `.git/ude-test-validated`. Returns the cache checkout.
+#[cfg(unix)]
+fn install_redirect_hook(world: &CliPushWorld, other: &Path, config_line: &str) -> PathBuf {
+    world.install_cache_hook(
+        "post-commit",
+        &format!(
+            "O='{}'\nU='{}'\n{config_line}\ngit rev-parse HEAD > .git/ude-test-validated\n",
+            other.display(),
+            world.bare_url
+        ),
+    )
+}
+
+/// `ude sync push` with a hook-written `remote.origin.pushurl`: exit 0, the edit on the
+/// real remote (directly, or on a `ude-sync-*` branch with `--pr`), the other repository
+/// with no refs. Direct mode advances the ancestor; PR mode does not.
+#[cfg(unix)]
+fn assert_cli_origin_pushurl_ignored(extra_args: &[&str]) {
+    let world = cli_push_world();
+    let other = cli_redirect_target(&world);
+    let checkout = install_redirect_hook(&world, &other, "git config remote.origin.pushurl \"$O\"");
+    let ancestor_before = mise_ancestor(&world.project);
+
+    let push = world.push(extra_args);
+    let text = outputs(&push);
+    assert!(
+        checkout.join(".git/ude-test-hook-ran").exists(),
+        "the cache hook never ran. {text}"
+    );
+    assert_eq!(push.status.code(), Some(0), "{text}");
+    assert_eq!(
+        world.git.output(&other, &["for-each-ref"]),
+        "",
+        "the other repository received a ref. {text}"
+    );
+    let validated = cache_recorded_id(&checkout, "ude-test-validated");
+    let refs = world.remote_refs();
+    if extra_args.contains(&"--pr") {
+        assert!(
+            refs.lines()
+                .any(|line| line.starts_with("refs/heads/ude-sync-") && line.ends_with(&validated)),
+            "no ude-sync branch at the commit on the real remote: {refs}. {text}"
+        );
+        assert_eq!(mise_ancestor(&world.project), ancestor_before, "{text}");
+    } else {
+        assert_eq!(
+            format!("{}\n", remote_file(&world.git, &world.bare, MISE_TEMPLATE)),
+            world.local_mise(),
+            "{text}"
+        );
+        assert_eq!(
+            world
+                .git
+                .output(&world.bare, &["rev-parse", "refs/heads/main"]),
+            validated
+        );
+        assert_ne!(mise_ancestor(&world.project), ancestor_before, "{text}");
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn test_cli_direct_push_ignores_hook_written_origin_pushurl() {
+    assert_cli_origin_pushurl_ignored(&[]);
+}
+
+#[test]
+#[cfg(unix)]
+fn test_cli_pr_push_ignores_hook_written_origin_pushurl() {
+    assert_cli_origin_pushurl_ignored(&["--pr"]);
+}
+
+/// `ude sync push` with a hook-written `url.<other>.pushInsteadOf <url>`: exit 2 with the
+/// read-back's text, no ref of the real remote moved (so no `ude-sync-*` branch either),
+/// the other repository holds UDE's commit (the redirect took effect), and the ancestor
+/// is unchanged.
+#[cfg(unix)]
+fn assert_cli_push_instead_of_refused(extra_args: &[&str]) {
+    let world = cli_push_world();
+    let other = cli_redirect_target(&world);
+    let checkout =
+        install_redirect_hook(&world, &other, "git config \"url.$O.pushInsteadOf\" \"$U\"");
+    let refs_before = world.remote_refs();
+    let ancestor_before = mise_ancestor(&world.project);
+
+    let push = world.push(extra_args);
+    let text = outputs(&push);
+    assert!(
+        checkout.join(".git/ude-test-hook-ran").exists(),
+        "the cache hook never ran. {text}"
+    );
+    assert_eq!(push.status.code(), Some(2), "{text}");
+    assert!(
+        text.contains("not at the validated commit"),
+        "refused for another reason. {text}"
+    );
+    assert_eq!(
+        world.remote_refs(),
+        refs_before,
+        "a remote ref moved. {text}"
+    );
+    let validated = cache_recorded_id(&checkout, "ude-test-validated");
+    let other_refs = world
+        .git
+        .output(&other, &["for-each-ref", "--format=%(objectname)"]);
+    assert_eq!(
+        other_refs, validated,
+        "the other repository does not hold UDE's commit. {text}"
+    );
+    assert_eq!(
+        mise_ancestor(&world.project),
+        ancestor_before,
+        "a refused push must not advance ancestor state. {text}"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn test_cli_direct_push_refuses_hook_written_push_instead_of() {
+    assert_cli_push_instead_of_refused(&[]);
+}
+
+#[test]
+#[cfg(unix)]
+fn test_cli_pr_push_refuses_hook_written_push_instead_of() {
+    assert_cli_push_instead_of_refused(&["--pr"]);
+}
+
+/// A successful push, logged through the git shim after `sync status` made the cache
+/// checkout: exactly two `git ls-remote` processes, each run from the filesystem root
+/// with the caller's URL; the push names the URL and never the word `origin`. Control:
+/// the push's `git fetch` in the same log names `origin`, so the check can see it.
+#[cfg(unix)]
+fn assert_cli_push_reads_the_remote_twice(extra_args: &[&str]) {
+    let world = cli_push_world();
+    let url = world.bare_url.as_str();
+    let status = world.ude(&world.project, &["sync", "status", "--remote", url]);
+    assert_eq!(status.status.code(), Some(0), "{}", outputs(&status));
+    let mut args = vec!["sync", "push", "--force", "--remote", url];
+    args.extend_from_slice(extra_args);
+
+    let (push, lines) = world.ude_logging_git(&args);
+    assert_eq!(push.status.code(), Some(0), "{}", outputs(&push));
+    let logged: Vec<(&str, Vec<&str>)> = lines
+        .iter()
+        .map(|line| {
+            let (dir, args) = line.split_once('\t').expect("<dir>\\t<args>");
+            (dir, args.split_whitespace().collect())
+        })
+        .collect();
+    let runs = |verb: &str| -> Vec<&(&str, Vec<&str>)> {
+        logged
+            .iter()
+            .filter(|(_, words)| words.contains(&verb))
+            .collect()
+    };
+    let reads = runs("ls-remote");
+    assert_eq!(reads.len(), 2, "{lines:#?}");
+    for (dir, words) in &reads {
+        assert_eq!(*dir, "/", "a read ran inside a repository: {words:?}");
+        assert!(words.contains(&url), "a read without the URL: {words:?}");
+    }
+    let pushes = runs("push");
+    assert_eq!(pushes.len(), 1, "{lines:#?}");
+    assert!(pushes[0].1.contains(&url), "{:?}", pushes[0].1);
+    assert!(!pushes[0].1.contains(&"origin"), "{:?}", pushes[0].1);
+    let fetches = runs("fetch");
+    assert!(
+        fetches.iter().any(|(_, words)| words.contains(&"origin")),
+        "the control found no fetch naming origin: {lines:#?}"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn test_cli_direct_push_reads_the_remote_twice_from_outside_the_checkout() {
+    assert_cli_push_reads_the_remote_twice(&[]);
+}
+
+#[test]
+#[cfg(unix)]
+fn test_cli_pr_push_reads_the_remote_twice_from_outside_the_checkout() {
+    assert_cli_push_reads_the_remote_twice(&["--pr"]);
 }
 
 /// A `remote.origin.uploadpack` wrapper in the cache checkout moves the bare's main
