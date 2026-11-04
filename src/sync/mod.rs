@@ -2036,6 +2036,14 @@ impl SyncEngine {
         // commit. `push.followTags` in the cache repository config (a hook can write it)
         // would also publish annotated tags pointing into the pushed history.
         //
+        // The source is `<id>^{commit}`, not the bare id: push resolves a plain id against
+        // local ref names before reading it as an object name, so a ref a hook made at
+        // refs/tags/<id>, refs/heads/<id> or refs/remotes/<id> would be sent in its place
+        // (probed). No ref name can hold `^`, so this source is only ever the object.
+        // `--no-replace-objects` keeps a replace ref from changing what the source peels to:
+        // a replace ref from the commit to a tag would make `^{commit}` peel to the tag's
+        // commit (probed).
+        //
         // Push's object walk would follow a hook-written commit-graph (local, split chain,
         // or in an alternate object directory) or a bitmap (pack or multi-pack-index) built
         // under a graft, sending objects outside the validated commit; both are disabled
@@ -2051,9 +2059,10 @@ impl SyncEngine {
         // when a push reads objects, and a refusal's excerpt is the last lines of stderr, so
         // the hint would take lines there. A future git that drops grafts makes the variable
         // and this option no-ops, which needs no action.
-        let refspec = format!("{commit}:refs/heads/{sync_branch}");
+        let refspec = format!("{commit}^{{commit}}:refs/heads/{sync_branch}");
         let mut push = self.git(Some(remote_checkout));
         push.args([
+            "--no-replace-objects",
             "-c",
             "core.commitGraph=false",
             "-c",
@@ -2109,7 +2118,8 @@ impl SyncEngine {
     /// Direct mode: commits in the cache checkout and pushes the commit to `branch`.
     ///
     /// The commit must build on `fetched_sha` (branch continuity). The push sends the
-    /// commit id the committed gate validated, never a ref a hook can move, and no tags.
+    /// commit the committed gate validated, named so that no local ref and no replace ref
+    /// can stand in for it, and no tags.
     /// It is a plain fast-forward push, never forced: when upstream moved after the fetch,
     /// the remote's fast-forward check rejects it, the cache commit is rolled back and the
     /// result is [`PushRemoteError::UpstreamMoved`] (D-18). When `git ls-remote` instead
@@ -2164,6 +2174,14 @@ impl SyncEngine {
         // in the cache repository config (a hook can write it) would also publish annotated
         // tags pointing into the pushed history.
         //
+        // The source is `<id>^{commit}`, not the bare id: push resolves a plain id against
+        // local ref names before reading it as an object name, so a ref a hook made at
+        // refs/tags/<id>, refs/heads/<id> or refs/remotes/<id> would be sent in its place
+        // (probed). No ref name can hold `^`, so this source is only ever the object.
+        // `--no-replace-objects` keeps a replace ref from changing what the source peels to:
+        // a replace ref from the commit to a tag would make `^{commit}` peel to the tag's
+        // commit (probed).
+        //
         // Push's object walk would follow a hook-written commit-graph (local, split chain,
         // or in an alternate object directory) or a bitmap (pack or multi-pack-index) built
         // under a graft, sending objects outside the validated commit; both are disabled
@@ -2205,10 +2223,11 @@ impl SyncEngine {
             let stdout = String::from_utf8_lossy(&push_out.stdout);
             if classify_push_porcelain(&stdout) == PushPorcelain::RejectedNonFastForward {
                 self.rollback_commit(remote_checkout);
-                // A shallow file or a replace ref can make git see the validated commit as
-                // not building on the fetched head, so the rejection alone does not mean
-                // upstream moved (probed). This read runs only on this failure path, so a
-                // successful push makes no extra network call.
+                // A shallow file can make git see the validated commit as not building on
+                // the fetched head, so the rejection alone does not mean upstream moved
+                // (probed). A replace ref no longer can, because the push reads past replace
+                // refs. This read runs only on this failure path, so a successful push makes
+                // no extra network call.
                 if self.remote_branch_is_at(remote_checkout, branch, fetched_sha) {
                     return Err(Failed(format!(
                         "git push origin {branch} was refused as not a fast-forward, but git ls-remote reports the remote branch still at the commit UDE fetched; a hook in the cache checkout most likely caused this"
@@ -2234,10 +2253,11 @@ impl SyncEngine {
         const REFUSAL: &str =
             "Post-commit publication gate violation: cannot resolve the commit to publish";
         let spec = format!("{rev}^{{commit}}");
-        // Honouring replace refs is harmless here: the id returned is the id the gate reads
-        // raw and the push sends, so a replace ref cannot separate the two.
+        // Replace refs are not honoured: the id returned must be the commit itself, which
+        // the gate reads raw and the push sends. A replace ref from the commit to a tag
+        // would otherwise make `^{commit}` peel through the tag to another commit (probed).
         let mut rev_parse = self.git(Some(repo));
-        rev_parse.args(["rev-parse", "--verify", &spec]);
+        rev_parse.args(["--no-replace-objects", "rev-parse", "--verify", &spec]);
         let out = self
             .run_local(rev_parse, "git rev-parse")
             .map_err(|e| format!("{REFUSAL}: {e}"))?;
@@ -9037,8 +9057,9 @@ git config remote.origin.receivepack "n=0; : > '$D/ude-go'; while [ ! -e '$D/ude
     #[cfg(unix)]
     const HOOK_SHALLOW_NAMES_COMMIT: &str = "git rev-parse HEAD > .git/shallow\n";
 
-    /// post-commit tail: replaces UDE's commit with a parentless one, so git calls it a
-    /// non-fast-forward.
+    /// post-commit tail: replaces UDE's commit with a parentless one. A push that honours
+    /// replace refs sees no fast-forward from the fetched head; UDE's pushes read past
+    /// replace refs and publish the commit itself.
     #[cfg(unix)]
     const HOOK_REPLACE_WITH_PARENTLESS: &str = r#"T=$(git rev-parse 'HEAD^{tree}')
 R=$(git commit-tree "$T" -m parentless)
