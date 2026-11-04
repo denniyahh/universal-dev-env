@@ -9181,15 +9181,17 @@ sh "$FORGE" .git/objects/info/commit-graph "$(git rev-parse HEAD)" parent "$X"
     const HOOK_GRAFT: &str = graft_lines!();
 
     /// post-commit tail: the injected commit now, and a grafts file written during the push.
-    /// The hook leaves a bounded background process and points `remote.origin.receivepack`
-    /// at a command that signals it and waits for its write before running the real
-    /// receive-pack. So the write always lands after the gate and before push's object walk.
-    /// Both loops stop after about 10 s, so a refused push leaves nothing running for long.
+    /// The hook leaves a bounded background process and points `remote.$U.receivepack` at
+    /// a command that signals it and waits for its write before running the real
+    /// receive-pack. A push to a URL runs that key only for a URL not starting with `/`, so
+    /// this needs [`push_over_file_url`]. The write lands after the gate and before push's
+    /// object walk, and leaves `.git/ude-ack` behind. Both loops stop after about 10 s, so a
+    /// refused push leaves nothing running for long.
     #[cfg(unix)]
     const HOOK_GRAFTS_WRITTEN_DURING_PUSH: &str = concat!(
         injected_commit_lines!(),
         r#"C=$(git rev-parse HEAD); B=$(git rev-parse HEAD~1); D=$(pwd)/.git
-git config remote.origin.receivepack "n=0; : > '$D/ude-go'; while [ ! -e '$D/ude-ack' ] && [ \$n -lt 1000 ]; do sleep 0.01; n=\$((n+1)); done; git receive-pack"
+git config "remote.$U.receivepack" "n=0; : > '$D/ude-go'; while [ ! -e '$D/ude-ack' ] && [ \$n -lt 1000 ]; do sleep 0.01; n=\$((n+1)); done; git receive-pack"
 ( n=0; while [ ! -e "$D/ude-go" ] && [ $n -lt 1000 ]; do sleep 0.01; n=$((n+1)); done; printf '%s %s %s\n' "$C" "$B" "$X" >> "$D/info/grafts"; : > "$D/ude-ack" ) >/dev/null 2>&1 &
 "#
     );
@@ -9359,10 +9361,21 @@ byte() { printf "\\$(printf '%03o' "$1")"; }
         )
     }
 
-    /// Publishes [`HOOKED_TEMPLATE`] over the seeded template of a fresh bare remote with
-    /// the hook `hook_name` installed in the cache checkout. The hook runs `guard`, then
-    /// its body once (a marker stops an amend's own post-commit), with `F` set to the
-    /// managed file's checkout-relative path, then `hook_tail`.
+    /// [`push_with_guarded_hook`] through a `file://` URL of the bare remote, with no guard.
+    /// Git honours `remote.<url>.*` for a URL not starting with `/`, and a `file://` clone
+    /// is really shallow, unlike a clone of a path.
+    #[cfg(unix)]
+    fn push_over_file_url(
+        git: &GitFixture,
+        engine: &SyncEngine,
+        open_pr: bool,
+        hook_name: &str,
+        hook_tail: &str,
+    ) -> HookedPush {
+        push_with_hook_at(git, engine, open_pr, hook_name, "", hook_tail, true)
+    }
+
+    /// [`push_with_hook_at`] through the bare remote's path.
     #[cfg(unix)]
     fn push_with_guarded_hook(
         git: &GitFixture,
@@ -9372,12 +9385,37 @@ byte() { printf "\\$(printf '%03o' "$1")"; }
         guard: &str,
         hook_tail: &str,
     ) -> HookedPush {
+        push_with_hook_at(git, engine, open_pr, hook_name, guard, hook_tail, false)
+    }
+
+    /// Publishes [`HOOKED_TEMPLATE`] over the seeded template of a fresh bare remote with
+    /// the hook `hook_name` installed in the cache checkout; the remote is named by its
+    /// `file://` URL when `file_url`, by its path otherwise. The hook runs `guard`, then
+    /// its body once (a marker stops an amend's own post-commit), with `F` set to the
+    /// managed file's checkout-relative path and `U` to the URL the push goes to, then
+    /// `hook_tail`.
+    #[cfg(unix)]
+    fn push_with_hook_at(
+        git: &GitFixture,
+        engine: &SyncEngine,
+        open_pr: bool,
+        hook_name: &str,
+        guard: &str,
+        hook_tail: &str,
+        file_url: bool,
+    ) -> HookedPush {
         use std::os::unix::fs::PermissionsExt;
         let bare = seeded_bare_remote(git);
+        let url = if file_url {
+            format!("file://{}", bare.path().display())
+        } else {
+            bare.path().to_str().unwrap().to_string()
+        };
         let cache = tempdir().unwrap();
         let cached = engine
-            .ensure_remote_repo(bare.path().to_str().unwrap(), "main", cache.path())
+            .ensure_remote_repo(&url, "main", cache.path())
             .unwrap();
+        let push_url = cached.remote_url.clone();
         let checkout = cached.checkout_dir.clone();
         let managed = cached.templates_dir.join("projects/generic/gitconfig.repo");
         let managed_rel = managed
@@ -9393,7 +9431,7 @@ byte() { printf "\\$(printf '%03o' "$1")"; }
         fs::write(
             &hook,
             format!(
-                "#!/bin/sh\n{guard}\n[ -e .git/ude-test-hook-ran ] && exit 0\n: > .git/ude-test-hook-ran\nF='{managed_rel}'\n{hook_tail}"
+                "#!/bin/sh\n{guard}\n[ -e .git/ude-test-hook-ran ] && exit 0\n: > .git/ude-test-hook-ran\nF='{managed_rel}'\nU='{push_url}'\n{hook_tail}"
             ),
         )
         .unwrap();
@@ -10537,6 +10575,8 @@ byte() { printf "\\$(printf '%03o' "$1")"; }
     ) -> tempfile::TempDir {
         let bare = tempdir().unwrap();
         git.run(bare.path(), &["init", "--bare", "-b", "main"]);
+        // A `file://` clone is shallow, and an empty repository refuses a shallow push.
+        git.run(bare.path(), &["config", "receive.shallowUpdate", "true"]);
         let mut push = git.cmd(checkout);
         push.args(global_opts).args([
             "push",
@@ -10720,11 +10760,7 @@ byte() { printf "\\$(printf '%03o' "$1")"; }
     #[cfg(unix)]
     fn test_direct_push_sends_no_object_from_grafts_written_during_push() {
         for _ in 0..GRAFTS_DURING_PUSH_RUNS {
-            let git = GitFixture::new();
-            let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
-            let pushed =
-                push_with_post_commit_hook(&git, &engine, false, HOOK_GRAFTS_WRITTEN_DURING_PUSH);
-            assert_no_injected_blob_with_control(&git, &pushed, false);
+            assert_grafts_written_during_push_ignored(false);
         }
     }
 
@@ -10732,12 +10768,30 @@ byte() { printf "\\$(printf '%03o' "$1")"; }
     #[cfg(unix)]
     fn test_pr_push_sends_no_object_from_grafts_written_during_push() {
         for _ in 0..GRAFTS_DURING_PUSH_RUNS {
-            let git = GitFixture::new();
-            let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
-            let pushed =
-                push_with_post_commit_hook(&git, &engine, true, HOOK_GRAFTS_WRITTEN_DURING_PUSH);
-            assert_no_injected_blob_with_control(&git, &pushed, true);
+            assert_grafts_written_during_push_ignored(true);
         }
+    }
+
+    /// One run of [`HOOK_GRAFTS_WRITTEN_DURING_PUSH`] over a `file://` URL: the hook's
+    /// `remote.$U.receivepack` ran and the background write happened (`.git/ude-ack`), so a
+    /// run where the grafts file was never written cannot pass.
+    #[cfg(unix)]
+    fn assert_grafts_written_during_push_ignored(open_pr: bool) {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let pushed = push_over_file_url(
+            &git,
+            &engine,
+            open_pr,
+            "post-commit",
+            HOOK_GRAFTS_WRITTEN_DURING_PUSH,
+        );
+        assert!(
+            pushed.checkout.join(".git/ude-ack").exists(),
+            "the grafts file was never written during the push; result: {:?}",
+            pushed.res
+        );
+        assert_no_injected_blob_with_control(&git, &pushed, open_pr);
     }
 
     /// Publishes [`HOOKED_TEMPLATE`] to a seeded bare remote whose pre-receive hook prints
@@ -14384,14 +14438,29 @@ git update-ref refs/heads/main "$N"
         other
     }
 
-    /// A redirect channel: `config(checkout, other)` points the checkout's fetch (and,
-    /// today, its push) at another repository holding an injected base. The checked route
-    /// refuses; the control fetches the injected base and publishes a commit on top of it.
-    /// That push reaches the other repository, not the caller's (the push destination is
-    /// plan 02-18's), and the other repository held the blob already, so here the
-    /// control's evidence is the fetched head and the published commit's parent.
+    /// Where a redirect channel's config sends a push to the caller's URL.
     #[cfg(unix)]
-    fn assert_redirect_refused(open_pr: bool, config: &dyn Fn(&GitFixture, &Path, &Path)) {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum PushGoesTo {
+        /// The push names the URL, so `remote.origin.*` does not apply to it.
+        CallersRemote,
+        /// The config rewrites the URL itself, so the push follows it.
+        OtherRepository,
+    }
+
+    /// A redirect channel: `config(checkout, other)` points the checkout's fetch at another
+    /// repository holding an injected base. The checked route refuses. The control
+    /// fetches the injected base and publishes a commit on top of it. Where `push` is
+    /// [`PushGoesTo::CallersRemote`] that commit and the injected blob reach the caller's
+    /// remote and the result is Ok. Where it is [`PushGoesTo::OtherRepository`] the commit
+    /// lands in the other repository, the read-back refuses, and the caller's remote keeps
+    /// its heads.
+    #[cfg(unix)]
+    fn assert_redirect_refused(
+        open_pr: bool,
+        push: PushGoesTo,
+        config: &dyn Fn(&GitFixture, &Path, &Path),
+    ) {
         let git = GitFixture::new();
         let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
         let setup = |bare: &Path, checkout: &Path| {
@@ -14410,14 +14479,33 @@ git update-ref refs/heads/main "$N"
             Some(base.as_str()),
             "the control did not fetch the other repository's injected base"
         );
-        assert_control_delivers(&git, &control, &other);
-        let published = remote_heads(&git, &other)
+        let landed_in = match push {
+            PushGoesTo::CallersRemote => {
+                assert_control_delivers(&git, &control, control.bare.path());
+                control.bare.path().to_path_buf()
+            }
+            PushGoesTo::OtherRepository => {
+                match &control.res {
+                    Err(PushRemoteError::Failed(e)) => assert!(e.contains(NOT_PUBLISHED), "{e}"),
+                    res => panic!("expected the read-back's refusal, got {res:?}"),
+                }
+                assert_eq!(
+                    remote_heads(&git, control.bare.path()),
+                    control.heads_before,
+                    "the caller's remote changed"
+                );
+                other
+            }
+        };
+        let published = remote_heads(&git, &landed_in)
             .into_iter()
-            .find(|(name, _)| open_pr != (name == "refs/heads/main"))
+            .find(|(name, id)| {
+                (open_pr != (name == "refs/heads/main")) && Some(id) != control.fetched_sha.as_ref()
+            })
             .map(|(_, id)| id)
-            .unwrap();
+            .expect("the control's commit");
         assert_eq!(
-            git.output(&other, &["rev-parse", &format!("{published}~1")]),
+            git.output(&landed_in, &["rev-parse", &format!("{published}~1")]),
             control.fetched_sha.clone().unwrap(),
             "the control's commit does not build on the injected base"
         );
@@ -14449,25 +14537,25 @@ git update-ref refs/heads/main "$N"
     #[test]
     #[cfg(unix)]
     fn test_direct_push_refuses_fetch_redirected_by_hook_written_origin_url() {
-        assert_redirect_refused(false, &origin_url_config);
+        assert_redirect_refused(false, PushGoesTo::CallersRemote, &origin_url_config);
     }
 
     #[test]
     #[cfg(unix)]
     fn test_pr_push_refuses_fetch_redirected_by_hook_written_origin_url() {
-        assert_redirect_refused(true, &origin_url_config);
+        assert_redirect_refused(true, PushGoesTo::CallersRemote, &origin_url_config);
     }
 
     #[test]
     #[cfg(unix)]
     fn test_direct_push_refuses_fetch_redirected_by_hook_written_instead_of() {
-        assert_redirect_refused(false, &instead_of_config);
+        assert_redirect_refused(false, PushGoesTo::OtherRepository, &instead_of_config);
     }
 
     #[test]
     #[cfg(unix)]
     fn test_pr_push_refuses_fetch_redirected_by_hook_written_instead_of() {
-        assert_redirect_refused(true, &instead_of_config);
+        assert_redirect_refused(true, PushGoesTo::OtherRepository, &instead_of_config);
     }
 
     /// Setup: the managed template runs through a filter whose `kind` (`clean` or
@@ -14859,6 +14947,323 @@ git update-ref refs/heads/main "$N"
     #[cfg(unix)]
     fn test_direct_push_ignores_hook_written_origin_pushurl() {
         assert_origin_pushurl_ignored(false);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_pr_push_ignores_hook_written_origin_pushurl() {
+        assert_origin_pushurl_ignored(true);
+    }
+
+    /// An empty bare repository a redirect sends the push to. With `shallow` it accepts a
+    /// push from a shallow clone (a `file://` clone is one).
+    #[cfg(unix)]
+    fn redirect_target(git: &GitFixture, shallow: bool) -> tempfile::TempDir {
+        let other = tempdir().unwrap();
+        git.run(other.path(), &["init", "-q", "--bare", "-b", "main"]);
+        if shallow {
+            git.run(other.path(), &["config", "receive.shallowUpdate", "true"]);
+        }
+        other
+    }
+
+    /// The push was redirected and refused: Err with the read-back's text, the real remote
+    /// unchanged with no `ude-sync-*` branch, and `other` holding exactly one head, a commit
+    /// on the fetched head with the validated bytes (the redirect took effect). Direct: the
+    /// checkout's HEAD is back at the fetched head. PR: no local `ude-sync-*` branch.
+    /// Returns the commit `other` holds.
+    #[cfg(unix)]
+    fn assert_redirected_and_refused(
+        git: &GitFixture,
+        pushed: &HookedPush,
+        other: &Path,
+        open_pr: bool,
+    ) -> String {
+        match &pushed.res {
+            Err(PushRemoteError::Failed(e)) => assert!(e.contains(NOT_PUBLISHED), "{e}"),
+            res => panic!("expected the read-back's refusal, got {res:?}"),
+        }
+        assert_remote_unchanged(git, pushed);
+        let heads = remote_heads(git, other);
+        assert_eq!(
+            heads.len(),
+            1,
+            "the redirect did not take effect: {heads:?}"
+        );
+        let (name, landed) = heads.into_iter().next().unwrap();
+        assert_eq!(name.starts_with("refs/heads/ude-sync-"), open_pr, "{name}");
+        assert_eq!(
+            git.output(other, &["rev-parse", &format!("{landed}~1")]),
+            pushed.fetched_sha
+        );
+        assert_eq!(
+            git.checked(
+                other,
+                &["show", &format!("{landed}:{}", pushed.managed_rel)]
+            )
+            .stdout,
+            HOOKED_TEMPLATE.as_bytes()
+        );
+        if open_pr {
+            assert_eq!(
+                git.output(
+                    &pushed.checkout,
+                    &[
+                        "for-each-ref",
+                        "--format=%(refname)",
+                        "refs/heads/ude-sync-*"
+                    ]
+                ),
+                "",
+                "the local sync branch was left behind"
+            );
+        } else {
+            assert_eq!(
+                git.output(&pushed.checkout, &["rev-parse", "HEAD"]),
+                pushed.fetched_sha,
+                "the cache commit was not rolled back"
+            );
+        }
+        landed
+    }
+
+    /// A post-commit hook writes `config_line` (with `O` the other repository and `U` the
+    /// push URL) and records UDE's commit; the push is refused and that commit landed in
+    /// the other repository.
+    #[cfg(unix)]
+    fn assert_hook_redirect_refused(open_pr: bool, file_url: bool, config_line: &str) {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let other = redirect_target(&git, file_url);
+        let tail = format!(
+            "O='{}'\n{config_line}\ngit rev-parse HEAD > .git/ude-test-validated\n",
+            other.path().display()
+        );
+        let pushed = push_with_hook_at(&git, &engine, open_pr, "post-commit", "", &tail, file_url);
+        assert!(pushed.hook_ran, "the hook never ran");
+        let landed = assert_redirected_and_refused(&git, &pushed, other.path(), open_pr);
+        assert_eq!(landed, hook_recorded_id(&pushed, "ude-test-validated"));
+    }
+
+    /// `url.<other>.pushInsteadOf <url>`, written by a hook.
+    const PUSH_INSTEAD_OF_LINE: &str = r#"git config "url.$O.pushInsteadOf" "$U""#;
+
+    #[test]
+    #[cfg(unix)]
+    fn test_direct_push_refuses_hook_written_push_instead_of() {
+        assert_hook_redirect_refused(false, false, PUSH_INSTEAD_OF_LINE);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_pr_push_refuses_hook_written_push_instead_of() {
+        assert_hook_redirect_refused(true, false, PUSH_INSTEAD_OF_LINE);
+    }
+
+    /// `url.<other>.insteadOf <url>`, written by a hook after the fetch.
+    const INSTEAD_OF_LINE: &str = r#"git config "url.$O.insteadOf" "$U""#;
+
+    #[test]
+    #[cfg(unix)]
+    fn test_direct_push_refuses_hook_written_instead_of_after_the_fetch() {
+        assert_hook_redirect_refused(false, false, INSTEAD_OF_LINE);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_pr_push_refuses_hook_written_instead_of_after_the_fetch() {
+        assert_hook_redirect_refused(true, false, INSTEAD_OF_LINE);
+    }
+
+    /// `remote.<url>.pushurl <other>`, written by a hook; honoured for a `file://` URL.
+    const URL_KEYED_PUSHURL_LINE: &str = r#"git config "remote.$U.pushurl" "$O""#;
+
+    #[test]
+    #[cfg(unix)]
+    fn test_direct_push_refuses_hook_written_url_keyed_pushurl() {
+        assert_hook_redirect_refused(false, true, URL_KEYED_PUSHURL_LINE);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_pr_push_refuses_hook_written_url_keyed_pushurl() {
+        assert_hook_redirect_refused(true, true, URL_KEYED_PUSHURL_LINE);
+    }
+
+    /// A clean filter on the managed template writes `url.<other>.pushInsteadOf` during
+    /// `git add` and passes the bytes through.
+    #[cfg(unix)]
+    fn assert_filter_redirect_refused(open_pr: bool) {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let other = redirect_target(&git, false);
+        let body = format!(
+            "U=$(git config remote.origin.url)\ngit config \"url.{}.pushInsteadOf\" \"$U\" >&2\n: > .git/ude-test-hook-ran\ncat\n",
+            other.path().display()
+        );
+        let pushed = push_managed_file(&git, &engine, open_pr, HOOKED_TEMPLATE, |repo| {
+            set_clean_filter(&git, repo, &body);
+        });
+        assert!(
+            pushed.checkout.join(".git/ude-test-hook-ran").exists(),
+            "the clean filter never ran"
+        );
+        assert_redirected_and_refused(&git, &pushed, other.path(), open_pr);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_direct_push_refuses_redirect_written_by_clean_filter() {
+        assert_filter_redirect_refused(false);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_pr_push_refuses_redirect_written_by_clean_filter() {
+        assert_filter_redirect_refused(true);
+    }
+
+    /// `url.<other>.pushInsteadOf <url>` only in the GIT_CONFIG_GLOBAL file the engine's git
+    /// reads; the fixture's own git keeps the plain config, so seeding is not redirected.
+    /// The push follows the key and `git ls-remote` does not, so the read-back refuses.
+    #[cfg(unix)]
+    fn assert_global_push_instead_of_refused(open_pr: bool) {
+        let git = GitFixture::new();
+        let bare = seeded_bare_remote(&git);
+        let url = bare.path().to_str().unwrap();
+        let other = redirect_target(&git, false);
+        let config_dir = tempdir().unwrap();
+        let global = config_dir.path().join("gitconfig");
+        fs::write(
+            &global,
+            format!(
+                "{FIXTURE_GITCONFIG}[url \"{}\"]\n\tpushInsteadOf = {url}\n",
+                other.path().display()
+            ),
+        )
+        .unwrap();
+        let engine = SyncEngine::new().with_extra_env(vec![
+            ("GIT_CONFIG_GLOBAL".into(), global.into()),
+            ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+            (
+                "GIT_CEILING_DIRECTORIES".into(),
+                std::env::temp_dir().into(),
+            ),
+        ]);
+        let cache = tempdir().unwrap();
+        let cached = engine
+            .ensure_remote_repo_for_push(url, "main", cache.path())
+            .unwrap();
+        let checkout = cached.checkout_dir.clone();
+        let managed = cached.templates_dir.join("projects/generic/gitconfig.repo");
+        let managed_rel = managed
+            .strip_prefix(&checkout)
+            .unwrap()
+            .display()
+            .to_string();
+        fs::write(&managed, HOOKED_TEMPLATE).unwrap();
+        let validated = ValidatedBlobs::from_files(std::slice::from_ref(&managed));
+        let res = engine.push_to_remote(
+            &cached.publish_target("main"),
+            open_pr,
+            std::slice::from_ref(&managed),
+            &validated,
+        );
+        let fetched_sha = cached.fetched_sha.clone();
+        drop(cached);
+        let pushed = HookedPush {
+            res,
+            bare,
+            _cache: cache,
+            checkout,
+            fetched_sha,
+            managed_rel,
+            hook_ran: false,
+        };
+        assert_redirected_and_refused(&git, &pushed, other.path(), open_pr);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_direct_push_refuses_global_push_instead_of() {
+        assert_global_push_instead_of_refused(false);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_pr_push_refuses_global_push_instead_of() {
+        assert_global_push_instead_of_refused(true);
+    }
+
+    /// The bare remote's post-receive hook moves each pushed ref to a new commit built
+    /// there on top of it, and records the pushed id in `ude-test-pushed`.
+    #[cfg(unix)]
+    const REMOTE_MOVES_PUSHED_REF: &str = r#"#!/bin/sh
+while read old new ref; do
+  T=$(git rev-parse "$new^{tree}")
+  M=$(GIT_AUTHOR_NAME=other GIT_AUTHOR_EMAIL=other@example.com GIT_COMMITTER_NAME=other GIT_COMMITTER_EMAIL=other@example.com git commit-tree "$T" -p "$new" -m moved-after-push)
+  git update-ref "$ref" "$M"
+  printf '%s\n' "$new" > ude-test-pushed
+done
+"#;
+
+    /// The pushed ref moves on right after the push: refused, not Ok, and the remote's ref
+    /// is a child of the pushed commit, so the move really happened after it landed.
+    #[cfg(unix)]
+    fn assert_moved_after_push_refused(open_pr: bool) {
+        use std::os::unix::fs::PermissionsExt;
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let bare = seeded_bare_remote(&git);
+        let hook = bare.path().join("hooks/post-receive");
+        fs::create_dir_all(hook.parent().unwrap()).unwrap();
+        fs::write(&hook, REMOTE_MOVES_PUSHED_REF).unwrap();
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+        let cache = tempdir().unwrap();
+        let cached = engine
+            .ensure_remote_repo(bare.path().to_str().unwrap(), "main", cache.path())
+            .unwrap();
+        let managed = cached.templates_dir.join("projects/generic/gitconfig.repo");
+        fs::write(&managed, HOOKED_TEMPLATE).unwrap();
+        let validated = ValidatedBlobs::from_files(std::slice::from_ref(&managed));
+        let res = engine.push_to_remote(
+            &cached.publish_target("main"),
+            open_pr,
+            std::slice::from_ref(&managed),
+            &validated,
+        );
+        let err = push_failure(res);
+        assert!(err.contains(NOT_PUBLISHED), "{err}");
+        let pushed = fs::read_to_string(bare.path().join("ude-test-pushed")).unwrap();
+        let moved = remote_heads(&git, bare.path())
+            .into_iter()
+            .find(|(name, _)| open_pr != (name == "refs/heads/main"))
+            .map(|(_, id)| id)
+            .expect("the pushed ref");
+        assert_eq!(
+            git.output(bare.path(), &["rev-parse", &format!("{moved}~1")]),
+            pushed.trim(),
+            "the remote's ref is not a child of the pushed commit"
+        );
+        if !open_pr {
+            assert_eq!(
+                git.output(&cached.checkout_dir, &["rev-parse", "HEAD"]),
+                cached.fetched_sha,
+                "the cache commit was not rolled back"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_direct_push_refuses_when_remote_branch_moved_after_push() {
+        assert_moved_after_push_refused(false);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_pr_push_refuses_when_remote_branch_moved_after_push() {
+        assert_moved_after_push_refused(true);
     }
 
     /// The text every refused confirmation carries.
