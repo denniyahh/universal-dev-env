@@ -3,6 +3,26 @@ phase: 02
 review: 02-REVIEW.md
 titles: json
 findings:
+  - id: WR-500
+    severity: warning
+    disposition: open
+    title: "The tree check hashes a second read; the listing that decides \"held\" comes from the first"
+  - id: WR-501
+    severity: warning
+    disposition: open
+    title: "The root-tree rows cited under DEF-12 are refused before the gate runs, and would be refused without the forgery"
+  - id: WR-502
+    severity: warning
+    disposition: open
+    title: "The \"child ignores stdin\" test does not check the bound it is named for"
+  - id: IN-500
+    severity: info
+    disposition: open
+    title: "A stdin writer thread can be leaked for the life of the process"
+  - id: IN-501
+    severity: info
+    disposition: open
+    title: "A failed object read is reported as \"content not held, a hook most likely hid the change\""
   - id: CR-400
     severity: critical
     disposition: open
@@ -163,21 +183,26 @@ findings:
     severity: info
     disposition: open
     title: "The vendored rule pin is enforced only under `cargo test`, and line-ending conversion would break it"
-open: 38
-total: 40
-recorded: 2026-11-04T06:57:25.413Z
+open: 43
+total: 45
+recorded: 2026-11-04T15:28:24.152Z
 ---
 
 # Phase 02: Code Review Disposition
 
 | Finding | Severity | Disposition | Source |
 |---------|----------|-------------|--------|
-| CR-400 | critical | open | - |
-| WR-400 | warning | open | - |
-| IN-400 | info | open | - |
-| IN-401 | info | open | - |
-| IN-402 | info | open | - |
-| IN-403 | info | open | - |
+| WR-500 | warning | open | - |
+| WR-501 | warning | open | - |
+| WR-502 | warning | open | - |
+| IN-500 | info | open | - |
+| IN-501 | info | open | - |
+| CR-400 | critical | open | - (not in the current review) |
+| WR-400 | warning | open | - (not in the current review) |
+| IN-400 | info | open | - (not in the current review) |
+| IN-401 | info | open | - (not in the current review) |
+| IN-402 | info | open | - (not in the current review) |
+| IN-403 | info | open | - (not in the current review) |
 | CR-300 | critical | open | - (not in the current review) |
 | CR-301 | critical | open | - (not in the current review) |
 | WR-300 | warning | open | - (not in the current review) |
