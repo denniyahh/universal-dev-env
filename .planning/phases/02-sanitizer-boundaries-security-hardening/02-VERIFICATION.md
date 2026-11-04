@@ -1,8 +1,8 @@
 ---
 phase: 02-sanitizer-boundaries-security-hardening
-verified: 2026-11-02T19:44:32Z
+verified: 2026-11-04T07:09:47Z
 status: gaps_found
-score: 43/55 must-haves verified
+score: 70/75 must-haves verified
 covered_files:
   - ".planning/phases/02-sanitizer-boundaries-security-hardening/02-01-PLAN.md"
   - ".planning/phases/02-sanitizer-boundaries-security-hardening/02-01-SUMMARY.md"
@@ -34,6 +34,18 @@ covered_files:
   - ".planning/phases/02-sanitizer-boundaries-security-hardening/02-14-SUMMARY.md"
   - ".planning/phases/02-sanitizer-boundaries-security-hardening/02-15-PLAN.md"
   - ".planning/phases/02-sanitizer-boundaries-security-hardening/02-15-SUMMARY.md"
+  - ".planning/phases/02-sanitizer-boundaries-security-hardening/02-16-PLAN.md"
+  - ".planning/phases/02-sanitizer-boundaries-security-hardening/02-16-SUMMARY.md"
+  - ".planning/phases/02-sanitizer-boundaries-security-hardening/02-17-PLAN.md"
+  - ".planning/phases/02-sanitizer-boundaries-security-hardening/02-17-SUMMARY.md"
+  - ".planning/phases/02-sanitizer-boundaries-security-hardening/02-18-PLAN.md"
+  - ".planning/phases/02-sanitizer-boundaries-security-hardening/02-18-SUMMARY.md"
+  - ".planning/phases/02-sanitizer-boundaries-security-hardening/02-19-PLAN.md"
+  - ".planning/phases/02-sanitizer-boundaries-security-hardening/02-19-SUMMARY.md"
+  - ".planning/phases/02-sanitizer-boundaries-security-hardening/02-20-PLAN.md"
+  - ".planning/phases/02-sanitizer-boundaries-security-hardening/02-20-SUMMARY.md"
+  - ".planning/phases/02-sanitizer-boundaries-security-hardening/02-21-PLAN.md"
+  - ".planning/phases/02-sanitizer-boundaries-security-hardening/02-21-SUMMARY.md"
   - "docs/ARCHITECTURE.md"
   - "src/main.rs"
   - "src/process.rs"
@@ -45,398 +57,286 @@ covered_files:
   - "src/sync/mod.rs"
   - "src/template/mod.rs"
   - "tests/e2e_lifecycle.rs"
-covered_digest: "v4:sha256:94c9eb144e749f0489fa4a8b2230e80253e22cd772fc644138ae13b354a61f65"
+covered_digest: "v4:sha256:392002a035d846855b5b1a6c31044534b5d752cb69827d794772acacb78bcd26"
 behavior_unverified: 0
 overrides_applied: 0
 re_verification:
   previous_status: gaps_found
-  previous_score: 38/44
+  previous_score: 43/55
   gaps_closed:
-    - "Grafts file written after the gate (review WR-203): 02-14's deterministic tests pass in both modes for a pre-push hook and a process a post-commit hook left running, each with a negative control that delivers the blob without the null grafts file"
-    - "The channel of a hook moving HEAD to a duplicate-entry tree (review CR-200, including the token-shaped second entry): refused in both modes"
-    - "The channel of a hook moving HEAD to a commit that deletes or reverts the validated file (review CR-201): refused in both modes"
-    - "The channel of a hook moving HEAD to a tree with an entry named `.` (review WR-200): refused in both modes"
+    - "02-08 blob prohibition and ROADMAP SC2 (CR-300, CR-301): both routes refused or ignored in both modes; the token cases pass; removing the `^{commit}` source fails 18 tests and removing the head check fails 10 (negative controls run here)"
+    - "02-11, 02-12, 02-13 prohibitions re-opened by CR-300 (shadow ref): the rebuilt duplicate, `.`, delete, revert and message commits behind a shadow ref stay off the remote in both modes"
+    - "A hook cannot add an unbound name to the published tree (CR-301): tracking-ref tests assert templates/leak.txt absent; a forged base tree carrying a token blob was probed here and git itself refuses it (`hash mismatch`, `git status` exit 128), nothing published"
+    - "02-13 prohibition on success without validated content, for WR-300 (index flag) and WR-301 (pushurl): refused; removing the empty-status check fails 4 tests and making confirm_published always pass fails 4"
+    - "02-13 prohibition on printing hook-chosen bytes (WR-302): the continuity refusal names only the fetched head; putting the raw parent back into the message fails 4 tests"
   gaps_remaining:
-    - "02-08 blob prohibition and ROADMAP SC2: fail through two channels the previous round did not know, CR-300 and CR-301"
-    - "A push returning Ok has published the validated content: fails through WR-300 and WR-301, and through CR-300"
-    - "A hook cannot add an unbound name to the published tree: fails through CR-300 and CR-301"
+    - "A push returning Ok means the remote holds every recorded path: re-opened by a new channel, review CR-400 (a local object whose bytes do not match its id), reproduced here on both routes and in both modes"
   regressions: []
 gaps:
-  - truth: "02-08 prohibition, restated by 02-13 and 02-14 (SEC-04): MUST NOT publish a blob whose content differs, beyond CRLF/LF line endings of UTF-8 text, from the bytes push_updates validated, whatever git clean filter or commit hook produced it. 02-14 scopes it to what UDE's own push sends; both channels below are UDE's own push"
+  - truth: "02-13 prohibition, scoped by 02-20 to DEF-11: MUST NOT report success for a push whose commit lacks validated content; a push returning Ok means every validated path holds its recorded content in the published commit. Also the previous report's derived truth: a push that returns Ok has published the validated content"
     status: failed
-    reason: "Review CR-300 and CR-301, reproduced here through push_to_remote and through `ude sync push`, direct and PR. CR-300: a post-commit hook creates refs/tags/<validated id> (also refs/heads/<id> and refs/remotes/<id>) pointing at an injected commit; git push resolves the refspec source to that ref, returns Ok, and the remote holds the injected blob. CR-301: a post-checkout hook moves refs/remotes/origin/main onto an injected commit during ensure_remote_repo; fetched_sha reports it, UDE's commit sits on it, the parent check passes, and the push carries it. Nothing refused either one; a consumer's `ude sync pull` wrote the fake token into mise.toml in the CR-300 CLI run. Controls: same hook without the shadow ref, no injected blob on the remote; same hook moving no ref, fetched_sha equals the real head; the same token with no hook is refused with exit 1."
+    reason: "Review CR-400, reproduced here at engine level, direct and PR. Two recorded paths; one changed, the other (gitconfig.repo) kept at the seed blob in the index by assume-unchanged, and the seed blob's loose object file in the cache checkout replaced with the bytes of the validated content. The committed gate reads that blob by id with `cat-file blob`, which does not check the bytes against the id, so it reads the validated content and passes. Result: Ok(\"Directly pushed changes...\") and Ok(\"Pushed changes to branch 'ude-sync-...'\"); the remote's main (and the sync branch) hold the seed bytes at gitconfig.repo, not the record. Control, same steps without the object change: refused, `does not hold the validated content of templates/projects/generic/gitconfig.repo`. The bare remote still reads the seed id as the seed bytes, so the probe did not corrupt the remote. Nothing unvalidated reached the remote; the defect is a false Ok, and direct mode then records the validated hash as the ancestor (src/main.rs:1263-1289)."
     artifacts:
       - path: "src/sync/mod.rs"
-        issue: "Refspecs at lines 2054 and 2182 use `{commit}:refs/heads/...`, whose source a local ref of the same name takes precedence over; the doc comment at 2112 and the comment at 2035 claim the opposite"
-      - path: "src/sync/mod.rs"
-        issue: "fetched_head (lines 1092-1108) reads a local ref after hooks have run (1036-1064), and validate_committed_tree (2374-2375) trusts it; nothing compares it with the remote"
+        issue: "read_blob_by_id (2879-2891) returns stored bytes without checking that they hash to the id; first_path_not_held (2775-2788) and so require_validated_content (2756-2769) decide 'held' from those bytes, for recorded paths the push never sends because the remote already holds them"
     missing:
-      - "Make the push source something no ref can be named (review's fix, `{commit}^{commit}` plus `--no-replace-objects`), rewriting test_direct_push_replaced_commit_refusal_does_not_say_upstream_moved and the comment at 2207"
-      - "Take the base from the remote: `git ls-remote <remote_url> refs/heads/<branch>` from outside the checkout before the fetch, refuse when fetched_head differs (not run by anyone yet)"
-      - "Hook tests in both modes for each channel asserting the injected blob is absent from the remote, with a control that delivers it"
-      - "Or an operator decision to narrow what the gate promises, recorded in the plan and SECURITY docs, with the doc comments changed"
-  - truth: "ROADMAP SC2: Outbound commit inspection catches all Gitleaks secret categories across committed blobs and auto-rolls back commits on detection"
+      - "Check each blob these checks rely on against its id: hash `blob <len>\\0<bytes>` (or run `git hash-object -t blob --no-filters --stdin`) and refuse on mismatch; or record each validated file's git blob id at staging and require the tree to list exactly that id at each recorded path"
+      - "Rows in both modes where a local object no longer matches its id, each refused, keeping the existing controls; add them to DEF-11 in docs/ARCHITECTURE.md"
+      - "Or an operator ruling that this channel is outside the promise, recorded by widening NOT-10 (see Needs operator decision)"
+  - truth: "02-19 prohibition: MUST NOT report success for a push whose validated content is not on the remote's head when status is empty (DEF-12, a class row). 02-19 truth: 'Ok here means the remote's head held the content when read'. ARCHITECTURE promise 2: 'Ok with nothing to push means the head read that way holds every recorded path'"
     status: failed
-    reason: "Same root causes as the gap above. A GitHub PAT shape, flagged by the scanner in a control, reached the remote in direct and PR mode with no refusal and no rollback. SC2 holds for every commit the gate actually inspects; it does not hold for what the push then sends."
+    reason: "CR-400 on the empty-status route, reproduced here direct and PR: validated content written, assume-unchanged set, the seed blob's loose object replaced with the validated bytes. Local `cat-file blob <seed id>` returns the validated bytes. Result: Ok(\"No changes to push to remote repository.\") in both modes, no remote head moved, 0 remote heads hold the record. Control without the object change: refused, `git status reports nothing to push, but the fetched head does not hold the validated content`. The head check (02-17) confirms the fetched head's id, not the content the checkout stores under it."
     artifacts:
       - path: "src/sync/mod.rs"
-        issue: "The gate inspects the commit named by the id; the push can send another (CR-300) or a commit below it (CR-301)"
+        issue: "require_fetched_head_holds (2797-2873) reads the fetched head's blobs from the checkout's object store through first_path_not_held and read_blob_by_id"
     missing:
-      - "Closed by the same changes as the gap above; add a token-shaped case to the hook tests"
-  - truth: "02-11 prohibition MUST NOT push any commit other than the one the committed gate validated; 02-11 prohibition on a commit reachable from the published ref; 02-12 prohibition MUST NOT publish commit text a hook wrote; 02-13 prohibition MUST NOT publish a tree another machine cannot clone or read unambiguously; 02-11 truth that every blob the push adds is checked; 02-13 gap-1 clause that no blob reaches the remote unread"
-    status: failed
-    reason: "CR-300 re-opens each of these. Run here with the hook building the same rebuilt commits the plan's tests refuse, then putting HEAD back and shadowing the id: the remote tip is the injected commit (Ok, direct); a duplicate-entry tree with its injected blob published (Ok, direct and PR); a `.` tree published and `git clone` exit 128 (Ok, direct); a message with INJECTED_BY_HOOK published (Ok, direct). The plans' refusals are real and fire when HEAD moves; none of them sees this route. Previously graded VERIFIED or closed. That is new evidence, not a code regression: the plain-id refspec dates from plan 02-11."
-    artifacts:
-      - path: "src/sync/mod.rs"
-        issue: "Same refspecs, lines 2054 and 2182"
-    missing:
-      - "Closed by the push-source fix; add a shadow-ref case to the existing hook tests for at least the duplicate tree"
-  - truth: "A hook cannot add an unbound name to the published tree (derived in the previous report from review WR-200; 02-13's staged-tree binding was meant to close it)"
-    status: failed
-    reason: "CR-301 published `templates/leak.txt` beside the validated file, in direct and PR mode. The staged-tree binding holds, because the staged tree itself is built on the injected base. CR-300 publishes any tree the hook builds."
-    artifacts:
-      - path: "src/sync/mod.rs"
-        issue: "The binding and the allowlist compare against `base`, and nothing checks base against the remote"
-    missing:
-      - "Closed by the two fixes above"
-  - truth: "02-13 prohibition MUST NOT report success for a push whose commit lacks validated content: a push returning Ok means every validated path holds its recorded content in the published commit"
-    status: failed
-    reason: "Three routes, all reproduced. WR-300: a post-index-change hook that sets assume-unchanged during ensure_remote_repo empties `git status`; push_to_remote returns Ok(\"No changes...\") before any check, the remote stays at the seed, and the CLI exits 0 and advances the ancestor state. WR-301: a post-commit hook writing remote.origin.pushurl sends the commit to another repository; origin never moves, Ok in both modes, CLI exit 0, ancestor advances. CR-300 with a rebuilt delete or revert: Ok, the published tree has no template, or the old blob. Controls: no flag and no pushurl publish normally. With the hook installed after ensure_remote_repo, as the fixture does, this run got `git commit failed` (fail closed), so the flag has to be set before `git status` runs; installing the hook before ensure_remote_repo gives that, and a global core.hooksPath hook gave it through the CLI."
-    artifacts:
-      - path: "src/sync/mod.rs"
-        issue: "stage_publication returns Ok(None) on empty status (lines 1812-1814) without calling require_validated_content; both pushes name `origin` (lines 2065, 2194), which resolves through hook-writable config"
-      - path: "src/main.rs"
-        issue: "Direct mode records ancestors on any Ok (lines 1266-1283)"
-    missing:
-      - "On empty status with a non-empty record, read HEAD's tree and run require_validated_content; confirm deleted paths are gone"
-      - "Push to the caller's URL rather than `origin`, then confirm with `git ls-remote <url>` that the ref is at the commit before returning Ok"
-      - "Hook tests for both; repository-level url.*.pushInsteadOf needs a test or a refusal"
-  - truth: "02-13 prohibition MUST NOT print a name or line a hook chose in the committed gate's refusals"
-    status: partial
-    reason: "Review WR-302, reproduced in both modes and through the CLI. A hook-built commit with a later `parent` line reaches the continuity refusal, which prints the raw bytes. CLI stderr contained a raw ESC byte. A token-shaped value there is printed unredacted, because that check runs before the header scan. Nothing reaches the remote; the exposure is the terminal and any log. The prohibition's enumerated list omits this refusal, its lead clause does not."
-    artifacts:
-      - path: "src/sync/mod.rs"
-        issue: "raw_commit_parents (line 2630) keeps raw text; the refusal at lines 2376-2379 prints it"
-      - path: "src/main.rs"
-        issue: "Prints the error unescaped (line 1306)"
-    missing:
-      - "Drop `{parent}` from the message and name only the fetched head; add a test that the hook's text is absent from the refusal"
+      - "Closed by the same id check as the gap above; add empty-status rows in both modes and add the channel to DEF-12"
 ---
 
 # Phase 2: Sanitizer, Boundaries & Security Hardening Verification Report
 
 **Phase Goal:** Screen and redact all confidential tokens, raw credentials, and user-specific paths before any remote git staging or push.
-**Verified:** 2026-11-02T19:44:32Z
+**Verified:** 2026-11-04T07:09:47Z
 **Status:** gaps_found
-**Re-verification:** Yes, after gap closure (plans 02-13, 02-14, 02-15)
+**Re-verification:** Yes, after gap plans 02-16 to 02-21
 
 ## Bottom line
 
-The phase's main promise is still false. Fake token-shaped bytes reached the remote through UDE's own
-push, through the real CLI, with exit 0 and no refusal; a consumer's pull then wrote them into a project.
-All five review findings reproduced here. No recorded decision covers them.
+The secret-screening goal now holds on every route tried here: no token or unvalidated blob reached a remote,
+and all five earlier findings (CR-300, CR-301, WR-300, WR-301, WR-302) are closed, each fix shown to be
+load-bearing by a negative control run here.
 
-**What argues against this verdict.** Every failure needs code running in the cache checkout: a hook there
-or a global `core.hooksPath`, running with the user's privileges. Such code could run `git push` itself.
-With no hook, the same token and a high-entropy value are refused (exit 1, remote unchanged) and a benign
-edit publishes. So ordinary use behaves as designed; the failure is the gate's claim against hooks, which
-this phase took on as scope.
+One gap remains, and it is about what Ok means, not about leaks. Review CR-400 reproduced here on both
+routes and in both modes: when a loose object in the cache checkout no longer matches its id, the gate reads
+the validated content where the remote holds the old content, and the push returns Ok. In direct mode the
+ancestor state then advances for content the remote does not have.
 
-What did close: the grafts-after-the-gate gap, and the HEAD-moving route to duplicate entries, deletes,
-reverts and `.` entries. 02-13's binding works on the commit it inspects. CR-300 and CR-301 go around it,
-so the same bad trees and blobs still publish by that other route.
-
-Green checks pass again next to these bypasses: full suite, all 23 controls (`same`), 83 caught and 0
-missed. They exercise the commit the gate reads, and none of them can see which commit the push sends.
+**What argues against this verdict.** CR-400 needs code that writes `.git/objects` in the cache checkout and
+knows the exact validated bytes; no hook-driven or CLI run of it was made (the object change was a test step,
+the same model DEF-12's own `_after_ensure` test uses). Nothing unvalidated is published. NOT-10 already
+lists a loose object overwritten *during the push, after the gate read it* as pending the operator; CR-400 is
+the same object class *before* the gate reads it. Read literally, NOT-10 does not cover it, so under the
+doc's rule (1) it is a defect against DEF-11 and DEF-12. If the operator reads NOT-10 as covering every
+forged local object, this becomes an operator decision instead (rule 3), and the phase would pass.
 
 ## Goal Achievement
 
-### Ruling on each review finding
+### Ruling on the review findings (02-REVIEW.md, 88bb986)
 
-| Finding | Reproduced here? | Ruling | What was observed |
-|---------|------------------|--------|-------------------|
-| CR-300, ref named after the commit id | **Yes.** Engine: tag in direct (4 runs) and PR; `refs/heads/<id>` both modes. Added: `refs/remotes/<id>` direct. CLI: direct and PR | **FAILED**, blocks | Ok; remote tip is the injected commit; token in the managed file on the remote. CLI exit 0, ancestors advance in direct mode; consumer's pull writes the token to mise.toml. PR: token on the `ude-sync-*` branch, main untouched. `refs/<id>` did not shadow (published the validated commit) |
-| CR-301, hook moves the fetched head | **Yes.** Engine direct and PR. CLI direct and PR, cached path; CLI direct on the clone path too (the review only reasoned this one) | **FAILED**, blocks | `fetched_sha` differs from the real head; Ok; `templates/leak.txt` and the injected blob on the remote. Clone-path hook also runs `git reset --hard` to the injected commit |
-| WR-300, index flag, Ok with nothing published | **Yes.** Engine direct and PR, CLI direct. Hook installed before the second `ensure_remote_repo`. Installed after ensure, as the fixture does, this run got `git commit failed` instead, so the review's exact form was not reproduced here | **FAILED**, blocks 02-13's success prohibition | `Ok("No changes to push...")`, remote at the seed, probe edit absent; CLI exit 0 and the ancestor state changed |
-| WR-301, hook-written pushurl | **Yes.** Engine direct and PR (the review only reasoned PR), CLI direct | **FAILED**, blocks the same prohibition | Ok; origin stays at the fetched head; the other repository holds the commit. CLI exit 0, ancestors advance |
-| WR-302, parent bytes printed | **Yes.** Engine direct and PR, CLI direct | **PARTIAL**, nothing reaches a remote | CLI stderr has a raw ESC byte; a token-shaped value prints unredacted. `git hash-object --literally` built the commit |
-| IN-300, IN-301 | Not run; the reviewer also reasoned them | Not goal gaps | Local branch residue, and a test helper's HOME |
+| Finding | Reproduced here? | Ruling | Evidence |
+|---------|------------------|--------|----------|
+| CR-400, local object not matching its id | **Yes**, engine level: committed route direct and PR; empty-status route direct and PR. Controls refused | **FAILED, blocks** (DEF-11, DEF-12, 02-13 and 02-19 prohibitions) | See gaps. Added here: the tree variant the review reasoned was probed with a forged base tree hiding a token blob. git refused it (`hash mismatch`, `bad tree object HEAD`, `git status` exit 128); the push failed closed, the token blob is not on the remote. So on git 2.56.0 the channel is blobs read by `cat-file`, not trees |
+| WR-400, relative remote path from two directories | **Yes**, engine level: `../x` from two directories naming two repositories, one cache | Warning, not a must-have failure | First call Ok; every later call from the second directory: `fetched head is not the commit the remote branch holds; a hook or config ... most likely moved or redirected it`. Fails closed, wrong cause named, persists until the cache is removed. 02-17's relative-path truth is about one working directory and holds |
+| IN-400 | Read | Info | open_push_templates (src/main.rs:1615) returns a checkout path its only caller binds as `_remote_checkout_root` (1042) |
+| IN-401 | Read | Warning (doc) | DEF-02 says "Every gate read ... run past replace refs"; stage_publication's `status`, `diff --cached`, `show :<path>`, `write-tree` do not. The committed gate reads raw and binds, so no bypass is known |
+| IN-402 | Read | Info | src/sync/mod.rs:1201-1208, Err from the read-back gets the "not at the validated commit" text |
+| IN-403 | Read | Info | src/sync/mod.rs:2861 `unwrap_or(staged)`; staged paths come from under the checkout today |
+| CR-300, CR-301, WR-300, WR-301, WR-302 | Fix code read; named tests run; a negative control per fix run | **Closed** | Table below |
+| IN-300, IN-301 | Not re-run | Not goal gaps | NOT-14 records IN-300 as open |
 
-### Does AR-02-10 cover CR-300 or CR-301? No.
+### Negative controls on the earlier fixes (scratch copy of HEAD, each edit reverted after)
 
-AR-02-10's text, in 02-SECURITY.md, threat ref T-02-52: "A hostile pre-push hook can already push anything
-to the same remote with the user's credentials, so this gives it no new capability; `push --no-verify` would
-disable every user's pre-push hooks. Reproduced on git 2.56.0 at plan time. The 02-08 prohibition carries
-this as its explicit exception".
+| Fix removed | Tests run | Result |
+|-------------|-----------|--------|
+| Push source back to `{commit}:refs/heads/` (CR-300) | `named_after_the_commit`, `behind_shadow_ref` | 18 failed, 2 passed (the `refs/<id>` pair, which never shadowed) |
+| Head check always passes (CR-301) | `tracking_ref_moved` | 10 of 10 failed |
+| Empty-status check removed (WR-300) | `assume_unchanged_set` | 4 of 4 failed |
+| confirm_published always Ok (WR-301 family) | `hook_written_origin_pushurl`, `push_instead_of` | 4 failed; the 2 pushurl tests pass, as expected, because the push no longer reads `origin` |
+| Raw parent text back in the continuity refusal (WR-302) | `parent_line` | 4 of 4 failed |
 
-T-02-52's channel in that file: "a pre-push hook writing a grafts file during `git push`, after the gate".
-CR-300 is a post-commit hook creating a ref. CR-301 is a post-checkout hook moving a tracking ref. Neither is
-a pre-push hook and neither writes grafts, so the acceptance does not reach them. 02-CONTEXT.md records no
-hook decision; its only hook mention is deferred template work.
-
-02-14's prohibition also removes the exception: "With plans 02-13 and 02-14 the T-02-52 exception for a grafts
-file written by a pre-push hook is removed, because both tests above hold". Its scope sentence puts these two
-findings in scope: "this rule is about what UDE's own push sends. A hostile hook can still run its own `git
-push`". CR-300 and CR-301 are UDE's own push.
-
-AR-02-10's *reasoning* does extend to them, as the review says. Applying it would be a new operator decision
-narrowing what the gate promises, not something already decided.
-
-The hand edit (T-02-52 to `mitigate` naming T-02-62, AR-02-10 superseded) is still owed. 02-15-PLAN makes it
-conditional on re-verification passing, so it waits. On grafts alone the evidence supports it.
+Unmodified, the same filters: 47 passed; token cases 12 passed; e2e `test_cli_` 29 passed.
 
 ### Roadmap Success Criteria
 
 | # | Truth | Status | Evidence |
 |---|-------|--------|----------|
-| SC1 | High-entropy strings and raw Base64 tokens without prefixes flagged before staging | VERIFIED | CLI, no hook: refused `high-entropy at line 26`, exit 1, remote unchanged. Named tests in the full suite. `git diff --stat 07ff152 HEAD -- src tests docs` lists no sanitizer file |
-| SC2 | Outbound commit inspection catches gitleaks categories across committed blobs and rolls back | **FAILED** | CR-300, CR-301: token shape on the remote, Ok, no rollback. Holds for commits the gate inspects (`GitHub Personal Access Token at line 26` with no hook) |
-| SC3 | Path parameterization matches only full word and punctuation boundaries | VERIFIED | Regression: full suite; sanitizer unchanged since 07ff152 |
-| SC4 | Templated tokens substitute back cleanly on initialization | VERIFIED | Regression: full suite; template code unchanged since 07ff152. CLI control: a consumer's pull exits 0 with no token, which does not itself prove the round trip |
+| SC1 | High-entropy strings and raw Base64 tokens flagged before staging | VERIFIED | `git diff --quiet b8c54e9 HEAD -- src/sanitizer src/template` exit 0 (control: same over src/sync exit 1); full suite green (orchestrator's run) |
+| SC2 | Outbound commit inspection catches gitleaks categories across committed blobs, rolls back | VERIFIED | Token behind shadow ref, on moved tracking ref, in duplicate entry, hidden in index: refused or absent from the remote, both modes, with delivering controls; gitleaks-only category and hook-injected secret rollback tests pass. CR-400 publishes no blob; its tree variant fails closed (probed) |
+| SC3 | Path parameterization on word and punctuation boundaries only | VERIFIED | Regression only: code unchanged since b8c54e9 |
+| SC4 | Templated tokens substitute back on initialization | VERIFIED | Regression only: code unchanged since b8c54e9 |
 
 ### Plan must-have groups
 
-| Plan | Truths (summary) | Status | Evidence |
-|------|------------------|--------|----------|
-| 02-01..02-10 | As in the previous report | VERIFIED (10) | Regression: full suite passes; their code outside src/sync/mod.rs and src/process.rs unchanged since 07ff152 |
-| 02-11 | Bound to the fetched head; raw reads; validated id pushed; no tags | **FAILED** | "every blob the push adds is allowlist-checked, secret-scanned and compared" is false under CR-300, CR-301. "Validated id pushed" is true of the refspec's text and false of what git sends |
-| 02-12 | Message bound; header scanned; empty directories refused; raw reads; grafts refused at the gate; graphs and bitmaps disabled | VERIFIED as written | About the gate's reads and push options; named tests pass. Its prohibition on commit text fails, see below |
-| 02-13 | Staged-tree binding; blobs by id; repeated-path, component and held-content checks; name-free refusals; legitimate states publish | **FAILED** | Gate behaviour holds: HEAD-moving hook refused in both modes for duplicate, delete, revert, `.`; benign amend publishes; code read at :2445-2491, :2521-2567. False: gap-1 "no blob reaches the remote unread", gap-4 "a push returning Ok means every validated path holds its recorded content" |
-| 02-14 | Both pushes use the null grafts file; narrow carve-out; hint off; upstream blamed only when ls-remote disagrees | VERIFIED | Code read: process.rs:135-144, `.run_push` at both pushes. test_direct and test_pr `_sends_no_object_from_pre_push_grafts` and `_from_grafts_written_during_push`, each with a delivering negative control read in `assert_no_injected_blob_with_control`. CLI shim tests pass in both modes |
-| 02-15 | Controls, mutation, gates, hermeticity, no production change, trigger for hand edits | VERIFIED | Stored results read, not re-run: 23 rows `same` in target/controls-02-15.tsv; outcomes.json 96 total, 83 caught, 0 missed, 0 timeout, 13 unviable; no .cargo/mutants.toml. Gates re-run below |
+| Plan | Status | Evidence |
+|------|--------|----------|
+| 02-01..02-10 | VERIFIED (10) | Regression; sanitizer and template code unchanged |
+| 02-11, 02-12 | VERIFIED (2) | Were FAILED via CR-300; shadow-ref rows now pass with controls |
+| 02-13 | **FAILED** | Gate behaviour holds, and CR-300 no longer bypasses it. Gap-4 clause "a push returning Ok means every validated path holds its recorded content" fails under CR-400 (committed route) |
+| 02-14, 02-15 | VERIFIED (2) | Unchanged code paths; tests pass |
+| 02-16 | VERIFIED | Source `{commit}^{{commit}}` with `--no-replace-objects` at mod.rs:2195-2210, 2349-2365; resolve_commit past replace refs (2415); 25 DEF-01 tests; control above |
+| 02-17 | VERIFIED | ensure_remote_repo_for_push (1133-1163), remote_head exact refname (1168-1188); 29 DEF-06 tests; control above. WR-400 is a warning outside the truth's wording |
+| 02-18 | VERIFIED | Push to `target.remote_url`, confirm_published (1195-1209) at 2227 and 2396; control above |
+| 02-19 | **FAILED** | WR-300 and WR-302 closed (controls above). Truth "Ok here means the remote's head held the content when read" fails under CR-400 (empty-status route) |
+| 02-20 | VERIFIED | DEF rows byte-identical in plan and doc (15); NOT rows identical once the Record column is dropped (control: one changed byte gives a diff); 214 distinct DEF test names, each defined exactly once (control: an invented name counts 0); 02-CONTEXT.md and plans 02-01..02-15 unchanged since b8c54e9 |
+| 02-21 | VERIFIED | Stored results read: controls-02-21.tsv 35 `same`, 11 `corrected`, 46 rows; outcomes.json 122 mutants, 103 caught, 0 missed, 19 unviable; missed.txt empty; no .cargo/mutants.toml. Code before `mod tests {` unchanged since 5ce1bee (first changed line 14514, tests start 3398). Gates re-run here, below |
 
 ### Prohibitions
 
 | Plan | Prohibition | Status | Evidence |
 |------|-------------|--------|----------|
-| 02-01..02-10, except the row below (18) | As in the previous report | VERIFIED | Regression: full suite |
-| 02-08, restated by 02-12, 02-13, 02-14 | Never publish a blob differing from the validated bytes | **FAILED** | CR-300, CR-301 |
-| 02-11 | Never publish a commit reachable from the published ref carrying a differing blob | **FAILED** | CR-300 tip; CR-301 base |
-| 02-11 | Never push a commit other than the validated one | **FAILED** (was VERIFIED) | CR-300 |
-| 02-11 | Never read committed objects through replacement refs | VERIFIED | Named tests; `--no-replace-objects` at each read |
-| 02-11 | No ref beyond the refspec's branch update | VERIFIED | Named tests; `--no-follow-tags` at both pushes. A shadow tag is a local ref and did not itself publish |
-| 02-11 | Never refuse only because a hook ran | VERIFIED | Benign controls here: kept amend, no-op hooks |
-| 02-12 | Never publish hook-written commit text | **FAILED** (was VERIFIED) | CR-300 with the plan's amend: remote message holds INJECTED_BY_HOOK, Ok |
-| 02-12 | Never refuse because a hook ran or git maintains the object store | VERIFIED | Named tests |
-| 02-13 | Never report success when the commit lacks validated content | **FAILED** | WR-300, WR-301; CR-300 with delete or revert |
-| 02-13 | Never publish a tree another machine cannot clone or read unambiguously | **FAILED** | CR-300 with a duplicate tree (direct, PR) and a `.` tree (`git clone` exit 128) |
-| 02-13 | Never refuse only because a hook ran | VERIFIED | Benign controls |
-| 02-13 | Never print a name or line a hook chose in the gate's refusals | **FAILED** (partial) | WR-302 |
-| 02-14 | Inherited GIT_GRAFT_FILE never reaches git; only the pushes get the null device | VERIFIED | test_cli_direct and test_cli_pr `_push_alone_gets_the_null_grafts_file` pass |
-| 02-14 | Never refuse only because a hook ran | VERIFIED | Named tests |
-| 02-15 | Control rows recorded honestly | VERIFIED | The stored tsv, 23 `same`, 0 `corrected`; not re-run |
-| 02-15 | No missed mutant killed by exclusion | VERIFIED | No .cargo/mutants.toml; 0 missed |
+| 02-01..02-10 (18) | As before | VERIFIED | Regression |
+| 02-08 as scoped by 02-20 | No blob differing from the validated bytes, through UDE's push and a DEF channel | VERIFIED | Was FAILED; CR-300/301 closed. CR-400 sends no blob |
+| 02-11 (5) | Validated commit only; no reachable differing blob; raw reads; no extra ref; no refusal for a hook alone | VERIFIED | Shadow-ref and tracking-ref rows; benign-hook rows |
+| 02-12 (2) | No hook-written commit text; no refusal for hooks or maintenance | VERIFIED | Amended message behind shadow ref, both modes |
+| 02-13 | Never report success when the commit lacks validated content | **FAILED** | CR-400 committed route |
+| 02-13 | No unclonable or ambiguous tree | VERIFIED | Duplicate and `.` trees behind shadow ref, both modes |
+| 02-13 | No hook-chosen name or line in refusals | VERIFIED | Was partial; parent-line rows and CLI zero-ESC rows |
+| 02-13 | No refusal for a hook alone | VERIFIED | Benign rows |
+| 02-14 (2), 02-15 (2) | As before | VERIFIED | Unchanged |
+| 02-16 (2) | No other commit or ref-built tree; hooks keep running | VERIFIED | DEF-01 rows; benign pre-push rows |
+| 02-17 (2) | Base never from the checkout; no refusal for a hook alone | VERIFIED | DEF-06 rows; benign post-checkout rows |
+| 02-18 (2) | No Ok unless the URL reports the ref at the commit; hooks still run | VERIFIED | DEF-13 rows. CR-400's committed route does put the ref at the commit, so this rule holds there |
+| 02-19 | No Ok on empty status unless the remote's head holds the record | **FAILED** | CR-400 empty-status route |
+| 02-19 (2) | No hook bytes in committed-gate refusals; legitimate no-change still Ok | VERIFIED | Parent-line rows; `_publishes_nothing_when_content_is_held` rows |
+| 02-20 (3) | No blob differing from validated; no row on reasoning alone; plans 01-15 unedited | VERIFIED | As above |
+| 02-21 (2) | Control rows honest; no mutant killed by exclusion | VERIFIED | Stored tsv; no mutants.toml |
 
-All are test-tier, wired to tests. The seven FAILED rows have tests that pass and are contradicted by the
-probes. Two rows graded VERIFIED last time are FAILED now on new evidence, not a code regression.
+All test-tier and wired to tests. The two FAILED rows have passing tests, and the probes here contradict
+them through a channel no test covers.
 
 ### Derived in the previous report, re-checked
 
 | Truth | Status | Evidence |
 |-------|--------|----------|
-| A push that returns Ok has published the validated content | **FAILED** | WR-300, WR-301, CR-300 with delete or revert. The original delete and revert route is closed |
-| A hook cannot add an unbound name to the published tree | **FAILED** | CR-301 `templates/leak.txt`; CR-300. The original `.` route is closed |
+| A push that returns Ok has published the validated content | **FAILED** | WR-300, WR-301 routes closed; CR-400 re-opens it |
+| A hook cannot add an unbound name to the published tree | VERIFIED | CR-301 rows assert templates/leak.txt absent; forged base tree with a hidden name fails closed (probed) |
 
-**Score:** 43/55 truths verified (SC 3/4; plan groups 13/15; prohibitions 27/34; derived 0/2). 0 present but
-behavior-unverified.
+**Score:** 70/75 (SC 4/4; plan groups 19/21; prohibitions 46/48; derived 1/2). 0 present but behaviour-unverified.
 
 ### Deferred Items
 
-None. Phases 3 (doctor, CLI) and 4 (templates, manifests) do not cover the push path.
+None. Phases 3 and 4 do not cover the push path.
 
 ### Advisory (New Scope, Unevidenced)
 
-None. Every finding here has a reproduced run, and src/sync/mod.rs changed since the previous report.
+None. CR-400 and WR-400 were reproduced here; IN-400 to IN-403 are recorded as info or warning, not blockers.
 
 ### Required Artifacts
 
-| Artifact | Status | Details |
-|----------|--------|---------|
-| 02-13: `StagedPublication`, `record_staged_tree`, `raw_commit_tree`, `raw_diff_entries`, `read_blob_by_id`, `tree_listing_blobs`, hidden-blob test | VERIFIED | `verify.artifacts` 7/7, exit 0; read and exercised |
-| 02-14: `run_bounded_ignoring_grafts`, `run_push`, hint option, tests, `remote_branch_is_at` | VERIFIED | `verify.artifacts` 6/6, exit 0 |
-| 02-15: SUMMARY, hand-edits todo, third | VERIFIED | `verify.artifacts` 3/3, exit 0 |
+| Plan | `verify.artifacts` | `verify.key-links` |
+|------|--------------------|--------------------|
+| 02-16 | 3/3, exit 0 | 1/1, exit 0 |
+| 02-17 | 4/4, exit 0 | 2/2, exit 0 |
+| 02-18 | 3/3, exit 0 | 2/2, exit 0 |
+| 02-19 | 3/3, exit 0 | 1/1, exit 0 |
+| 02-20 | 2/2, exit 0 | 1/1, exit 0 |
+| 02-21 | 2/2, exit 0 | 1/1, exit 0 |
 
 ### Key Link Verification
 
-`verify.key-links`: 4/4, 4/4, 3/3. Patterns also counted by hand with `rg`.
-
 | From | To | Status | Details |
 |------|----|--------|---------|
-| stage_publication | record_staged_tree | WIRED | 1 site |
-| validate_committed_tree | raw_commit_tree, read_blob_by_id, tree_listing_blobs | WIRED | 1 site each |
-| push_direct | remote_branch_is_at | WIRED | 1 site |
-| run_push | process::run_bounded_ignoring_grafts | WIRED | 1 site |
-| both pushes | run_push | WIRED | 2 sites |
-| run_bounded_ignoring_grafts | `GIT_GRAFT_FILE` = NULL_DEVICE | WIRED | 1 site |
-| **refspec source** | **the validated commit** | **BROKEN** | Not a plan key link. Text names the id; git resolves it against local refs first (CR-300) |
-| **fetched head** | **the remote's head** | **NOT WIRED** | Not a plan key link. Nothing compares them (CR-301) |
+| refspec source | the validated commit | WIRED | Was BROKEN; `^{commit}` plus `--no-replace-objects`; control fails 18 tests |
+| fetched head | the remote's head (id) | WIRED | Was NOT WIRED; control fails 10 tests |
+| push destination | caller's URL, read back from `/` | WIRED | confirm_published at both pushes |
+| empty status | require_fetched_head_holds | WIRED | Both early returns (1936, 1941) |
+| **stored blob bytes** | **the blob id** | **NOT WIRED** | Not a plan key link. Nothing checks that bytes read by id hash to that id (CR-400) |
 
 ### Data-Flow Trace (Level 4)
 
-Not applicable: no rendered dynamic data. The equivalent trace, the bytes from the gate to the remote, is the
-ruling table above.
+Not applicable: no rendered dynamic data. The bytes-to-remote trace is the ruling tables above.
 
 ### Behavioral Spot-Checks
 
-Scratch copy of HEAD, git 2.56.0, local bare remotes, probe tests added to `mod tests` and
-`tests/e2e_lifecycle.rs`. Every case records that its hook ran. The token is built at runtime in the hook and
-is not reproduced in this report.
+Scratch `git archive` copy of HEAD (5064edc; code at 8570971), own target dir, git 2.56.0, local bare remotes,
+probe tests added to `mod tests`. Fake token built at runtime; not reproduced here.
 
-| Case | Mode | Result | Injected blob on remote |
-|------|------|--------|-------------------------|
-| Scanner on the probe token (control) | n/a | flagged | n/a |
-| Injected commit, no shadow ref (control) | direct, PR | Ok | no |
-| Injected commit, HEAD moved to it (control) | direct | refused, continuity | no |
-| Injected commit, `refs/tags/<id>` | direct, PR | **Ok** | **yes** |
-| Same, `refs/heads/<id>` | direct, PR | **Ok** | **yes** |
-| Same, `refs/remotes/<id>` | direct | **Ok** | **yes** |
-| Same, `refs/<id>` | direct | Ok | no |
-| Post-checkout hook moves no ref (control) | direct, PR | Ok; fetched = real | no |
-| Post-checkout hook moves origin/main | direct, PR | **Ok**; fetched differs | **yes**, plus `templates/leak.txt` |
-| Duplicate tree, HEAD moved | direct, PR | refused, `differs from the validated content` | no |
-| Delete, revert, HEAD moved | direct, PR | refused, `does not hold the validated content` | n/a |
-| `.` tree, HEAD moved | direct, PR | refused, path component | n/a |
-| Kept-content amend (control) | direct | Ok | n/a |
-| Duplicate tree through the shadow tag | direct, PR | **Ok** | **yes** |
-| `.` tree through the shadow tag | direct | **Ok**; `git clone` exit 128 | n/a |
-| Delete through the shadow tag | direct | **Ok**; published tree empty | n/a |
-| Revert through the shadow tag | direct | **Ok**; old blob published | n/a |
-| Amended message through the shadow tag | direct | **Ok**; INJECTED_BY_HOOK in the message | n/a |
-| assume-unchanged set during ensure | direct, PR | **`Ok("No changes...")`**, remote at seed | n/a |
-| Same hook without the flag (control) | direct | Ok, remote moved | n/a |
-| assume-unchanged set after ensure | direct, PR | refused, `git commit failed` | n/a |
-| Hook-written pushurl | direct, PR | **Ok**; origin at fetched, other repository holds it | n/a |
-| No pushurl (control) | direct | Ok; origin moved, other empty | n/a |
-| Parent line with ESC, and with a token shape | direct, PR (ESC), direct (token) | refused, **bytes printed raw** | no |
-| Exec bit set before the id is recorded (T-02-60, not a gap) | direct | Ok, published mode 100755 | n/a |
+| Case | Mode | Result | Remote |
+|------|------|--------|--------|
+| Empty status, seed blob forged to validated bytes | direct, PR | **Ok("No changes...")** | 0 heads hold the record, no head moved |
+| Same, no forgery (control) | direct, PR | refused, empty-status `does not hold the validated content` | unchanged |
+| Committed, unchanged recorded path forged | direct, PR | **Ok** | main (and sync branch) hold the seed at gitconfig.repo |
+| Same, no forgery (control) | direct, PR | refused, `does not hold the validated content` | unchanged |
+| Forged base tree hiding a token blob | direct, PR | refused, `git status` exit 128, `hash mismatch` | token blob absent |
+| Same, no forgery (control) | direct | Ok, normal publish | token blob absent |
+| WR-400: `../x` from a second directory | engine | refused twice, hook named as cause | n/a |
 
-`ude sync push`, direct unless noted:
-
-| Case | Exit | Ancestor state | Remote | Consumer's pull |
-|------|------|----------------|--------|-----------------|
-| No hook, token line | 1 | n/a | unchanged | n/a |
-| No hook, high-entropy line | 1 | n/a | unchanged | n/a |
-| No hook, benign line (control) | 0 | n/a | moved | n/a |
-| Post-commit hook, no shadow ref (control) | 0 | changed | no token | no token |
-| Post-commit hook, shadow tag | 0 | changed | **token** | **token in mise.toml** |
-| Same, `--pr` | 0 | unchanged | **token on the sync branch** | not run |
-| Post-checkout hook, cached path; same with `--pr` | 0, 0 | changed; unchanged | **token** both | not run |
-| Post-checkout hook, clone path | 0 | changed | **token** | not run |
-| assume-unchanged hook | 0 | **changed** | at seed, no edit | not run |
-| No-op index hook (control) | 0 | changed | moved | not run |
-| pushurl hook | 0 | **changed** | commit in the other repository | not run |
-| Parent-line hook | 2 | unchanged | unchanged; raw ESC on stderr | n/a |
-
-Gates, one run each in a clean scratch copy of HEAD (952c889), sources touched so everything rebuilt, no probes present:
-
-| Gate | Result |
-|------|--------|
-| `cargo fmt --check` | exit 0 |
-| `cargo clippy --workspace --all-targets -- -D warnings` | exit 0 |
-| `cargo test` | exit 0; 333 unit passed, 1 ignored; 90 e2e passed |
-| `cargo deny check advisories bans sources` | exit 0 |
-| `cargo machete` | exit 0 |
-| Decoy GIT_DIR, `cargo test --bin ude sync::` | exit 0, 252 passed; decoy 0 objects, 0 refs |
-
-Not re-run here: the 23 controls (0 `corrected` rows, so 02-15's rule requires none) and the mutation run. Stored results read.
+Gates, run once each in the repository: `cargo fmt --check` exit 0; `cargo clippy --workspace --all-targets
+-- -D warnings` exit 0; `cargo machete` exit 0; `cargo deny check advisories bans sources` exit 0. Full
+`cargo test` not re-run by me: the orchestrator's run at this code (417 unit, 1 ignored; 114 e2e) is cited,
+plus my filtered runs above. Cargo.toml and Cargo.lock unchanged since b8c54e9.
 
 ### Probe Execution
 
-No `scripts/*/tests/probe-*.sh` is tracked or declared by plans 02-13 to 02-15. Step 7c: not applicable.
+No `scripts/*/tests/probe-*.sh` is tracked or declared by plans 02-16 to 02-21. Step 7c: not applicable.
 
 ### Requirements Coverage
 
-REQUIREMENTS.md's checkboxes and status table were not counted as evidence.
-
 | Requirement | Source Plans | Status | Evidence |
 |-------------|--------------|--------|----------|
-| SEC-01 entropy and raw Base64 | 02-03, 02-04, 02-06 | SATISFIED | SC1 |
-| SEC-02 gitleaks categories before staging | 02-01, 02-05, 02-06, 02-13, 02-14, 02-15 | PARTIAL | The requirement's text holds before staging: the token is refused with no hook. Plans 02-13 to 02-15 also file SC2's committed-blob truth here, and that fails |
-| SEC-03 strict boundaries | 02-07, 02-09 | SATISFIED | SC3 |
-| SEC-04 placeholder reversibility | 02-02, 02-07 to 02-15 | PARTIAL | SC4 satisfied; the binding prohibitions filed under SEC-04 fail |
+| SEC-01 entropy and raw Base64 | 02-03, 02-04, 02-06, carried by 02-21 | SATISFIED | SC1 |
+| SEC-02 gitleaks categories before staging | 02-01, 02-05, 02-06, 02-13..02-21 | SATISFIED | SC2; no token reached a remote on any route tried |
+| SEC-03 strict boundaries | 02-07, 02-09, carried by 02-21 | SATISFIED | SC3 |
+| SEC-04 placeholder reversibility | 02-02, 02-07..02-21 | PARTIAL | SC4 satisfied; the two Ok-meaning prohibitions filed under SEC-04 fail (CR-400) |
 
-All four IDs are claimed by plans and exist in REQUIREMENTS.md; none is orphaned. The file does not match this
-report: it marks SEC-02 and SEC-04 Complete and SEC-01 and SEC-03 Gaps Found. Not edited here.
-
-### Decision Coverage
-
-`check.decision-coverage-verify`, exit 0: 5 of 5 trackable CONTEXT.md decisions honored. A substring heuristic;
-it says nothing about the gaps.
-
-### Test Quality Audit
-
-| Test File | Linked Req | Skipped | Circular | Assertion Level | Verdict |
-|-----------|-----------|---------|----------|-----------------|---------|
-| src/sync/mod.rs `mod tests` | SEC-02, SEC-04 | 0 | no | Behavioural: real push to a bare remote, object presence checked | Sound for what each names; no test has a ref named after the id or a hook during `ensure_remote_repo` |
-| tests/e2e_lifecycle.rs | SEC-02, SEC-04 | 0 | no | Behavioural, CLI | Same |
-| src/sanitizer/gitleaks.rs | SEC-02 | 1 `#[ignore]`, writes the parity corpus, not a requirement's only test | no | Value | Not a gap |
-
-Disabled tests on requirements: 0. Circular patterns: 0. Insufficient assertions: 0.
+All four IDs are claimed by plans and exist in REQUIREMENTS.md; none orphaned. REQUIREMENTS.md does not match:
+it marks SEC-01 and SEC-03 unchecked and "Gaps Found", SEC-02 and SEC-04 "Complete". Not edited here.
 
 ### Anti-Patterns Found
 
-No `TBD`, `FIXME`, `XXX`, `TODO`, `HACK`, `todo!` or `unimplemented!` in src/sync/mod.rs or src/process.rs (negative
-control: a planted `FIXME` line counts 1).
+No `TBD`, `FIXME`, `XXX`, `TODO`, `HACK`, `todo!` or `unimplemented!` in src/sync/mod.rs, src/main.rs,
+src/process.rs, tests/e2e_lifecycle.rs or docs/ARCHITECTURE.md (control: a planted `FIXME` line counts 1).
 
 | File | Line | Pattern | Severity | Impact |
 |------|------|---------|----------|--------|
-| src/sync/mod.rs | 2112 | Doc: "never a ref a hook can move" | Blocker, with gap 1 | False: CR-300 |
-| src/sync/mod.rs | 2035 | Comment: "The validated id, never the branch name" | Warning | True of the text, misleading about what goes out |
-| src/sync/mod.rs | 2437-2438 | Comment: refusals never print a listed name | Info | True as worded; the parent refusal is outside it, WR-302 |
-| 02-13-PLAN.md | objective | "whatever ran in the cache checkout" | Warning | The plan's purpose overstates what the gate delivers |
+| src/sync/mod.rs | 2794-2795 | Doc: "Ok here means the remote's head held the content when read" | Blocker, with gap 2 | False under CR-400 |
+| src/sync/mod.rs | 2752-2754 | Doc: "a push returning Ok has published it" | Blocker, with gap 1 | False under CR-400 |
+| docs/ARCHITECTURE.md | DEF-02 | "Every gate read ... past replace refs" | Warning | Staged gate's reads do not (IN-401) |
+| src/sync/mod.rs | 1157-1161 | Refusal blames a hook | Warning | Wrong cause for WR-400, reproduced |
 
 ### Human Verification Required
 
-None. What is left is a fix or an operator decision, not a check a person must perform.
+None. What is left is a fix or an operator ruling, not a check a person must perform.
 
 ### Open operator items (not gaps)
 
-Each is recorded as "pending the operator, not accepted" in 02-15-PLAN `## Operator answers`. None is in
-02-SECURITY.md's register yet, since `/gsd-secure-phase` has not run since.
+Still recorded as "pending the operator, not accepted" in 02-15-PLAN `## Operator answers`: T-02-60, T-02-61,
+T-02-64, T-02-65, T-02-67. Not decided here. 02-SECURITY.md has not been updated since these plans, so its
+`threats_open` is stale. The hand edits in `.planning/todos/pending/2026-11-01-hand-edits-owed-for-phase-02-after-re-verification.md`
+stay conditional on re-verification passing, so they wait.
 
-- T-02-60: a file mode set before the tree id is recorded publishes. Reproduced: Ok, mode 100755, blob exact.
-- T-02-61: the binding refuses some legitimate-looking states. Not re-run.
-- T-02-64, T-02-65: replace refs, shallow, loose-object overwrite during the push. Not re-run.
-- T-02-67: `NUL` on Windows. Unreachable here.
+### Needs operator decision
+
+Whether CR-400 is a defect (fix) or outside the promise (widen NOT-10). Recommended: fix. It is small (one
+id check in read_blob_by_id, or comparing recorded blob ids), it makes the existing doc comments true, and it
+closes the false ancestor advance. If the operator instead rules it out of scope, record that by widening
+NOT-10 and add this override:
+
+```yaml
+overrides:
+  - must_have: "MUST NOT report success for a push whose validated content is not on the remote's head when status is empty"
+    reason: "A local object whose bytes do not match its id is outside the gate's promise (NOT-10 widened)"
+    accepted_by: "{operator}"
+    accepted_at: "{ISO timestamp}"
+  - must_have: "MUST NOT report success for a push whose commit lacks validated content"
+    reason: "Same ruling, committed route"
+    accepted_by: "{operator}"
+    accepted_at: "{ISO timestamp}"
+```
 
 ### Gaps Summary
 
-Six gaps, four causes.
-
-1. **The push source is not the validated commit (gaps 1, 2, 3, 4).** A local ref can stand in for the id.
-   This also re-opens every tree and blob route 02-13 closed, so it is the one to fix first. The review ran its
-   fix in a scratch copy; it was not re-run here.
-2. **The fetched head is read from a local ref (gaps 1, 2, 4).** The review's fix is unrun by anyone and leaves
-   global `url.*.insteadOf` open.
-3. **Ok does not depend on the remote (gap 5).** An early return skips the record check, and `origin` is
-   hook-writable.
-4. **A refusal prints hook-chosen bytes (gap 6).** A one-line fix.
-
-Decision for the operator on causes 1 and 2: fix them, or apply AR-02-10's reasoning and narrow what the gate
-promises, changing the doc comments and prohibitions with it. Fixing is recommended for cause 1: small, reviewed
-in scratch, and it restores what 02-13 built. Cause 2 costs a network read per push and has a known residual.
-An override is not suggested unless the operator chooses to narrow.
+One cause, two gaps. The gate decides "held" from bytes in the cache checkout's object store, and git does not
+check those bytes against the id when `cat-file blob` reads them. On the committed route this hits recorded
+paths the commit leaves unchanged; on the empty-status route it hits the fetched head. The fix is the same for
+both.
 
 ### What these checks do not establish
 
-- Local bare remotes, git 2.56.0, Linux. **No hosted remote, no https or ssh, no Windows: unreachable here.** A
-  host's secret scanning might refuse a `ghp_` token; a shape it does not know would pass, reasoned and not run.
-  A bare remote with `receive.fsckObjects=true` refused the duplicate tree last round; that does not bear on
-  CR-300 with a well-formed tree, or on CR-301.
-- CR-300 and CR-301 are deterministic in these runs, one to four runs per case. This says the route works here,
-  not what fraction of hostile hooks would use it.
-- The channels here are the ones tried, not a proven complete list. Reasoned and not run: a hook-written
-  `remote.origin.fetch`, a `reference-transaction` hook on the CR-301 route, repository-level
-  `url.*.pushInsteadOf`, a clean filter on these routes.
-- The free-running grafts race (5 of 60 last round) was not re-run. 02-14's tests force the order, which is
-  stronger for the channel and says nothing of rate.
-- No proposed fix was applied or tested in this run.
-- WR-300, WR-301, WR-302 CLI runs are direct only; PR for those is at engine level. Consumer pulls ran for CR-300
-  only.
-- Passing gates and stored mutation and control results show the gate's checks are load-bearing on what they
-  read. They do not show the push sends what was read.
+- CR-400 was driven by test steps, not an installed hook, and not through `ude sync push`. The data-loss chain
+  (the next pull taking the remote's old content over the user's edit) is reasoned, not run.
+- Only loose objects were forged. A packed object, commit objects and subtree-only forgeries were not tried. The
+  tree result (git refuses) is for a forged root tree on git 2.56.0; it does not prove every tree read
+  verifies.
+- Local bare remotes, git 2.56.0, Linux only. No hosted remote, https, ssh or Windows: unreachable here.
+- The negative controls show each earlier fix is load-bearing for its named tests; they do not show the list of
+  channels is complete. CR-400 is exactly a channel those tests cannot see.
+- The control table and mutation run were read from stored files, not re-run; 0 `corrected` rows were added
+  since, and the code before `mod tests {` is unchanged since they ran.
+- My count of distinct DEF test names is 214 (217 occurrences); the review says 215. Each of the 214 is defined
+  exactly once.
 
 ---
 
-_Verified: 2026-11-02T19:44:32Z_
+_Verified: 2026-11-04T07:09:47Z_
 _Verifier: Claude (gsd-verifier)_
