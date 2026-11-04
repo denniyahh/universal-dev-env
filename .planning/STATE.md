@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 02
 current_phase_name: Sanitizer, Boundaries & Security Hardening
 status: executing
-stopped_at: Completed 02-16-PLAN.md
-last_updated: "2026-11-04T02:13:57.885Z"
+stopped_at: Completed 02-17-PLAN.md
+last_updated: "2026-11-04T02:36:46.920Z"
 last_activity: 2026-11-03
 last_activity_desc: Phase 02 execution started
-state_head: c82f110f0dfdad2ef651a1f8a363e51dc2e42e63
+state_head: 50ed8eb663a71e3720ee2c3c7465e720f2325d80
 progress:
   total_phases: 4
   completed_phases: 1
   total_plans: 32
-  completed_plans: 27
+  completed_plans: 28
   percent: 25
 milestone: null
 ---
@@ -29,7 +29,7 @@ See: `.planning/PROJECT.md` (updated 2026-10-22)
 ## Current Position
 
 Phase: 02 (Sanitizer, Boundaries & Security Hardening) — EXECUTING
-Plan: 17 of 21
+Plan: 18 of 21
 Status: Ready to execute
 Last activity: 2026-11-03 — Phase 02 execution started
 
@@ -87,6 +87,7 @@ Progress: [███░░░░░░░] 25%
 | Phase 02 P14 | 12min | 3 tasks | 3 files |
 | Phase 02 P15 | 76 min | 3 tasks | 3 files |
 | Phase 02 P16 | 20 min | 3 tasks | 2 files |
+| Phase 02 P17 | 20 min | 3 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -166,6 +167,8 @@ Recent decisions affecting current work:
 - [Phase 02]: 02-15: a supplementary mutation pass covered require_validated_content, split_at_nul and spawn_prepared, which the plan's regex leaves out (20 caught, 0 missed, 2 unviable); it is extra evidence, not part of the plan's result
 - [Phase 02]: 02-16: push_direct and push_pr_branch send <id>^{commit} with --no-replace-objects first, and resolve_commit's rev-parse passes --no-replace-objects (reverses 02-11's choice to honour replace refs there); a ref or replace ref named after the validated commit no longer changes what is sent
 - [Phase 02]: 02-16: CliPushWorld (tests/e2e_lifecycle.rs) runs ude init through its own runner with the fixture HOME/XDG/gitconfig; init_rust_project's other callers keep the host HOME (IN-301 open); ude_with_env carries #[expect(dead_code)] until 02-17 uses it
+- [Phase 02]: 02-17: ude sync push opens its remote through ensure_remote_repo_for_push: git ls-remote from the filesystem root before the fetch, whole-string compare with the fetched head; a second read equal to the fetched head is UpstreamMoved (exit 1), anything else a fixed-text Failed (exit 2); status and pull keep ensure_remote_repo and run no ls-remote
+- [Phase 02]: 02-17: RemoteCache.remote_url is the caller's URL with an existing relative path made absolute (cache key unchanged); the origin-url and insteadOf controls deliver to the other repository until 02-18 moves the push to the caller's URL, and assert_redirect_refused's control must then be rewritten
 
 ### Pending Todos
 
@@ -210,6 +213,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-04T02:13:57.668Z
-Stopped at: Completed 02-16-PLAN.md
+Last session: 2026-11-04T02:36:46.564Z
+Stopped at: Completed 02-17-PLAN.md
 Resume file: None

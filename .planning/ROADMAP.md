@@ -71,7 +71,7 @@ Plans:
   3. Path parameterization matches only full word and punctuation boundaries (`\b`, path delimiters), preventing corruption of partial substring tokens.
   4. Sanitizer round-tripping verifies that templated tokens substitute back cleanly to local machine environments on initialization.
 
-**Plans**: 16/21 plans executed
+**Plans**: 17/21 plans executed
 
 Plans:
 **Wave 1**
@@ -117,7 +117,7 @@ Plans:
 - [x] 02-16: Both pushes name their source `<id>^{commit}` under `--no-replace-objects`, so no local ref or replace ref can stand in for the validated commit, in direct and PR mode, with hook tests for each ref namespace, a token and each rebuilt commit, and CLI rows (review CR-300; re-verification gaps 1, 2, 3, 4) (SEC-04, SEC-02).
 
 **Wave 14** *(gap closure; blocked on Wave 13 completion)*
-- [ ] 02-17: `ude sync push` takes the base from the remote: `git ls-remote` with the caller's URL from the filesystem root before the fetch, refused when the fetched head differs, `pull first` wording when the remote simply moved; every route on the operator's list has a test and a delivering control; global `url.*.insteadOf` stays an accepted residual (review CR-301; gaps 1, 2, 4) (SEC-04, SEC-02).
+- [x] 02-17: `ude sync push` takes the base from the remote: `git ls-remote` with the caller's URL from the filesystem root before the fetch, refused when the fetched head differs, `pull first` wording when the remote simply moved; every route on the operator's list has a test and a delivering control; global `url.*.insteadOf` stays an accepted residual (review CR-301; gaps 1, 2, 4) (SEC-04, SEC-02).
 
 **Wave 15** *(gap closure; blocked on Wave 14 completion)*
 - [ ] 02-18: Both pushes go to the caller's URL through `PublishTarget`, and Ok requires `git ls-remote` from outside the checkout to report the ref at the commit, so a hook-written pushurl or `url.*.pushInsteadOf` cannot produce Ok (review WR-301; gap 5) (SEC-04, SEC-02).
@@ -177,7 +177,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Sync Engine & State Hermeticity | 11/11 | Complete    | 2026-10-22 |
-| 2. Sanitizer, Boundaries & Security Hardening | 16/21 | In Progress | - |
+| 2. Sanitizer, Boundaries & Security Hardening | 17/21 | In Progress | - |
 | 3. Doctor & CLI Hardening | 0/4 | Not started | - |
 | 4. Templates, Archetypes & Manifest Decoupling | 0/3 | Not started | - |
 
