@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 02
 current_phase_name: Sanitizer, Boundaries & Security Hardening
 status: executing
-stopped_at: Completed 02-17-PLAN.md
-last_updated: "2026-11-04T02:36:46.920Z"
+stopped_at: Completed 02-18-PLAN.md
+last_updated: "2026-11-04T03:03:37.819Z"
 last_activity: 2026-11-03
 last_activity_desc: Phase 02 execution started
-state_head: 50ed8eb663a71e3720ee2c3c7465e720f2325d80
+state_head: 5c98fa961c6dbed681b08a39a47c3dae4b93b226
 progress:
   total_phases: 4
   completed_phases: 1
   total_plans: 32
-  completed_plans: 28
+  completed_plans: 29
   percent: 25
 milestone: null
 ---
@@ -29,7 +29,7 @@ See: `.planning/PROJECT.md` (updated 2026-10-22)
 ## Current Position
 
 Phase: 02 (Sanitizer, Boundaries & Security Hardening) — EXECUTING
-Plan: 18 of 21
+Plan: 19 of 21
 Status: Ready to execute
 Last activity: 2026-11-03 — Phase 02 execution started
 
@@ -88,6 +88,7 @@ Progress: [███░░░░░░░] 25%
 | Phase 02 P15 | 76 min | 3 tasks | 3 files |
 | Phase 02 P16 | 20 min | 3 tasks | 2 files |
 | Phase 02 P17 | 20 min | 3 tasks | 3 files |
+| Phase 02 P18 | 20 min | 3 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -169,6 +170,8 @@ Recent decisions affecting current work:
 - [Phase 02]: 02-16: CliPushWorld (tests/e2e_lifecycle.rs) runs ude init through its own runner with the fixture HOME/XDG/gitconfig; init_rust_project's other callers keep the host HOME (IN-301 open); ude_with_env carries #[expect(dead_code)] until 02-17 uses it
 - [Phase 02]: 02-17: ude sync push opens its remote through ensure_remote_repo_for_push: git ls-remote from the filesystem root before the fetch, whole-string compare with the fetched head; a second read equal to the fetched head is UpstreamMoved (exit 1), anything else a fixed-text Failed (exit 2); status and pull keep ensure_remote_repo and run no ls-remote
 - [Phase 02]: 02-17: RemoteCache.remote_url is the caller's URL with an existing relative path made absolute (cache key unchanged); the origin-url and insteadOf controls deliver to the other repository until 02-18 moves the push to the caller's URL, and assert_redirect_refused's control must then be rewritten
+- [Phase 02]: 02-18: both pushes go to -- <RemoteCache.remote_url>; Ok needs confirm_published (git ls-remote of the URL from /, whole ids); on a mismatch direct mode rolls back and PR mode removes the local sync branch before gh pr create, so no ancestor is recorded
+- [Phase 02]: 02-18: repository-level redirects that still apply to a URL push (pushInsteadOf, insteadOf, remote.<url>.pushurl) and global pushInsteadOf are refused by the read-back, with no key list; the redirected repository still receives the validated commit (T-02-80, accepted)
 
 ### Pending Todos
 
@@ -213,6 +216,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-04T02:36:46.564Z
-Stopped at: Completed 02-17-PLAN.md
+Last session: 2026-11-04T03:03:37.581Z
+Stopped at: Completed 02-18-PLAN.md
 Resume file: None

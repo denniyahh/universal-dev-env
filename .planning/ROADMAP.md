@@ -71,7 +71,7 @@ Plans:
   3. Path parameterization matches only full word and punctuation boundaries (`\b`, path delimiters), preventing corruption of partial substring tokens.
   4. Sanitizer round-tripping verifies that templated tokens substitute back cleanly to local machine environments on initialization.
 
-**Plans**: 17/21 plans executed
+**Plans**: 18/21 plans executed
 
 Plans:
 **Wave 1**
@@ -120,7 +120,7 @@ Plans:
 - [x] 02-17: `ude sync push` takes the base from the remote: `git ls-remote` with the caller's URL from the filesystem root before the fetch, refused when the fetched head differs, `pull first` wording when the remote simply moved; every route on the operator's list has a test and a delivering control; global `url.*.insteadOf` stays an accepted residual (review CR-301; gaps 1, 2, 4) (SEC-04, SEC-02).
 
 **Wave 15** *(gap closure; blocked on Wave 14 completion)*
-- [ ] 02-18: Both pushes go to the caller's URL through `PublishTarget`, and Ok requires `git ls-remote` from outside the checkout to report the ref at the commit, so a hook-written pushurl or `url.*.pushInsteadOf` cannot produce Ok (review WR-301; gap 5) (SEC-04, SEC-02).
+- [x] 02-18: Both pushes go to the caller's URL through `PublishTarget`, and Ok requires `git ls-remote` from outside the checkout to report the ref at the commit, so a hook-written pushurl or `url.*.pushInsteadOf` cannot produce Ok (review WR-301; gap 5) (SEC-04, SEC-02).
 
 **Wave 16** *(gap closure; blocked on Wave 15 completion)*
 - [ ] 02-19: Empty `git status` with a validated record requires the fetched head to hold that record and deleted paths to be gone, and the continuity refusal prints no hook-chosen bytes (review WR-300, WR-302; gaps 5, 6) (SEC-04, SEC-02).
@@ -177,7 +177,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Sync Engine & State Hermeticity | 11/11 | Complete    | 2026-10-22 |
-| 2. Sanitizer, Boundaries & Security Hardening | 17/21 | In Progress | - |
+| 2. Sanitizer, Boundaries & Security Hardening | 18/21 | In Progress | - |
 | 3. Doctor & CLI Hardening | 0/4 | Not started | - |
 | 4. Templates, Archetypes & Manifest Decoupling | 0/3 | Not started | - |
 
