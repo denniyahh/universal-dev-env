@@ -3,6 +3,14 @@ phase: 02
 review: 02-REVIEW.md
 titles: json
 findings:
+  - id: WR-600
+    severity: warning
+    disposition: open
+    title: "The verified tree walk has no size or time limit, and shared subtrees make its output grow exponentially"
+  - id: IN-600
+    severity: info
+    disposition: open
+    title: "New tests chain several scenarios, so the first failing assertion hides the rest"
   - id: WR-500
     severity: warning
     disposition: open
@@ -183,20 +191,22 @@ findings:
     severity: info
     disposition: open
     title: "The vendored rule pin is enforced only under `cargo test`, and line-ending conversion would break it"
-open: 43
-total: 45
-recorded: 2026-11-04T15:28:24.152Z
+open: 45
+total: 47
+recorded: 2026-11-04T20:00:57.953Z
 ---
 
 # Phase 02: Code Review Disposition
 
 | Finding | Severity | Disposition | Source |
 |---------|----------|-------------|--------|
-| WR-500 | warning | open | - |
-| WR-501 | warning | open | - |
-| WR-502 | warning | open | - |
-| IN-500 | info | open | - |
-| IN-501 | info | open | - |
+| WR-600 | warning | open | - |
+| IN-600 | info | open | - |
+| WR-500 | warning | open | - (not in the current review) |
+| WR-501 | warning | open | - (not in the current review) |
+| WR-502 | warning | open | - (not in the current review) |
+| IN-500 | info | open | - (not in the current review) |
+| IN-501 | info | open | - (not in the current review) |
 | CR-400 | critical | open | - (not in the current review) |
 | WR-400 | warning | open | - (not in the current review) |
 | IN-400 | info | open | - (not in the current review) |
