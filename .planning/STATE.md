@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 02
 current_phase_name: Sanitizer, Boundaries & Security Hardening
 status: executing
-stopped_at: Completed 02-15-PLAN.md
-last_updated: "2026-11-04T01:25:42.308Z"
-last_activity: 2026-11-02
+stopped_at: Completed 02-16-PLAN.md
+last_updated: "2026-11-04T02:13:57.885Z"
+last_activity: 2026-11-03
 last_activity_desc: Phase 02 execution started
-state_head: b8c54e9b0d3451f1c268877b9a525a16a8d793ce
+state_head: c82f110f0dfdad2ef651a1f8a363e51dc2e42e63
 progress:
   total_phases: 4
   completed_phases: 1
   total_plans: 32
-  completed_plans: 26
+  completed_plans: 27
   percent: 25
 milestone: null
 ---
@@ -28,10 +28,10 @@ See: `.planning/PROJECT.md` (updated 2026-10-22)
 
 ## Current Position
 
-Phase: 02 (Sanitizer, Boundaries & Security Hardening) — READY TO EXECUTE
-Plan: 15 of 15
+Phase: 02 (Sanitizer, Boundaries & Security Hardening) — EXECUTING
+Plan: 17 of 21
 Status: Ready to execute
-Last activity: 2026-11-02 — Phase 02 execution started
+Last activity: 2026-11-03 — Phase 02 execution started
 
 Progress: [███░░░░░░░] 25%
 
@@ -86,6 +86,7 @@ Progress: [███░░░░░░░] 25%
 | Phase 02 P13 | 22 min | 2 tasks | 1 files |
 | Phase 02 P14 | 12min | 3 tasks | 3 files |
 | Phase 02 P15 | 76 min | 3 tasks | 3 files |
+| Phase 02 P16 | 20 min | 3 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -163,6 +164,8 @@ Recent decisions affecting current work:
 - [Phase 02]: 02-14: push_direct returns Failed (exit 2) instead of UpstreamMoved when a non-fast-forward refusal comes with git ls-remote reporting the branch at the fetched commit; that read is hook-steerable, so only the wording of a refusal depends on it
 - [Phase 02]: 02-15: all 23 control rows came out same on the final gate code; the scoped mutation run missed one mutant in read_blob_by_id's type check because the plan's name list predates the tag tests, and a new test the filter selects killed it (83 caught, 0 missed, 13 unviable)
 - [Phase 02]: 02-15: a supplementary mutation pass covered require_validated_content, split_at_nul and spawn_prepared, which the plan's regex leaves out (20 caught, 0 missed, 2 unviable); it is extra evidence, not part of the plan's result
+- [Phase 02]: 02-16: push_direct and push_pr_branch send <id>^{commit} with --no-replace-objects first, and resolve_commit's rev-parse passes --no-replace-objects (reverses 02-11's choice to honour replace refs there); a ref or replace ref named after the validated commit no longer changes what is sent
+- [Phase 02]: 02-16: CliPushWorld (tests/e2e_lifecycle.rs) runs ude init through its own runner with the fixture HOME/XDG/gitconfig; init_rust_project's other callers keep the host HOME (IN-301 open); ude_with_env carries #[expect(dead_code)] until 02-17 uses it
 
 ### Pending Todos
 
@@ -207,6 +210,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-02T19:16:11.592Z
-Stopped at: Completed 02-15-PLAN.md
+Last session: 2026-11-04T02:13:57.668Z
+Stopped at: Completed 02-16-PLAN.md
 Resume file: None
