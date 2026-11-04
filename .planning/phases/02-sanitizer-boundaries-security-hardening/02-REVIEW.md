@@ -1,6 +1,6 @@
 ---
 phase: 02-sanitizer-boundaries-security-hardening
-reviewed: 2026-11-04T15:26:37Z
+reviewed: 2026-11-04T19:59:24Z
 depth: deep
 files_reviewed: 3
 files_reviewed_list:
@@ -9,15 +9,15 @@ files_reviewed_list:
   - src/sync/mod.rs
 findings:
   critical: 0
-  warning: 3
-  info: 2
-  total: 5
+  warning: 1
+  info: 1
+  total: 2
 status: issues_found
 ---
 
 # Phase 02: Code Review Report
 
-**Reviewed:** 2026-11-04T15:26:37Z
+**Reviewed:** 2026-11-04T19:59:24Z
 **Depth:** deep
 **Files Reviewed:** 3
 **Status:** issues_found
@@ -26,239 +26,202 @@ status: issues_found
 
 ## Summary
 
-Scope: `git diff 88bb986..05dc379` for the three files (plans 02-22 and 02-23). Call chains were
-traced into `process::spawn_prepared`, `prepare_command`, `stage_publication`,
-`validate_committed_tree`, `require_fetched_head_holds` and the push functions. `src/main.rs` and
-`tests/` did not change in this range.
+Scope: `git diff 805bf52..HEAD -- src docs`, which covers plans 02-24 to 02-26. `src/main.rs` and
+`tests/` did not change in this range. Call chains were traced through `validate_committed_tree`,
+`require_fetched_head_holds`, `stage_publication`, `read_verified_object`, `verified_tree_listing`,
+`push_tree_entries`, `parse_tree_object`, `listing_diff`, `raw_diff_entries`, `tree_listing_blobs`,
+`count_empty_directories`, `first_path_not_held` and `process::spawn_prepared`.
 
-**No critical finding.** CR-400 is closed for the case it described: an object file changed
-before the gate reads it. Blobs and the trees above recorded or deleted paths are now hashed
-against their ids on both routes, in direct and PR mode. All 20 new tests pass at HEAD.
+**No critical finding. I found no decision on the publication path that still comes from
+unhashed bytes.**
+- Both routes now read the commit, every tree and every blob they decide from through
+  `read_verified_object`. Each decision uses the same bytes that were hashed.
+- Production code no longer runs `git ls-tree` or `git diff-tree`.
+- The only git reads left that are not hashed are these:
+  - `rev-parse` of HEAD, a ref compared with the fetched head;
+  - `cat-file -t`, which the hash makes redundant, because the hash input carries the type;
+  - the staged gate's `git status`, `diff --cached`, `show` and `write-tree`. These are not
+    binding. The committed gate re-derives every one of their decisions from hashed bytes, and
+    the tree id is bound.
 
-**Three warnings:**
-- **WR-500.** The tree check hashes a second read of each tree. The listing that decides "held"
-  comes from the first read. A process left behind by a hook can swap the object file between the
-  two reads and get a false Ok. Reproduced at function level, with the timing simulated.
-- **WR-501.** The root-tree rows cited under DEF-12 cannot fail. They are refused at `git status`
-  before the gate runs. The same steps without the forgery are refused too.
-- **WR-502.** The new process test does not check the property it is named for. A mutant that
-  writes stdin without a thread passes it, and that mutant overruns its deadline.
+**One warning (WR-600).** A legitimate tree whose subtrees are shared builds a listing that grows
+exponentially from a few dozen objects. The new in-process walk has no size limit and no overall
+deadline. The `git ls-tree` and `git diff-tree` runs it replaced were each bounded by the 30 s
+local timeout (SYNC-03). This was reproduced at function level.
 
-**What argues against WR-500:** it needs a concurrent process, not just a hook. NOT-10 already
-leaves to the operator "a loose object file overwritten during the push, after the gate read it".
-If the operator reads that row as covering an overwrite between two gate reads, WR-500 becomes a
-NOT-10 wording question, not a defect.
+**What argues against WR-600:**
+- It is an availability problem. A push is never published wrongly: the gate fails closed when
+  it finishes.
+- The only practical trigger is a hook in the cache checkout, which can already exhaust the host
+  by itself.
+- The plan's threat T-02-102 places a growing tree in NOT-14's availability class.
 
-How it was tested: probe tests and mutants were run in a `git archive` copy of HEAD under the
-session scratchpad, with its own `TMPDIR` and target directory. That directory has been removed.
-`git status --porcelain` shows only the existing ` M .planning/state.json`, and
-`git config --local --list | wc -l` is 22. The full test suite was not run. Only git 2.56.0 and
-local-path remotes were used.
+The case T-02-102 did not consider is memory: a few dozen objects can drive gigabytes of memory
+in UDE itself, and its claim that "each read is bounded" does not bound the walk.
 
-### Prior findings: status at 05dc379
+**How it was tested:**
+- Probes ran in a `git archive` copy of HEAD under the session scratch directory, with its own
+  `TMPDIR` and target directory, as `#[ignore]` tests added to the copy only.
+- 8 hash-valid but odd trees, each listed by the gate and by `git ls-tree`:
+  - modes `0100644`, `1100644`, `0` and `000000100644`;
+  - a name containing `/`;
+  - unsorted entries, a repeated name, and the name `..`.
 
-- **CR-400 (local objects stood in for the remote's objects): fixed** for objects forged before
-  the gate reads them. `read_verified_object` (`src/sync/mod.rs:3001-3044`) hashes blobs and trees.
-  It covers blobs changed in the commit (`:2651`), recorded blobs and the trees above them on both
-  routes (`:2809-2835`, `:2842-2864`), and the trees above deleted paths on the empty-status route
-  (`:2961`). All 20 new tests were run and pass. A residual channel remains: an object swapped
-  between two gate reads (WR-500).
-- **WR-400 (relative remote path, cache key, wrong "hook" diagnosis): still open.** The code is
-  unchanged: the cache key at `src/sync/mod.rs:1042` and the message at `:1169`.
-- **IN-400 (`open_push_templates` returns an unused checkout path): still open.** `src/main.rs`
-  is unchanged (`:764`, `:919`, `:1042`, `:1615`).
-- **IN-401 (DEF-02 overstates the replace-ref coverage of the staged gate's reads): still open.**
-  The DEF-02 row and `stage_publication` (`:1926`, `:1982`, `:2027`, `:2089`) are unchanged.
-- **IN-402 ("not at the validated commit" is also used when the read-back failed): still open**
-  at `src/sync/mod.rs:1211-1219`.
-- **IN-403 (the empty-status deletion check passes silently for a staged path outside the
-  checkout): still open, now at `:2957`.** The new `verify_ancestor_trees` call at `:2961` gets the
-  same absolute path. It finds no named ancestors, so it checks nothing and stays silent. This
-  still cannot happen today (reasoned).
-- **IN-300 (failure paths leave a branch or commit behind): still open.** The PR push and direct
-  push failure paths are unchanged, and NOT-14 records them.
-- **IN-301 (the e2e helper runs `ude init` with the host's HOME): still open.**
-  `tests/e2e_lifecycle.rs` is unchanged.
+  The two listings were byte-identical in all 8 cases. Git 2.56.0 only.
+- A plain-git probe: `rev-parse --verify HEAD^{commit}` on a forged commit file fails with
+  `hash mismatch`, exit 128, and the honest control exits 0.
+- The full suite was not run. The 13 control rows and the mutation run of 02-26 were not re-run.
 
-### Every git read on the gate paths, classified
+### Prior findings: status at HEAD (ca5e4c9)
 
-On the **empty-status route** (`require_fetched_head_holds`):
-
-| Read | Location | What decides the result |
-|------|----------|-------------------------|
-| `rev-parse --verify HEAD^{commit}` | `:2890` via `resolve_commit` | A ref read compared with the fetched head that `ls-remote` confirmed. It is not object content. |
-| `ls-tree -r -t -z --full-tree <head>` | `:2899-2917` | git checks the commit and the root tree in this read. Probed: a forged root gives `error: hash mismatch` and exit 128. git does not check subtrees here. Probed: a forged subtree is walked with exit 0. The subtrees are checked separately, see the next row. |
-| subtree and blob reads (`cat-file -t`, `cat-file <kind>`, `hash-object`) | `read_verified_object` | Checked against the id. The bytes returned for a blob are the bytes that were hashed. For a tree, the listing came from a different read (WR-500). |
-
-On the **committed route** (`validate_committed_tree`):
-
-| Read | Location | What decides the result |
-|------|----------|-------------------------|
-| `cat-file commit <commit>` | `:2553` | Not hashed by UDE. The commit is new and is sent, so what the remote gets is this same local object. The later `diff-tree` and `ls-tree` reads make git check the commit. |
-| `diff-tree base commit`, two-argument form | `:2607-2618` | Reads the real tree, not the commit-graph's. Probed with a commit-graph whose tree id was patched: `git log -1 --format=%T` and the one-argument form `diff-tree <commit>` followed the forged graph and dropped an added file. The gate's two-argument form and `ls-tree` did not. The two-argument form is load-bearing; it should stay. The base-side subtrees it reads are not checked: that is the deferred DEF-09 class, below. |
-| `ls-tree -r -t -z --full-tree <commit>` | `:2696-2718` | Same as on the empty-status route. |
-| changed blobs and recorded blobs and trees | `read_verified_object` | Checked against the id. |
-
-In the **staged gate** (`stage_publication`):
-
-| Read | Location | What decides the result |
-|------|----------|-------------------------|
-| `git status`, `git diff --cached`, `git show :<path>`, `git write-tree` | `:1926`, `:1982`, `:2027`, `:2089` | Not checked against ids. They are not the binding check: the committed gate re-reads every changed blob by id, and the tree id is bound. |
-
-### The deferred DEF-09-class channel (not counted as a finding)
-
-This is a forged base-side tree that hides an added file from `diff --cached` and `diff-tree`.
-**The new code does not make it worse.** It only adds checks.
-
-It is **not reachable through UDE alone.** UDE writes objects only through git commands, and git
-hashes what it writes. With a hook writing object files, the channel is reasoned to be narrow, not
-run. To hide file F, the forged base tree must list F under the same blob id. The push's object
-walk reads that same forged tree and treats F's blob as already on the remote, so it does not send
-it. receive-pack's connectivity check then rejects the push unless the remote already holds that
-blob. So F can be published only with content the remote already has, at a path nothing validated.
+- **WR-500 (the listing came from an unchecked first read): fixed.**
+  - `verified_tree_listing` (`src/sync/mod.rs:3099-3127`) builds both routes' listings from
+    hashed tree bytes, the root included.
+  - The commit is read with `read_verified_object(..., "commit")` (`:2581`, `:2941`).
+  - The fetched head's trees on the committed route come through the same map (`:2709`).
+  - The six swap rows place the swap after the listing, through the `cfg(test)` seam. Moving the
+    seam call before the listing would turn them into "not held" refusals, so they would fail
+    (reasoned).
+- **WR-501 (root rows refused before the gate): fixed.**
+  `test_fetched_head_holds_refuses_root_tree_not_matching_its_id` calls the gate directly. Its
+  control (the same bytes under their own id) reads as held. The push rows now say what they
+  pin: git status, before the gate. DEF-12 says the same.
+- **WR-502 (stdin deadline untested): fixed** by
+  `test_run_bounded_with_input_times_out_when_the_child_neither_reads_nor_exits`
+  (`src/process.rs:510-536`). 02-26 row 12 records the mutant kill; I did not re-run it.
+- **IN-500 (a detached stdin writer can leak): still open.** `src/process.rs:191-196` is unchanged.
+- **IN-501 (a failed object read is reported as "not held"): still open, not taken.** It is now
+  at `src/sync/mod.rs:2898`.
+- **WR-400, IN-400, IN-401, IN-402, IN-300, IN-301: still open.** Their code and doc rows are
+  outside the diff.
+- **IN-403: still open.** The deletion check at `src/sync/mod.rs:3012-3022` still falls back to
+  the absolute staged path through `strip_prefix(repo).unwrap_or(staged)`.
 
 ### Checked and found sound
 
-- **Hash format.** Ids are compared in full against `hash-object` output. The test in a SHA-256
-  repository passes. An abbreviated id never matches; it returns `IdMismatch` and fails closed.
-  `ls-tree` prints full ids, so this case is not reachable today.
-- **`hash-object` flags.** `--literally` keeps `-t tree` to pure hashing. Without it, git would
-  run fsck checks. `--no-filters` is implied for `--stdin` without `--path`, so it is redundant
-  but harmless. No `-w` is passed, so the check writes nothing; a test confirms this. Exactly one
-  trailing LF is stripped.
-- **No secret values in the new refusals.** The new refusal texts are `OBJECT_ID_MISMATCH` plus a
-  path from the record, from the staged list, or one that passed the allowlist.
-- **No deadlock in the stdin helper.** stdout and stderr are drained on their own threads. stdin
-  is written on a detached thread. A broken pipe is ignored, because Rust ignores SIGPIPE.
-  Probed: with a 500 ms timeout and a child that neither reads nor exits, the call returns `Err`
-  after 0.51 s.
-- **Test hermeticity.** `GitFixture::cmd` (`:3650-3664`) removes the repository-local git
-  variables and sets `GIT_CONFIG_GLOBAL`, `GIT_CONFIG_NOSYSTEM` and `GIT_CEILING_DIRECTORIES`.
-  Every repository is a `TempDir`. No new test uses `std::env::set_var`. `forge_loose_object`
-  removes the target file before writing, so a hardlinked object in a bare remote is not changed.
-- **Assertions and controls.** The id-mismatch rows assert `ID_MISMATCH` and the absence of the
-  "not held" text, with controls that assert the opposite. There are no regex alternations. Every
-  test name added to DEF-11 and DEF-12 exists as exactly one `fn`. A made-up name used as a
-  negative control was reported missing.
-- **Refusal path with two recorded paths.** HashMap order does not decide which path the
-  `beside_added` rows name: the added path's trees are new and honest, so only `GATE_REL` can
-  fail.
-- **Cost.** There are three short git processes per verified object, and ancestor trees are
-  deduplicated within a call. For template-sized records this is not a real cost.
+- **No gap between the hash and its use.** Each of these is the exact `Vec` that was passed to
+  `hash-object`, or a slice parsed from it:
+  - `read_verified_object` returns the bytes it hashed (`:3078`, `:3087`);
+  - `push_tree_entries` parses the bytes it stored in `verified` (`:3149-3151`);
+  - the change loop and `first_path_not_held` scan and fingerprint the bytes that
+    `read_blob_by_id` returned.
+
+  A swap between `cat-file -t` and `cat-file <kind>` cannot pass, because the `-t tree`/`commit`
+  hash covers the type header. A tree cannot contain its own id, so the walk cannot loop.
+- **Tree decoder.** `parse_tree_object` matches git's `decode_tree_entry` and `canon_mode` on
+  every form probed: legacy and odd modes, mode 0 (treated as a gitlink), names containing `/`,
+  `..`, tab, newline or byte 0xFF, unsorted or repeated entries, and SHA-1 and SHA-256. The one
+  difference is documented and fails closed: a mode that overflows u32.
+- **`listing_diff` against `diff-tree -r --no-renames`.**
+  - Every commit record not matched exactly (mode and id) by an unmatched base record at its
+    path is listed, and every unconsumed base record becomes `D`.
+  - Type changes become `T`. Gitlinks are compared like blobs. Tree records are ignored, as with
+    `-r`.
+  - The result is never narrower than git's. On duplicate or unsorted base trees it is the more
+    conservative of the two.
+  - A `T` to a gitlink at an allowlisted path fails closed: `read_blob_by_id` reports Unreadable.
+- **Order of refusals.** The commit's listing is built before the fetched head's, and on the same
+  map, so a tree both commits hold is read once.
+- **Refusal text.** `first_path_under` names only recorded, staged or allowlisted paths, and the
+  change loop prints only paths that passed the allowlist (DEF-14).
+- **Empty-status route, commit id check (`:2944-2948`).** git's own check in `rev-parse ^{commit}`
+  shadows it for a commit file forged before the gate (probed above). It still covers a swap
+  between `rev-parse` and `cat-file`, so it is not dead code.
+- **process.rs.** The new test uses a child that neither reads nor exits, 4 MiB of input and a
+  0.5 s limit. It asserts `Err` with the label, the limit and an elapsed bound. On timeout the
+  writer gets EPIPE after the group kill, so the test leaks nothing.
+- **Docs.** The DEF-09, DEF-11 and DEF-12 rows match the code. No NOT row changed. NOT-10 still
+  covers an overwrite after the gate's last read, during the push.
 
 ## Warnings
 
-### WR-500: The tree check hashes a second read; the listing that decides "held" comes from the first
+### WR-600: The verified tree walk has no size or time limit, and shared subtrees make its output grow exponentially
 
-**File:** `src/sync/mod.rs:2809-2835` (`first_path_not_held`), `src/sync/mod.rs:2842-2864` (`verify_ancestor_trees`), `src/sync/mod.rs:2899-2952` (listing and the deletion check)
-**Reproduced:** at function level, with the timing simulated. It was not run with a real background process.
+**File:** `src/sync/mod.rs:3099-3161` (`verified_tree_listing`, `push_tree_entries`), called at `:2659`, `:2709` and `:2954`. Also `src/sync/mod.rs:3318-3362` (`listing_diff` copies the listing again).
+**Reproduced:** yes, at function level: `verified_tree_listing` and `validate_committed_tree` were called directly in a scratch copy, in a debug build. The post-commit hook trigger was reasoned, not run end to end.
 
-**Issue:** `verify_ancestor_trees` calls `read_verified_object(repo, oid, "tree")` and throws
-away the bytes it hashed. The blob ids, the modes and the deleted-path check all come from the
-earlier `ls-tree` process, which read each subtree separately and does not check it (probed).
-Suppose a process outlives its hook and swaps a subtree's object file:
-1. It holds forged bytes while `ls-tree` runs.
-2. It puts the honest bytes back before the `cat-file` reads.
+**Issue:**
+- The walk expands every path in the listing. The memo `verified` only spares the git reads, not
+  the expansion.
+- A legitimate tree in which level k holds `a` and `b`, both pointing to the tree of level k-1,
+  needs only d+3 tree objects for 2^d leaf paths.
+- Each git read is bounded by `LOCAL_TIMEOUT`, but the in-process loop, the `listing` `Vec`,
+  `listing_records` and the `changes` `Vec` of `listing_diff` have no bound and never check a
+  deadline.
 
-The listing then names the validated blob at the recorded path, while the check hashes the honest
-tree and passes. A file watch on the object file makes this timing easy. `finish_after_exit`
-deliberately leaves background processes running.
+Probe results: the commit tree is `templates/{f, bomb}`, with `bomb` built as above. The gate
+refused correctly each time, but only after the times shown.
 
-Probe: `templates_repo` with `templates/f` = "f base". The `templates` tree object was forged to
-list the validated blob, the listing was taken, and then the honest bytes were put back. Result:
+| depth d | listing bytes | listing time | gate time | peak RSS |
+|--------:|--------------:|-------------:|----------:|---------:|
+| 16 | 19.5 MB | 1.7 s | 2.6 s | not measured |
+| 18 | 81 MB | 6.0 s | 9.4 s | not measured |
+| 20 | 338 MB | 18.9 s | 33.1 s | 1.14 GB |
+
+Each +2 in depth multiplies the numbers by about 4. By extrapolation, not run, d = 24 needs
+about 18 GB of RAM and d = 30 several hundred GB. Whichever runs out first, the host's memory or
+the user's patience, decides the outcome: an OOM kill, or a push that hangs with no deadline.
+
+**How it is reached:**
+- A post-commit hook runs despite `--no-verify`. It creates the tree with `git mktree` and
+  points HEAD at a `commit-tree` whose parent is the fetched head and whose message is the sync
+  message.
+- `stage_publication` resolves HEAD to that commit (`:2167`). The parent, message and header
+  checks pass, and the walk runs at `:2659` before the tree binding at `:2846` could refuse it.
+- A remote-side trigger is not practical: ensure's checkout of such a fetched head would write
+  2^d files and fail first (reasoned).
+
+**Why this is a regression:**
+- Before 02-24 and 02-25 the same inputs went through `git ls-tree` and `git diff-tree` under
+  `run_local`, and each was killed at the 30 s local timeout (reasoned, not run).
+- SYNC-03 requires bounded subprocess work.
+- T-02-102 says the walk is mitigated because "each read is bounded by the local tier's timeout"
+  and that a growing tree "slows only its own push". Neither holds for this shape: the time is
+  spent outside any read, and the memory is UDE's own.
+
+**Fix:** Bound the walk and fail closed with a refusal that names no tree text. For example,
+count records and stop past a fixed cap, and check one deadline for the whole walk:
+```rust
+/// More listing records than any template repository holds; a larger walk refuses.
+const MAX_LISTING_RECORDS: usize = 1 << 20;
+// in verified_tree_listing, with `deadline = Instant::now() + self.limits.local`:
+while let Some((path, mode, id)) = pending.pop() {
+    records += 1;
+    if records > MAX_LISTING_RECORDS || Instant::now() >= deadline {
+        return Err(ListingDefect::TooLarge);
+    }
+    ...
+}
 ```
-require_validated_content(...) = Ok(())
-HEAD:templates/f = fa000d9...   (the seed blob)
-validated blob   = 304e837...
-```
-The impact depends on the route:
-- **Empty-status route:** a false Ok, against promise 2, DEF-11 and DEF-12. The doc's text says
-  "each tree read for it must hash to its id", but the tree read that produced the listing is not
-  the one hashed.
-- **Deleted paths on the same route:** a deleted path still on the remote can read as gone.
-- **Committed route:** recorded content held in an unchanged subtree can read as present.
-
-**Fix:** Decide only from bytes that were hashed. Starting at the root, which git checks inside the
-`ls-tree` read, walk each recorded or deleted path through the raw tree bytes that
-`read_verified_object(..., "tree")` returns. Parse the entries (`<mode> SP <name> NUL
-<raw id>`), and take the child id and mode for the next component from those bytes. Compare the
-final blob id and mode with that, not with `listed_blobs`. Add a row that changes the object file
-after `ls-tree` and before the check, using a test seam or a pre-built listing as in the probe.
-Then either name this channel in DEF-11 and DEF-12, or have the operator widen NOT-10 to cover
-"overwritten between two gate reads".
-
-### WR-501: The root-tree rows cited under DEF-12 are refused before the gate runs, and would be refused without the forgery
-
-**File:** `src/sync/mod.rs:15444-15480` (`assert_fetched_root_tree_not_matching_its_id_refused`), `docs/ARCHITECTURE.md:110` (DEF-12: "git itself refuses a root tree that does not")
-**Reproduced:** yes.
-
-**Issue:** The doc comment says the row "pins git's own check of the root tree, which the gate
-relies on". It does not:
-- With the forgery, the push fails at `git status`, inside `stage_publication`, before
-  `require_fetched_head_holds` runs: `Err(Failed("git status failed in remote checkout ... error:
-  hash mismatch ... | error: bad tree object HEAD"))`.
-- The same step without the forgery is also refused: `Err(Failed("Publication gate violation: git
-  status reports nothing to push, but the fetched head does not hold the validated content of
-  templates/projects/generic/gitconfig.repo ..."))`.
-- The forged root keeps the honest `templates` entry and adds `extra`. Even a git that did not
-  check the root would show the seed at `GATE_REL` and refuse it as not held.
-
-So the row passes whether git checks the root or not, and whether the gate is reached or not. The
-DEF-12 claim itself is true; a direct probe showed `ls-tree -r` on a forged root fails with
-`hash mismatch`. But the cited tests do not establish it, and the PR row is the same.
-
-**Fix:** Pin the claim where the gate relies on it. Call `require_fetched_head_holds` directly on a
-checkout whose HEAD root object is forged so that its `templates` entry points to an honest tree
-holding `HOOKED_TEMPLATE` at `GATE_REL`. That forgery would read as held if git did not check the
-root. Assert the refusal `"the fetched head's tree cannot be listed"`, and add a control: the same
-forged listing with git's check out of the way, for example by taking the listing from the forged
-tree id, must read as held. Either reword the doc comment of the existing rows to "refused before
-the gate (git status fails)", or remove them from DEF-12.
-
-### WR-502: The "child ignores stdin" test does not check the bound it is named for
-
-**File:** `src/process.rs:493-509` (`test_run_bounded_with_input_returns_when_the_child_ignores_stdin`), `src/process.rs:185-196`
-**Reproduced:** yes, by mutation.
-
-**Issue:** The test uses `git --version`, which exits at once. A mutant that writes stdin on the
-calling thread (`{ let _ = stdin.write_all(&input); drop(stdin); }`) passes both new process
-tests. That mutant breaks the deadline: with `sh -c 'sleep 3'`, 4 MiB of input and a 500 ms
-timeout, it returned after 3.006 s, and as `Ok`, not as a timeout. The real code returned `Err`
-after 0.515 s. So the property the doc comment states ("a child that never reads cannot hold the
-call past its deadline") has no test that would catch a regression.
-
-**Fix:** Use a child that neither reads nor exits, such as `sh("sleep 30", &[])`, with a short
-timeout and more input than a pipe buffer holds. Assert `Err` containing `"timed out"` and
-`elapsed < timeout + KILL_GRACE + margin`. Keep the `git --version` case as the "exits without
-reading" row.
+- Map `TooLarge` to a fixed text on both routes, such as "the tree of ... is larger than the
+  gate reads".
+- Add a row with a d = 21 tree, more than 2^20 paths, that must refuse within the deadline, and
+  a control at d = 4 that lists normally.
+- Correct T-02-102's disposition in the 02-24 SUMMARY's threat flags.
+- If the operator instead accepts this under NOT-14, widen NOT-14's wording to "a hook can make
+  the gate exhaust memory or run without a deadline" so the closed list says it.
 
 ## Info
 
-### IN-500: A stdin writer thread can be leaked for the life of the process
+### IN-600: New tests chain several scenarios, so the first failing assertion hides the rest
 
-**File:** `src/process.rs:193-195`
-**Issue:** The writer is detached. A descendant that left the process group and kept the inherited
-stdin pipe open without reading blocks `write_all` forever. That leaks one thread and the input
-buffer per call until UDE exits. `git hash-object` starts no such descendant, so this cannot
-happen today (reasoned, not run).
-**Fix:** Document this in the `run_bounded_with_input` doc comment. Or, on timeout or exit, keep the
-writer's `JoinHandle` and drop the stdin handle once the deadline passes. Closing the write end
-from another thread needs an owned fd, for example passing `ChildStdin` through an `Arc<Mutex<Option<_>>>`.
+**File:** `src/sync/mod.rs:15599-15719` (`test_verified_tree_listing_matches_ls_tree`), `src/sync/mod.rs:15744-15856` (`test_listing_diff`)
+**Issue:** `test_verified_tree_listing_matches_ls_tree` runs four independent scenarios in
+sequence with plain `assert!` and `assert_eq!`:
+- the SHA-1 fixture;
+- the empty commit;
+- the SHA-256 repository;
+- the forged-subtree negative control.
 
-### IN-501: A failed object read is reported as "content not held, a hook most likely hid the change"
-
-**File:** `src/sync/mod.rs:2823`, `:2834`, `:2933`, `:2969-2970`, `:2659-2663`
-**Issue:** `ObjectDefect::Unreadable` covers several failures: a spawn failure, a timeout of the
-new `hash-object` or tree read, or a non-zero exit. In `first_path_not_held` it becomes
-`NotHeld::Content`, and the refusal then says the head "does not hold the validated content ...
-a hook in the cache checkout most likely hid the change". In the deletion loop it becomes "the
-fetched head's tree cannot be listed". These refusals fail closed, but they name the wrong cause.
-This is the same class as WR-400 and IN-402 (reasoned).
-**Fix:** Add a `NotHeld::Unreadable` variant whose message says the object could not be read or
-hashed (`"could not read or hash an object for {path}"`).
+`test_listing_diff` chains 12 independent cases in the same way. A failure in an early case masks
+every later one. This is the pattern the operator's test rules ask to avoid ("Atomic Test
+Granularity"). `test_committed_gate_refuses_base_tree_not_matching_its_id` gathers its failures
+before asserting, so it does not have this problem.
+**Fix:** Split the scenarios into separate `#[test]` functions that share a fixture builder, or
+collect the failures into a `Vec` and assert once, as the base-tree test does.
 
 ---
 
-_Reviewed: 2026-11-04T15:26:37Z_
+_Reviewed: 2026-11-04T19:59:24Z_
 _Reviewer: Claude (gsd-code-reviewer)_
 _Depth: deep_
