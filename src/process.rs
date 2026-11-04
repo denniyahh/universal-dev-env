@@ -2,7 +2,7 @@
 
 use process_wrap::std::{ChildWrapper, CommandWrap};
 use regex::Regex;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::LazyLock;
 use std::thread::{self, JoinHandle};
@@ -125,7 +125,25 @@ pub fn prepare_command(cmd: &mut Command) {
 pub fn run_bounded(cmd: Command, label: &str, timeout: Duration) -> Result<RunOutput, String> {
     let mut cmd = cmd;
     prepare_command(&mut cmd);
-    spawn_prepared(cmd, label, timeout)
+    spawn_prepared(cmd, label, timeout, None)
+}
+
+/// [`run_bounded`] with `input` fed to the child's stdin, which is a pipe instead of the
+/// null device; nothing else differs. The bytes are written on a thread of its own that
+/// closes the pipe at the end, so the child sees end of input. A child that exits without
+/// reading gives that thread a broken pipe, which is ignored. The thread is not joined:
+/// the deadline, the group kill and [`KILL_GRACE`] bound the call as they bound
+/// [`run_bounded`].
+pub fn run_bounded_with_input(
+    cmd: Command,
+    label: &str,
+    timeout: Duration,
+    input: Vec<u8>,
+) -> Result<RunOutput, String> {
+    let mut cmd = cmd;
+    prepare_command(&mut cmd);
+    cmd.stdin(Stdio::piped());
+    spawn_prepared(cmd, label, timeout, Some(input))
 }
 
 /// [`run_bounded`] for a `git push` only: the child sees `GIT_GRAFT_FILE` at
@@ -140,12 +158,18 @@ pub fn run_bounded_ignoring_grafts(
     let mut cmd = cmd;
     prepare_command(&mut cmd);
     cmd.env("GIT_GRAFT_FILE", NULL_DEVICE);
-    spawn_prepared(cmd, label, timeout)
+    spawn_prepared(cmd, label, timeout, None)
 }
 
 /// Spawns `cmd`, already prepared with [`prepare_command`], and waits as [`run_bounded`]
-/// describes.
-fn spawn_prepared(cmd: Command, label: &str, timeout: Duration) -> Result<RunOutput, String> {
+/// describes. With `input`, `cmd`'s stdin must be piped; the bytes are written as
+/// [`run_bounded_with_input`] describes.
+fn spawn_prepared(
+    cmd: Command,
+    label: &str,
+    timeout: Duration,
+    input: Option<Vec<u8>>,
+) -> Result<RunOutput, String> {
     let mut wrapped = CommandWrap::from(cmd);
     #[cfg(unix)]
     wrapped.wrap(process_wrap::std::ProcessGroup::leader());
@@ -158,6 +182,18 @@ fn spawn_prepared(cmd: Command, label: &str, timeout: Duration) -> Result<RunOut
         stdout: spawn_reader(child.stdout().take()),
         stderr: spawn_reader(child.stderr().take()),
     };
+    if let Some(input) = input {
+        let Some(mut stdin) = child.stdin().take() else {
+            terminate(child.as_mut(), readers);
+            return Err(format!("{label}: the child has no stdin pipe to write to"));
+        };
+        // Not joined: a child that never reads cannot hold the call past its deadline.
+        // A write error (a broken pipe from a child that exited without reading) is
+        // ignored; dropping `stdin` closes the pipe.
+        thread::spawn(move || {
+            let _ = stdin.write_all(&input);
+        });
+    }
     let deadline = Instant::now() + timeout;
     loop {
         match child.try_wait() {
@@ -404,6 +440,70 @@ mod tests {
         assert!(
             !out.status.success(),
             "bogus git subcommand reported success"
+        );
+    }
+
+    /// `git hash-object --stdin` in `dir`, outside any repository: the ceiling is the
+    /// temp dir, `dir`'s parent, because a ceiling equal to the working directory does not
+    /// stop git looking above it.
+    fn hash_object_stdin(dir: &std::path::Path) -> Command {
+        let mut cmd = Command::new("git");
+        cmd.current_dir(dir)
+            .env("GIT_CEILING_DIRECTORIES", std::env::temp_dir())
+            .env("GIT_CONFIG_GLOBAL", NULL_DEVICE)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .args(["hash-object", "--stdin"]);
+        cmd
+    }
+
+    #[test]
+    fn test_run_bounded_with_input_feeds_stdin() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let out = run_bounded_with_input(
+            hash_object_stdin(dir.path()),
+            LABEL,
+            Duration::from_secs(10),
+            b"hello\n".to_vec(),
+        )
+        .expect("git hash-object runs");
+        assert!(
+            out.status.success(),
+            "{:?}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(out.stdout, b"ce013625030ba8dba906f756967f9e9ca394464a\n");
+
+        // Negative control: run_bounded binds stdin to the null device, so git hashes
+        // empty input.
+        let out = run_bounded(
+            hash_object_stdin(dir.path()),
+            LABEL,
+            Duration::from_secs(10),
+        )
+        .expect("git hash-object runs");
+        assert!(
+            out.status.success(),
+            "{:?}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(out.stdout, b"e69de29bb2d1d6434b8b29ae775ad8c2e48c5391\n");
+    }
+
+    #[test]
+    fn test_run_bounded_with_input_returns_when_the_child_ignores_stdin() {
+        const INPUT_BYTES: usize = 4 * 1024 * 1024;
+        let timeout = Duration::from_secs(10);
+        let mut version = Command::new("git");
+        version.arg("--version");
+        let started = Instant::now();
+        let out = run_bounded_with_input(version, LABEL, timeout, vec![b'x'; INPUT_BYTES])
+            .expect("git --version runs although it never reads its input");
+        assert!(out.status.success(), "{:?}", out.status);
+        assert!(out.stdout.starts_with(b"git version"));
+        assert!(
+            started.elapsed() < timeout,
+            "the call took {:?}, past its timeout",
+            started.elapsed()
         );
     }
 

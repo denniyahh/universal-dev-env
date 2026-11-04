@@ -560,6 +560,16 @@ impl SyncEngine {
         process::run_bounded(cmd, label, self.limits.local)
     }
 
+    /// [`Self::run_local`] with `input` on the child's stdin.
+    fn run_local_with_input(
+        &self,
+        cmd: Command,
+        label: &str,
+        input: Vec<u8>,
+    ) -> Result<RunOutput, String> {
+        process::run_bounded_with_input(cmd, label, self.limits.local, input)
+    }
+
     /// Runs `cmd` on the network tier. `label` must not contain argv (remote URLs).
     fn run_network(&self, cmd: Command, label: &str) -> Result<RunOutput, String> {
         process::run_bounded(cmd, label, self.limits.network)
@@ -2637,11 +2647,20 @@ impl SyncEngine {
                 continue;
             }
 
-            let Some(blob) = self.read_blob_by_id(repo, entry.new_oid) else {
-                return Err(format!(
-                    "Post-commit publication gate violation: failed to inspect committed blob for {}",
-                    p.display()
-                ));
+            let blob = match self.read_blob_by_id(repo, entry.new_oid) {
+                Ok(blob) => blob,
+                Err(ObjectDefect::IdMismatch) => {
+                    return Err(format!(
+                        "Post-commit publication gate violation: an object read for {} {OBJECT_ID_MISMATCH}",
+                        p.display()
+                    ));
+                }
+                Err(ObjectDefect::Unreadable) => {
+                    return Err(format!(
+                        "Post-commit publication gate violation: failed to inspect committed blob for {}",
+                        p.display()
+                    ));
+                }
             };
 
             if let Some(finding) = self.sanitizer.scan_bytes(&blob, &p) {
@@ -2750,9 +2769,9 @@ impl SyncEngine {
     }
 
     /// Every path in the record (`validated_rel`) must hold its recorded content as a regular
-    /// file in `listed_blobs` ([`tree_listing_blobs`]), so a push returning Ok has published
-    /// it. One check covers a deletion and a revert, and a deletion nothing validated has no
-    /// record, so it still publishes.
+    /// file in `listed_blobs` ([`tree_listing_blobs`]), read as [`Self::first_path_not_held`]
+    /// reads it, so a push returning Ok has published it. One check covers a deletion and a
+    /// revert, and a deletion nothing validated has no record, so it still publishes.
     fn require_validated_content(
         &self,
         repo: &Path,
@@ -2760,8 +2779,12 @@ impl SyncEngine {
         validated_rel: &HashMap<PathBuf, &str>,
     ) -> Result<(), String> {
         match self.first_path_not_held(repo, listed_blobs, validated_rel) {
-            Some(path) => Err(format!(
+            Some((path, NotHeld::Content)) => Err(format!(
                 "Post-commit publication gate violation: the commit to publish does not hold the validated content of {}",
+                path.display()
+            )),
+            Some((path, NotHeld::IdMismatch)) => Err(format!(
+                "Post-commit publication gate violation: an object read for {} {OBJECT_ID_MISMATCH}",
                 path.display()
             )),
             None => Ok(()),
@@ -2770,20 +2793,25 @@ impl SyncEngine {
 
     /// The first path of the record (`validated_rel`) that `listed_blobs`
     /// ([`tree_listing_blobs`]) does not hold as a regular file with its recorded content,
-    /// or `None` when every recorded path is held. The path comes from the record, never
-    /// from the tree.
+    /// and why, or `None` when every recorded path is held. Each blob is read against its
+    /// id ([`Self::read_blob_by_id`]), because `cat-file` returns the bytes stored under an
+    /// id without checking that they hash to it. The path comes from the record, never from
+    /// the tree.
     fn first_path_not_held<'r>(
         &self,
         repo: &Path,
         listed_blobs: &HashMap<&[u8], &[u8]>,
         validated_rel: &'r HashMap<PathBuf, &str>,
-    ) -> Option<&'r Path> {
+    ) -> Option<(&'r Path, NotHeld)> {
         validated_rel.iter().find_map(|(path, digest)| {
-            let held = listed_blobs
-                .get(git_path_bytes(path).as_slice())
-                .and_then(|oid| self.read_blob_by_id(repo, oid))
-                .is_some_and(|blob| Self::fingerprint(&blob) == *digest);
-            (!held).then_some(path.as_path())
+            let Some(oid) = listed_blobs.get(git_path_bytes(path).as_slice()) else {
+                return Some((path.as_path(), NotHeld::Content));
+            };
+            match self.read_blob_by_id(repo, oid) {
+                Ok(blob) if Self::fingerprint(&blob) == *digest => None,
+                Err(ObjectDefect::IdMismatch) => Some((path.as_path(), NotHeld::IdMismatch)),
+                Ok(_) | Err(ObjectDefect::Unreadable) => Some((path.as_path(), NotHeld::Content)),
+            }
         })
     }
 
@@ -2843,11 +2871,20 @@ impl SyncEngine {
             ));
         };
 
-        if let Some(path) = self.first_path_not_held(repo, &listed_blobs, &validated_rel) {
-            return Err(format!(
-                "{PREFIX} the fetched head does not hold the validated content of {}; a hook in the cache checkout most likely hid the change",
-                path.display()
-            ));
+        match self.first_path_not_held(repo, &listed_blobs, &validated_rel) {
+            Some((path, NotHeld::Content)) => {
+                return Err(format!(
+                    "{PREFIX} the fetched head does not hold the validated content of {}; a hook in the cache checkout most likely hid the change",
+                    path.display()
+                ));
+            }
+            Some((path, NotHeld::IdMismatch)) => {
+                return Err(format!(
+                    "{PREFIX} an object read for {} {OBJECT_ID_MISMATCH}",
+                    path.display()
+                ));
+            }
+            None => {}
         }
         // Any entry type counts as present, not only the regular files listed_blobs keeps.
         let listed = |path: &[u8]| {
@@ -2872,24 +2909,91 @@ impl SyncEngine {
         Ok(())
     }
 
-    /// The exact bytes of the blob `oid`, past any replace ref. `None` on a spawn error, a
-    /// non-zero exit (a gitlink's id, for one), an id that is not UTF-8 or an object that is
-    /// not a blob: `cat-file blob` peels a tag, and a tree can list a tag at a file's place,
-    /// which would read as the tagged bytes while the push sends the tag's own text (probed).
-    fn read_blob_by_id(&self, repo: &Path, oid: &[u8]) -> Option<Vec<u8>> {
-        let oid = std::str::from_utf8(oid).ok()?;
+    /// The exact bytes of the blob `oid`, past any replace ref. Unreadable on a spawn error,
+    /// a non-zero exit (a gitlink's id, for one), an id that is not UTF-8 or an object that
+    /// is not a blob: `cat-file blob` peels a tag, and a tree can list a tag at a file's
+    /// place, which would read as the tagged bytes while the push sends the tag's own text
+    /// (probed). The bytes must also hash to `oid` ([`Self::read_verified_object`]), because
+    /// `cat-file` does not check that.
+    fn read_blob_by_id(&self, repo: &Path, oid: &[u8]) -> Result<Vec<u8>, ObjectDefect> {
+        self.read_verified_object(repo, oid, "blob")
+    }
+
+    /// The exact bytes of the object `oid` of type `kind` (`blob` or `tree`) in `repo`, past
+    /// any replace ref, checked against the id: git returns the bytes stored under an id
+    /// without checking that they hash to it, for a blob read with `cat-file` and for a
+    /// subtree walked by `ls-tree -r` (measured). The bytes are hashed with `git hash-object`
+    /// in `repo`, so the repository's own object format applies, and the id it prints is
+    /// compared whole with `oid`; an abbreviated id therefore never matches. `--literally`
+    /// keeps the check to hashing and `--no-filters` on stdin hashes the bytes exactly. No
+    /// write flag is passed, so the check writes nothing.
+    fn read_verified_object(
+        &self,
+        repo: &Path,
+        oid: &[u8],
+        kind: &str,
+    ) -> Result<Vec<u8>, ObjectDefect> {
+        let oid = std::str::from_utf8(oid).map_err(|_| ObjectDefect::Unreadable)?;
         let mut object_type = self.git(Some(repo));
         object_type.args(["--no-replace-objects", "cat-file", "-t", oid]);
-        let object_type = self.run_local(object_type, "git cat-file").ok()?;
-        if !object_type.status.success() || object_type.stdout.trim_ascii_end() != b"blob" {
-            return None;
+        let object_type = self
+            .run_local(object_type, "git cat-file")
+            .map_err(|_| ObjectDefect::Unreadable)?;
+        if !object_type.status.success() || object_type.stdout.trim_ascii_end() != kind.as_bytes() {
+            return Err(ObjectDefect::Unreadable);
         }
         let mut cat_file = self.git(Some(repo));
-        cat_file.args(["--no-replace-objects", "cat-file", "blob", oid]);
-        let out = self.run_local(cat_file, "git cat-file").ok()?;
-        out.status.success().then_some(out.stdout)
+        cat_file.args(["--no-replace-objects", "cat-file", kind, oid]);
+        let out = self
+            .run_local(cat_file, "git cat-file")
+            .map_err(|_| ObjectDefect::Unreadable)?;
+        if !out.status.success() {
+            return Err(ObjectDefect::Unreadable);
+        }
+        let mut hash_object = self.git(Some(repo));
+        hash_object.args([
+            "hash-object",
+            "-t",
+            kind,
+            "--literally",
+            "--no-filters",
+            "--stdin",
+        ]);
+        let hashed = self
+            .run_local_with_input(hash_object, "git hash-object", out.stdout.clone())
+            .map_err(|_| ObjectDefect::Unreadable)?;
+        if !hashed.status.success() {
+            return Err(ObjectDefect::Unreadable);
+        }
+        let printed = hashed.stdout.strip_suffix(b"\n").unwrap_or(&hashed.stdout);
+        if printed != oid.as_bytes() {
+            return Err(ObjectDefect::IdMismatch);
+        }
+        Ok(out.stdout)
     }
 }
+
+/// Why [`SyncEngine::read_verified_object`] did not return an object.
+#[derive(Debug, PartialEq, Eq)]
+enum ObjectDefect {
+    /// The id is not UTF-8, the object is missing or of another type, or a read or the hash
+    /// failed.
+    Unreadable,
+    /// The bytes stored under the id do not hash to it.
+    IdMismatch,
+}
+
+/// Why [`SyncEngine::first_path_not_held`] found a recorded path not held.
+#[derive(Debug, PartialEq, Eq)]
+enum NotHeld {
+    /// The listing does not hold the path as a regular file with its recorded content.
+    Content,
+    /// An object read for the path does not hash to its id.
+    IdMismatch,
+}
+
+/// The refusal text of an object whose bytes do not hash to its id.
+const OBJECT_ID_MISMATCH: &str = "does not match its object id in the cache checkout; an object file there was most likely rewritten";
 
 /// Splits one `--name-status --no-renames` line into its status letter(s) and path.
 /// `None` when the line has no tab or an empty status or path (callers fail closed).
@@ -14352,6 +14456,28 @@ git update-ref HEAD "$N"
         open_pr: bool,
         step: &dyn Fn(&Path, &Path) -> StepResult,
     ) -> EmptyStatusPush {
+        let checked = |checkout: &Path, managed: &Path| {
+            let pushed = step(checkout, managed);
+            assert_eq!(
+                git.output(checkout, &["status", "--porcelain"]),
+                "",
+                "the step left git status non-empty, so the push would not take the empty-status route"
+            );
+            pushed
+        };
+        push_after_step(git, engine, open_pr, &checked)
+    }
+
+    /// Seeds a bare remote, runs [`SyncEngine::ensure_remote_repo_for_push`], then
+    /// `step(checkout, managed template)`, and pushes what the step returns, on whichever
+    /// route `git status` then selects.
+    #[cfg(unix)]
+    fn push_after_step(
+        git: &GitFixture,
+        engine: &SyncEngine,
+        open_pr: bool,
+        step: &dyn Fn(&Path, &Path) -> StepResult,
+    ) -> EmptyStatusPush {
         let bare = seeded_bare_remote(git);
         let cache = tempdir().unwrap();
         let cached = engine
@@ -14360,11 +14486,6 @@ git update-ref HEAD "$N"
         let checkout = cached.checkout_dir.clone();
         let managed = cached.templates_dir.join("projects/generic/gitconfig.repo");
         let (staged, validated) = step(&checkout, &managed);
-        assert_eq!(
-            git.output(&checkout, &["status", "--porcelain"]),
-            "",
-            "the step left git status non-empty, so the push would not take the empty-status route"
-        );
         let heads_before = remote_heads(git, bare.path());
         let res =
             engine.push_to_remote(&cached.publish_target("main"), open_pr, &staged, &validated);
@@ -14559,6 +14680,400 @@ git update-ref HEAD "$N"
     #[cfg(unix)]
     fn test_pr_push_no_changes_publishes_nothing_when_content_is_held_and_deletion_is_gone() {
         assert_no_change_publishes_nothing(true, true);
+    }
+
+    /// The refusal of an object whose bytes do not hash to its id. A literal of its own, so
+    /// a changed production text fails these rows.
+    const ID_MISMATCH: &str = "does not match its object id in the cache checkout";
+
+    /// A second template, written in a directory the seed does not have.
+    #[cfg(unix)]
+    const ADDED_TEMPLATE: &str = "[added]\n\tx = 2\n";
+
+    /// Rewrites the loose object file of `target` in the repository at `dir` with the bytes
+    /// of `source`'s object file, so a read of `target` returns `source`'s content. Panics
+    /// unless both files exist, because a packed object would leave the forgery unread. The
+    /// target file is removed before the new one is written: a local clone hardlinks loose
+    /// objects, so writing in place would rewrite the bare remote's object too.
+    fn forge_loose_object(dir: &Path, target: &str, source: &str) {
+        let object_file = |id: &str| dir.join(".git/objects").join(&id[..2]).join(&id[2..]);
+        let (target_file, source_file) = (object_file(target), object_file(source));
+        assert!(
+            target_file.is_file(),
+            "no loose object file for {target}; a packed object would leave the forgery unread"
+        );
+        assert!(source_file.is_file(), "no loose object file for {source}");
+        let bytes = fs::read(&source_file).unwrap();
+        fs::remove_file(&target_file).unwrap();
+        fs::write(&target_file, bytes).unwrap();
+    }
+
+    /// The bytes `cat-file <kind> <id>` prints in the bare remote hash to `id`.
+    #[cfg(unix)]
+    fn remote_object_matches_id(git: &GitFixture, bare: &Path, id: &str, kind: &str) -> bool {
+        // Raw stdout: GitFixture::output trims and decodes lossily.
+        let out = git.cmd(bare).args(["cat-file", kind, id]).output().unwrap();
+        assert!(
+            out.status.success(),
+            "the bare remote cannot read {kind} {id}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        git_with_input(
+            git,
+            bare,
+            &["hash-object", "-t", kind, "--literally", "--stdin"],
+            &out.stdout,
+        ) == id
+    }
+
+    /// The id of the seed template at [`GATE_REL`] on the bare remote's `main`.
+    #[cfg(unix)]
+    fn seed_blob_id(git: &GitFixture, bare: &Path) -> String {
+        git.output(bare, &["rev-parse", &format!("main:{GATE_REL}")])
+    }
+
+    /// Writes [`HOOKED_TEMPLATE`] over the managed template, records it and hides the edit
+    /// from `git status` with assume-unchanged.
+    #[cfg(unix)]
+    fn hide_hooked_template(git: &GitFixture, checkout: &Path, managed: &Path) -> StepResult {
+        let pushed = write_hooked_template(managed);
+        git.run(checkout, &["update-index", "--assume-unchanged", GATE_REL]);
+        pushed
+    }
+
+    /// [`hide_hooked_template`], plus [`ADDED_TEMPLATE`] at `projects/added/added.repo`
+    /// beside `projects/generic`; both are recorded and both are staged.
+    #[cfg(unix)]
+    fn hide_hooked_template_beside_added(
+        git: &GitFixture,
+        checkout: &Path,
+        managed: &Path,
+    ) -> StepResult {
+        let (mut staged, _) = hide_hooked_template(git, checkout, managed);
+        let added = managed
+            .parent()
+            .and_then(Path::parent)
+            .unwrap()
+            .join("added/added.repo");
+        fs::create_dir_all(added.parent().unwrap()).unwrap();
+        fs::write(&added, ADDED_TEMPLATE).unwrap();
+        staged.push(added);
+        let validated = ValidatedBlobs::from_files(&staged);
+        (staged, validated)
+    }
+
+    /// Gives the seed blob at [`GATE_REL`] in `checkout` the object file of the
+    /// [`HOOKED_TEMPLATE`] blob, so a read of the seed id returns the validated bytes.
+    #[cfg(unix)]
+    fn forge_seed_blob(git: &GitFixture, checkout: &Path) {
+        let seed = git.output(checkout, &["rev-parse", &format!("HEAD:{GATE_REL}")]);
+        let validated = write_blob(git, checkout, HOOKED_TEMPLATE.as_bytes());
+        forge_loose_object(checkout, &seed, &validated);
+    }
+
+    /// The push failed hard and no remote head moved; returns the refusal.
+    #[cfg(unix)]
+    fn assert_push_refused(git: &GitFixture, pushed: &EmptyStatusPush) -> String {
+        let err = match &pushed.res {
+            Err(PushRemoteError::Failed(e)) => e.clone(),
+            other => panic!("expected a hard push failure, got {other:?}"),
+        };
+        assert_eq!(
+            remote_heads(git, pushed.bare.path()),
+            pushed.heads_before,
+            "a remote head moved: {err}"
+        );
+        err
+    }
+
+    /// The seed blob the remote holds, its object file in the cache checkout rewritten to
+    /// hold the validated bytes while status is empty: refused by the id check, the remote
+    /// untouched. Control: the same step without the rewrite is refused as not held.
+    #[cfg(unix)]
+    fn assert_no_change_blob_not_matching_its_id_refused(open_pr: bool) {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let step = |checkout: &Path, managed: &Path| {
+            let pushed = hide_hooked_template(&git, checkout, managed);
+            forge_seed_blob(&git, checkout);
+            pushed
+        };
+        let pushed = push_with_empty_status(&git, &engine, open_pr, &step);
+        let seed = seed_blob_id(&git, pushed.bare.path());
+        // What a read without the check sees.
+        let read = git
+            .cmd(&pushed.checkout)
+            .args(["cat-file", "blob", &seed])
+            .output()
+            .unwrap();
+        assert_eq!(
+            read.stdout,
+            HOOKED_TEMPLATE.as_bytes(),
+            "the forgery is not read"
+        );
+        let err = assert_empty_status_refused(&git, &pushed);
+        assert!(err.contains(EMPTY_STATUS_REFUSAL), "{err}");
+        assert!(err.contains(ID_MISMATCH), "{err}");
+        assert!(err.contains(GATE_REL), "{err}");
+        assert!(!err.contains(NOT_HELD), "{err}");
+        assert!(
+            remote_object_matches_id(&git, pushed.bare.path(), &seed, "blob"),
+            "the forgery reached the bare remote's object"
+        );
+
+        let step = |checkout: &Path, managed: &Path| hide_hooked_template(&git, checkout, managed);
+        let control = push_with_empty_status(&git, &engine, open_pr, &step);
+        let err = assert_empty_status_refused(&git, &control);
+        assert!(err.contains(NOT_HELD), "{err}");
+        assert!(!err.contains(ID_MISMATCH), "{err}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_direct_push_no_changes_refuses_blob_not_matching_its_id() {
+        assert_no_change_blob_not_matching_its_id_refused(false);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_pr_push_no_changes_refuses_blob_not_matching_its_id() {
+        assert_no_change_blob_not_matching_its_id_refused(true);
+    }
+
+    /// The committed route: GATE_REL kept at the seed blob by assume-unchanged beside a new
+    /// file in another directory, and the seed's object file rewritten to hold the validated
+    /// bytes. Refused by the id check, the remote untouched. Control: the same steps without
+    /// the rewrite are refused because the commit does not hold the validated content.
+    #[cfg(unix)]
+    fn assert_unchanged_blob_not_matching_its_id_refused(open_pr: bool) {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let step = |checkout: &Path, managed: &Path| {
+            let pushed = hide_hooked_template_beside_added(&git, checkout, managed);
+            forge_seed_blob(&git, checkout);
+            pushed
+        };
+        let pushed = push_after_step(&git, &engine, open_pr, &step);
+        let err = assert_push_refused(&git, &pushed);
+        assert!(
+            err.contains("Post-commit publication gate violation"),
+            "{err}"
+        );
+        assert!(err.contains(ID_MISMATCH), "{err}");
+        assert!(err.contains(GATE_REL), "{err}");
+        let seed = seed_blob_id(&git, pushed.bare.path());
+        assert!(
+            remote_object_matches_id(&git, pushed.bare.path(), &seed, "blob"),
+            "the forgery reached the bare remote's object"
+        );
+
+        let step = |checkout: &Path, managed: &Path| {
+            hide_hooked_template_beside_added(&git, checkout, managed)
+        };
+        let control = push_after_step(&git, &engine, open_pr, &step);
+        let err = assert_push_refused(&git, &control);
+        assert!(
+            err.contains("the commit to publish does not hold the validated content of"),
+            "{err}"
+        );
+        assert!(err.contains(GATE_REL), "{err}");
+        assert!(!err.contains(ID_MISMATCH), "{err}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_direct_push_refuses_unchanged_blob_not_matching_its_id() {
+        assert_unchanged_blob_not_matching_its_id_refused(false);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_pr_push_refuses_unchanged_blob_not_matching_its_id() {
+        assert_unchanged_blob_not_matching_its_id_refused(true);
+    }
+
+    /// A changed blob whose object file holds the validated bytes under another id: the
+    /// push would not send such a blob when the remote already holds its id, so the gate
+    /// refuses it naming the path. Opposite direction: the genuine validated blob passes.
+    #[test]
+    fn test_committed_gate_refuses_changed_blob_not_matching_its_id() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let (repo, base) = templates_repo(&git, &[("f", "f base\n")]);
+        let dir = repo.path();
+        let other = write_blob(&git, dir, b"f other\n");
+        let validated_blob = write_blob(&git, dir, b"f new\n");
+        forge_loose_object(dir, &other, &validated_blob);
+        let paths: HashSet<PathBuf> = [PathBuf::from("templates/f")].into_iter().collect();
+        let validated = templates_record(dir, &[("f", b"f new\n")]);
+
+        let genuine = commit_of_templates(
+            &git,
+            dir,
+            &base,
+            &format!("100644 blob {validated_blob}\tf\n"),
+        );
+        engine
+            .validate_committed_tree(
+                dir,
+                &genuine,
+                &base,
+                &paths,
+                &validated,
+                &commit_tree_id(&git, dir, &genuine),
+            )
+            .expect("the genuine validated blob passes");
+
+        let forged = commit_of_templates(&git, dir, &base, &format!("100644 blob {other}\tf\n"));
+        let err = engine
+            .validate_committed_tree(
+                dir,
+                &forged,
+                &base,
+                &paths,
+                &validated,
+                &commit_tree_id(&git, dir, &forged),
+            )
+            .expect_err("a blob whose bytes do not hash to its id must be refused");
+        assert!(err.contains(ID_MISMATCH), "{err}");
+        assert!(err.contains("templates/f"), "{err}");
+    }
+
+    /// Whether `cat-file -e <id>` finds the object in `repo`.
+    fn object_exists(git: &GitFixture, repo: &Path, id: &str) -> bool {
+        git.cmd(repo)
+            .args(["cat-file", "-e", id])
+            .status()
+            .unwrap()
+            .success()
+    }
+
+    #[test]
+    fn test_read_verified_object_checks_bytes_against_the_id() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let (repo, _base) = templates_repo(&git, &[("f", "f base\n")]);
+        let dir = repo.path();
+        let blob = git.output(dir, &["rev-parse", "HEAD:templates/f"]);
+        let tree = git.output(dir, &["rev-parse", "HEAD:templates"]);
+        let raw_tree = git
+            .cmd(dir)
+            .args(["cat-file", "tree", &tree])
+            .output()
+            .unwrap()
+            .stdout;
+
+        // Opposite direction: genuine objects read with their exact bytes.
+        assert_eq!(
+            engine.read_verified_object(dir, blob.as_bytes(), "blob"),
+            Ok(b"f base\n".to_vec())
+        );
+        assert_eq!(
+            engine.read_verified_object(dir, tree.as_bytes(), "tree"),
+            Ok(raw_tree)
+        );
+
+        let other_tree = git_with_input(
+            &git,
+            dir,
+            &["mktree"],
+            format!("100644 blob {blob}\tg\n").as_bytes(),
+        );
+        forge_loose_object(dir, &tree, &other_tree);
+        assert_eq!(
+            engine.read_verified_object(dir, tree.as_bytes(), "tree"),
+            Err(ObjectDefect::IdMismatch)
+        );
+
+        let source = write_blob(&git, dir, b"f other\n");
+        forge_loose_object(dir, &blob, &source);
+        let object_file = dir
+            .join(".git/objects")
+            .join(&source[..2])
+            .join(&source[2..]);
+        fs::remove_file(object_file).unwrap();
+        assert!(
+            !object_exists(&git, dir, &source),
+            "the source blob is still there"
+        );
+        assert_eq!(
+            engine.read_verified_object(dir, blob.as_bytes(), "blob"),
+            Err(ObjectDefect::IdMismatch)
+        );
+        assert!(
+            !object_exists(&git, dir, &source),
+            "the check wrote the object its bytes hash to"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_read_verified_object_refuses_unreadable_ids() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let (repo, _base) = templates_repo(&git, &[("f", "f base\n")]);
+        let dir = repo.path();
+        let blob = git.output(dir, &["rev-parse", "HEAD:templates/f"]);
+        let tag = tag_on_blob(&git, dir, &blob);
+        let missing = "1".repeat(blob.len());
+        assert!(!object_exists(&git, dir, &missing));
+
+        let rows: [(&str, &[u8], &str); 4] = [
+            ("a tag on a blob read as a blob", tag.as_bytes(), "blob"),
+            ("a missing full-length id", missing.as_bytes(), "blob"),
+            ("a non-UTF-8 id", b"\xff\xfe", "blob"),
+            ("a blob read as a tree", blob.as_bytes(), "tree"),
+        ];
+        let mut failures = Vec::new();
+        for (name, oid, kind) in rows {
+            let verdict = engine.read_verified_object(dir, oid, kind);
+            if verdict != Err(ObjectDefect::Unreadable) {
+                failures.push(format!("{name}: {verdict:?}"));
+            }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+
+    #[test]
+    fn test_read_verified_object_in_sha256_repository() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let repo = tempdir().unwrap();
+        let dir = repo.path();
+        git.run(dir, &["init", "--object-format=sha256", "-b", "main"]);
+        let blob = write_blob(&git, dir, b"sha256 blob\n");
+        assert_eq!(blob.len(), 64, "not a SHA-256 id: {blob}");
+        assert_eq!(
+            engine.read_verified_object(dir, blob.as_bytes(), "blob"),
+            Ok(b"sha256 blob\n".to_vec())
+        );
+
+        let source = write_blob(&git, dir, b"other\n");
+        forge_loose_object(dir, &blob, &source);
+        assert_eq!(
+            engine.read_verified_object(dir, blob.as_bytes(), "blob"),
+            Err(ObjectDefect::IdMismatch)
+        );
+    }
+
+    #[test]
+    fn test_read_verified_object_refuses_an_abbreviated_id() {
+        const ABBREVIATED_HEX: usize = 12;
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let (repo, _base) = templates_repo(&git, &[("f", "f base\n")]);
+        let dir = repo.path();
+        let blob = git.output(dir, &["rev-parse", "HEAD:templates/f"]);
+        let abbreviated = &blob[..ABBREVIATED_HEX];
+        // The abbreviation resolves, so only the whole-id compare refuses it.
+        assert_eq!(
+            git.output(dir, &["cat-file", "blob", abbreviated]),
+            "f base"
+        );
+        assert_eq!(
+            engine.read_verified_object(dir, abbreviated.as_bytes(), "blob"),
+            Err(ObjectDefect::IdMismatch)
+        );
     }
 
     /// post-checkout tail, run by `checkout -B` before ensure's `reset --hard`: points
