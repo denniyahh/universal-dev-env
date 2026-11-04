@@ -2620,6 +2620,52 @@ fn test_cli_pr_push_reads_the_remote_twice_from_outside_the_checkout() {
     assert_cli_push_reads_the_remote_twice(&["--pr"]);
 }
 
+/// A post-index-change hook in the cache checkout, run once by the push's ensure, that
+/// sets assume-unchanged on the template, so `git status` hides UDE's edit.
+#[cfg(unix)]
+fn index_flag_hook_body() -> String {
+    format!("git update-index --assume-unchanged '{MISE_TEMPLATE}'\n")
+}
+
+/// `ude sync push` with [`index_flag_hook_body`] installed: exit 2 with the refusal of the
+/// empty-status route, no ref of the remote moved and the ancestor unchanged. The bug was
+/// exit 0 ("No changes") with the ancestor advanced while nothing was published.
+#[cfg(unix)]
+fn assert_cli_index_flag_refused(extra_args: &[&str]) {
+    let world = cli_push_world();
+    let checkout = world.install_cache_hook("post-index-change", &index_flag_hook_body());
+    let refs_before = world.remote_refs();
+    let ancestor_before = mise_ancestor(&world.project);
+
+    let push = world.push(extra_args);
+    let text = outputs(&push);
+    assert!(
+        checkout.join(".git/ude-test-hook-ran").exists(),
+        "the cache hook never ran. {text}"
+    );
+    assert_eq!(push.status.code(), Some(2), "{text}");
+    assert!(
+        text.contains("does not hold the validated content"),
+        "refused for another reason. {text}"
+    );
+    assert_eq!(
+        world.remote_refs(),
+        refs_before,
+        "a remote ref moved. {text}"
+    );
+    assert_eq!(
+        mise_ancestor(&world.project),
+        ancestor_before,
+        "a refused push must not advance ancestor state. {text}"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn test_cli_direct_push_refuses_index_flag_and_keeps_state() {
+    assert_cli_index_flag_refused(&[]);
+}
+
 /// A `remote.origin.uploadpack` wrapper in the cache checkout moves the bare's main
 /// during the push's fetch, so the remote really moved: exit 1 with the pull-first line,
 /// and nothing published. The head reads run from the filesystem root with the URL, so
