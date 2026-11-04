@@ -506,6 +506,10 @@ pub struct SyncEngine {
     /// Remote checkout and branch whose history must show a template's deletion before
     /// a scan reports it as deleted upstream (set for remote status and pull).
     deletion_history: Option<(PathBuf, String)>,
+    /// Runs right after each publication gate's tree listing is read (tests only), so a
+    /// test can swap an object file back between the listing and the checks after it.
+    #[cfg(test)]
+    after_tree_listing: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
 }
 
 impl SyncEngine {
@@ -515,6 +519,8 @@ impl SyncEngine {
             extra_env: Vec::new(),
             limits: ProcessLimits::default(),
             deletion_history: None,
+            #[cfg(test)]
+            after_tree_listing: None,
         }
     }
 
@@ -538,6 +544,22 @@ impl SyncEngine {
     pub fn with_limits(mut self, limits: ProcessLimits) -> Self {
         self.limits = limits;
         self
+    }
+
+    /// Sets the hook [`Self::after_tree_listing`] runs (tests only).
+    #[cfg(test)]
+    fn with_after_tree_listing(mut self, hook: impl Fn() + Send + Sync + 'static) -> Self {
+        self.after_tree_listing = Some(std::sync::Arc::new(hook));
+        self
+    }
+
+    /// Runs the test hook set by `with_after_tree_listing`, if any. Called right after a
+    /// publication gate's tree listing is read; in a non-test build it does nothing.
+    fn after_tree_listing(&self) {
+        #[cfg(test)]
+        if let Some(hook) = &self.after_tree_listing {
+            hook();
+        }
     }
 
     /// A `program` command with the engine's extra environment, run in `dir` if given.
@@ -2906,8 +2928,9 @@ impl SyncEngine {
             "--full-tree",
             &head,
         ]);
-        let listing = self
-            .run_local(ls_tree, "git ls-tree")
+        let listing = self.run_local(ls_tree, "git ls-tree");
+        self.after_tree_listing();
+        let listing = listing
             .map_err(|e| format!("{PREFIX} the fetched head's tree cannot be listed: {e}"))?;
         if !listing.status.success() {
             return Err(with_excerpt(
@@ -15377,6 +15400,223 @@ git update-ref HEAD "$N"
     #[cfg(unix)]
     fn test_pr_push_no_changes_refuses_subtree_hiding_a_deleted_path() {
         assert_no_change_subtree_hiding_a_deleted_path_refused(true);
+    }
+
+    /// A loose object file and the bytes to put back into it.
+    #[cfg(unix)]
+    type SavedObjectFile = (PathBuf, Vec<u8>);
+
+    /// A listing hook ([`SyncEngine::with_after_tree_listing`]) that, once armed, puts an
+    /// object file's honest bytes back right after a gate's tree listing is read, so the
+    /// listing sees a forgery the reads after it do not. Counts its calls.
+    #[cfg(unix)]
+    #[derive(Clone, Default)]
+    struct ListingSwap {
+        slot: std::sync::Arc<std::sync::Mutex<Option<SavedObjectFile>>>,
+        calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[cfg(unix)]
+    impl ListingSwap {
+        /// The hook: counts the call and, when armed, restores the saved bytes once. The file
+        /// is removed before it is written, because a local clone hardlinks loose objects.
+        fn hook(&self) -> impl Fn() + Send + Sync + 'static {
+            let (slot, calls) = (self.slot.clone(), self.calls.clone());
+            move || {
+                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if let Some((file, bytes)) = slot.lock().unwrap().take() {
+                    fs::remove_file(&file).unwrap();
+                    fs::write(&file, bytes).unwrap();
+                }
+            }
+        }
+
+        /// Saves the current bytes of `id`'s loose object file in `checkout`, to be put
+        /// back by the hook. Panics unless that file exists.
+        fn arm(&self, checkout: &Path, id: &str) {
+            let file = checkout.join(".git/objects").join(&id[..2]).join(&id[2..]);
+            assert!(file.is_file(), "no loose object file for {id}");
+            let bytes = fs::read(&file).unwrap();
+            *self.slot.lock().unwrap() = Some((file, bytes));
+        }
+
+        /// How many times the hook ran.
+        fn calls(&self) -> usize {
+            self.calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    /// The id of the generic tree of `checkout`'s HEAD, read through the root tree.
+    #[cfg(unix)]
+    fn checkout_generic_tree_id(git: &GitFixture, checkout: &Path) -> String {
+        git.output(checkout, &["rev-parse", &format!("HEAD:{GENERIC_REL}")])
+    }
+
+    /// The fetched head's generic tree object rewritten to list the validated blob, and
+    /// put back right after the gate's listing is read: refused by the id check, the
+    /// remote untouched. Control: the same steps with the hook unarmed and no rewrite are
+    /// refused as not held.
+    #[cfg(unix)]
+    fn assert_no_change_subtree_rewritten_only_while_listed_refused(open_pr: bool) {
+        let git = GitFixture::new();
+        let swap = ListingSwap::default();
+        let engine = SyncEngine::new()
+            .with_extra_env(git.gitconfig_env())
+            .with_after_tree_listing(swap.hook());
+        let generic = std::cell::RefCell::new(String::new());
+        let step = |checkout: &Path, managed: &Path| {
+            let pushed = hide_hooked_template(&git, checkout, managed);
+            prime_cache_tree(&git, checkout);
+            let listing = generic_listing_of_validated_blob(&git, checkout);
+            let id = checkout_generic_tree_id(&git, checkout);
+            swap.arm(checkout, &id);
+            forge_generic_tree(&git, checkout, &listing);
+            let validated = write_blob(&git, checkout, HOOKED_TEMPLATE.as_bytes());
+            // What a walk without the check sees.
+            let walked = git.output(
+                checkout,
+                &[
+                    "--no-replace-objects",
+                    "ls-tree",
+                    "-r",
+                    "HEAD",
+                    "--",
+                    GATE_REL,
+                ],
+            );
+            assert!(
+                walked.contains(&validated),
+                "the forgery is not walked: {walked}"
+            );
+            *generic.borrow_mut() = id;
+            pushed
+        };
+        let pushed = push_with_empty_status(&git, &engine, open_pr, &step);
+        assert!(swap.calls() >= 1, "the listing hook did not run");
+        assert!(
+            remote_object_matches_id(&git, &pushed.checkout, &generic.borrow(), "tree"),
+            "the hook did not put the honest generic tree back"
+        );
+        let err = assert_empty_status_refused(&git, &pushed);
+        assert!(err.contains(EMPTY_STATUS_REFUSAL), "{err}");
+        assert!(err.contains(ID_MISMATCH), "{err}");
+        assert!(err.contains(GATE_REL), "{err}");
+        assert!(!err.contains(NOT_HELD), "{err}");
+        let remote_generic = generic_tree_id(&git, pushed.bare.path());
+        assert!(
+            remote_object_matches_id(&git, pushed.bare.path(), &remote_generic, "tree"),
+            "the forgery reached the bare remote's object"
+        );
+
+        let step = |checkout: &Path, managed: &Path| {
+            let pushed = hide_hooked_template(&git, checkout, managed);
+            prime_cache_tree(&git, checkout);
+            pushed
+        };
+        let control = push_with_empty_status(&git, &engine, open_pr, &step);
+        let err = assert_empty_status_refused(&git, &control);
+        assert!(err.contains(NOT_HELD), "{err}");
+        assert!(!err.contains(ID_MISMATCH), "{err}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    #[ignore = "RED: fails until 02-24 Task 1 fix"]
+    fn test_direct_push_no_changes_refuses_subtree_rewritten_only_while_listed() {
+        assert_no_change_subtree_rewritten_only_while_listed_refused(false);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    #[ignore = "RED: fails until 02-24 Task 1 fix"]
+    fn test_pr_push_no_changes_refuses_subtree_rewritten_only_while_listed() {
+        assert_no_change_subtree_rewritten_only_while_listed_refused(true);
+    }
+
+    /// A deleted GATE_REL hidden by assume-unchanged, under a generic tree object rewritten
+    /// to list only another file and put back right after the gate's listing is read:
+    /// refused by the id check naming the staged path, the remote untouched. Control: the
+    /// same steps with the hook unarmed and no rewrite are refused because the path is
+    /// still present.
+    #[cfg(unix)]
+    fn assert_no_change_deletion_hidden_only_while_listed_refused(open_pr: bool) {
+        let git = GitFixture::new();
+        let swap = ListingSwap::default();
+        let engine = SyncEngine::new()
+            .with_extra_env(git.gitconfig_env())
+            .with_after_tree_listing(swap.hook());
+        let delete = |checkout: &Path, managed: &Path| {
+            git.run(checkout, &["update-index", "--assume-unchanged", GATE_REL]);
+            fs::remove_file(managed).unwrap();
+            prime_cache_tree(&git, checkout);
+            (vec![managed.to_path_buf()], ValidatedBlobs::default())
+        };
+        let generic = std::cell::RefCell::new(String::new());
+        let step = |checkout: &Path, managed: &Path| {
+            let pushed = delete(checkout, managed);
+            let other = write_blob(&git, checkout, b"other\n");
+            let id = checkout_generic_tree_id(&git, checkout);
+            swap.arm(checkout, &id);
+            forge_generic_tree(
+                &git,
+                checkout,
+                &format!("100644 blob {other}\tother.repo\n"),
+            );
+            let names = git.output(
+                checkout,
+                &[
+                    "--no-replace-objects",
+                    "ls-tree",
+                    "-r",
+                    "--name-only",
+                    "HEAD",
+                ],
+            );
+            assert!(
+                !names.lines().any(|name| name == GATE_REL),
+                "the forgery does not hide the path: {names}"
+            );
+            *generic.borrow_mut() = id;
+            pushed
+        };
+        let pushed = push_with_empty_status(&git, &engine, open_pr, &step);
+        assert!(swap.calls() >= 1, "the listing hook did not run");
+        assert!(
+            remote_object_matches_id(&git, &pushed.checkout, &generic.borrow(), "tree"),
+            "the hook did not put the honest generic tree back"
+        );
+        let err = assert_empty_status_refused(&git, &pushed);
+        assert!(err.contains(EMPTY_STATUS_REFUSAL), "{err}");
+        assert!(err.contains(ID_MISMATCH), "{err}");
+        assert!(err.contains(GATE_REL), "{err}");
+        let remote_generic = generic_tree_id(&git, pushed.bare.path());
+        assert!(
+            remote_object_matches_id(&git, pushed.bare.path(), &remote_generic, "tree"),
+            "the forgery reached the bare remote's object"
+        );
+
+        let control = push_with_empty_status(&git, &engine, open_pr, &delete);
+        let err = assert_empty_status_refused(&git, &control);
+        assert!(
+            err.contains(&format!(
+                "{GATE_REL} is staged for deletion and still present"
+            )),
+            "{err}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    #[ignore = "RED: fails until 02-24 Task 1 fix"]
+    fn test_direct_push_no_changes_refuses_deletion_hidden_only_while_listed() {
+        assert_no_change_deletion_hidden_only_while_listed_refused(false);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    #[ignore = "RED: fails until 02-24 Task 1 fix"]
+    fn test_pr_push_no_changes_refuses_deletion_hidden_only_while_listed() {
+        assert_no_change_deletion_hidden_only_while_listed_refused(true);
     }
 
     /// The committed route for the tree above GATE_REL: after write-tree primes the
