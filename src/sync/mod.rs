@@ -2533,16 +2533,19 @@ impl SyncEngine {
     }
 
     /// Validates `commit` (a full object id) before pushing it, as the only commit the
-    /// push adds on top of `base` (the fetched head). The commit and every tree of it are
-    /// read against their ids ([`Self::read_verified_object`]) and the tree listing is built
-    /// from those bytes ([`Self::verified_tree_listing`]). In the order it checks: it has
-    /// exactly one parent, `base`; its message is the sync commit message and its header is
-    /// free of secrets; every blob it changes, read by object id and checked against it, is
-    /// on the allowlist `paths` (relative to `repo`), free of secrets and identical to what
-    /// `validated` recorded; its tree repeats no path and has no path component that is
-    /// empty, `.` or `..`; it holds no empty directory; every path `validated` recorded holds
-    /// its recorded content, each blob read against its id; and its tree is `staged_tree`,
-    /// the id [`Self::stage_publication`] recorded. What these
+    /// push adds on top of `base` (the fetched head). The commit, the fetched head and every
+    /// tree of each are read against their ids ([`Self::read_verified_object`]) and both tree
+    /// listings are built from those bytes ([`Self::verified_tree_listing`]). The change list
+    /// is computed from the two listings ([`listing_diff`]), not by git: a fetched-head tree
+    /// whose stored bytes do not match its id could list a path the commit adds, or omit one
+    /// it deletes, and a diff that read it would not show that change. In the order it
+    /// checks: it has exactly one parent, `base`; its message is the sync commit message and
+    /// its header is free of secrets; every blob it changes, read by object id and checked
+    /// against it, is on the allowlist `paths` (relative to `repo`), free of secrets and
+    /// identical to what `validated` recorded; its tree repeats no path and has no path
+    /// component that is empty, `.` or `..`; it holds no empty directory; every path
+    /// `validated` recorded holds its recorded content, each blob read against its id; and
+    /// its tree is `staged_tree`, the id [`Self::stage_publication`] recorded. What these
     /// checks defend is the closed list in `docs/ARCHITECTURE.md`, section 3, and nothing
     /// beyond it.
     fn validate_committed_tree(
@@ -2632,36 +2635,111 @@ impl SyncEngine {
             ));
         }
 
-        let mut diff_tree = self.git(Some(repo));
-        diff_tree.args([
-            "--no-replace-objects",
-            "diff-tree",
-            "-r",
-            "-z",
-            "--raw",
-            "--no-commit-id",
-            "--no-renames",
-            base,
-            commit,
-        ]);
-        let diff_tree = self.run_local(diff_tree, "git diff-tree").map_err(|e| {
-            format!("Failed to inspect committed diff-tree in remote checkout: {e}")
-        })?;
+        // The commit's listing comes first, built from tree bytes hashed against their ids, the
+        // root included, so no check below reads tree bytes that were not hashed. A tree both
+        // commits hold is read here, and refused here if rewritten, before the fetched head's
+        // listing reuses it.
+        let Some(root) =
+            raw_commit_tree(&raw_commit).and_then(|tree| std::str::from_utf8(tree).ok())
+        else {
+            return Err(format!(
+                "Post-commit publication gate violation: unparseable commit {commit}"
+            ));
+        };
+        let validated_rel = validated.relative_to(repo);
+        // An id-mismatch refusal is named from the record, then the allowlist, never from the
+        // tree.
+        let mut recorded: Vec<&Path> = validated_rel.keys().map(PathBuf::as_path).collect();
+        recorded.sort();
+        let mut allowed: Vec<&Path> = paths.iter().map(PathBuf::as_path).collect();
+        allowed.sort();
+        let named_under =
+            |tree: &[u8]| first_path_under(tree, recorded.iter().chain(&allowed).copied());
+        let mut verified = HashMap::new();
+        let listing = self.verified_tree_listing(repo, root, &mut verified);
+        self.after_tree_listing();
+        let listing = match listing {
+            Ok(listing) => listing,
+            Err(ListingDefect::Unreadable) => {
+                return Err(format!(
+                    "Post-commit publication gate violation: failed to list the tree of {commit}"
+                ));
+            }
+            Err(ListingDefect::Unparseable) => {
+                return Err(format!(
+                    "Post-commit publication gate violation: unparseable tree entry in {commit}"
+                ));
+            }
+            Err(ListingDefect::IdMismatch(tree)) => {
+                return Err(match named_under(&tree) {
+                    Some(path) => format!(
+                        "Post-commit publication gate violation: an object read for {} {OBJECT_ID_MISMATCH}",
+                        path.display()
+                    ),
+                    None => format!(
+                        "Post-commit publication gate violation: a tree of the commit to publish {OBJECT_ID_MISMATCH}"
+                    ),
+                });
+            }
+        };
 
-        if !diff_tree.status.success() {
-            return Err("git diff-tree failed in remote checkout".to_string());
-        }
+        // The fetched head and its trees are read the same way, on the same map, so only its
+        // trees whose ids the commit does not hold are read again. git's own diff would read
+        // them unchecked, and a rewritten one could hide an added path or a deletion.
+        const BASE_UNLISTED: &str =
+            "Post-commit publication gate violation: failed to list the tree of the fetched head";
+        let raw_base = match self.read_verified_object(repo, base.as_bytes(), "commit") {
+            Ok(raw_base) => raw_base,
+            Err(ObjectDefect::Unreadable) => {
+                return Err(format!(
+                    "Post-commit publication gate violation: failed to read the fetched head {base}"
+                ));
+            }
+            Err(ObjectDefect::IdMismatch) => {
+                return Err(format!(
+                    "Post-commit publication gate violation: the fetched head's commit {OBJECT_ID_MISMATCH}"
+                ));
+            }
+        };
+        let Some(base_root) =
+            raw_commit_tree(&raw_base).and_then(|tree| std::str::from_utf8(tree).ok())
+        else {
+            return Err(BASE_UNLISTED.to_string());
+        };
+        let base_listing = match self.verified_tree_listing(repo, base_root, &mut verified) {
+            Ok(base_listing) => base_listing,
+            Err(ListingDefect::Unreadable) => return Err(BASE_UNLISTED.to_string()),
+            Err(ListingDefect::Unparseable) => {
+                return Err(
+                    "Post-commit publication gate violation: unparseable tree entry in the fetched head"
+                        .to_string(),
+                );
+            }
+            Err(ListingDefect::IdMismatch(tree)) => {
+                return Err(match named_under(&tree) {
+                    Some(path) => format!(
+                        "Post-commit publication gate violation: an object read for {} {OBJECT_ID_MISMATCH}",
+                        path.display()
+                    ),
+                    None => format!(
+                        "Post-commit publication gate violation: a tree of the fetched head {OBJECT_ID_MISMATCH}"
+                    ),
+                });
+            }
+        };
 
         // A tree can list one name twice, and a lookup by name returns one of the entries
         // while the push sends both (probed), so each listed blob is read by its own id.
         // Paths and ids are hook-chosen bytes: a refusal below never prints a listed name
         // that has not passed the allowlist.
-        let Some(entries) = raw_diff_entries(&diff_tree.stdout) else {
-            return Err(
-                "Post-commit publication gate violation: unparseable committed entry".to_string(),
-            );
+        const UNPARSEABLE_ENTRY: &str =
+            "Post-commit publication gate violation: unparseable committed entry";
+        let Some(changes) = listing_diff(&base_listing, &listing) else {
+            return Err(UNPARSEABLE_ENTRY.to_string());
         };
-        let validated_rel = validated.relative_to(repo);
+        let Some(entries) = raw_diff_entries(&changes) else {
+            return Err(UNPARSEABLE_ENTRY.to_string());
+        };
         for entry in entries {
             // A path that is not valid UTF-8 cannot be on the allowlist.
             let path = std::str::from_utf8(entry.path).ok().map(PathBuf::from);
@@ -2719,51 +2797,9 @@ impl SyncEngine {
             }
         }
 
-        // `diff-tree -r` lists blobs only, so an empty directory's name would publish
-        // unlisted. The name is hook-chosen text and is never printed. The listing is built
-        // from tree bytes hashed against their ids, the root included, so no check below
-        // reads tree bytes that were not hashed.
-        let Some(root) =
-            raw_commit_tree(&raw_commit).and_then(|tree| std::str::from_utf8(tree).ok())
-        else {
-            return Err(format!(
-                "Post-commit publication gate violation: unparseable commit {commit}"
-            ));
-        };
-        let listing = self.verified_tree_listing(repo, root, &mut HashMap::new());
-        self.after_tree_listing();
-        let listing = match listing {
-            Ok(listing) => listing,
-            Err(ListingDefect::Unreadable) => {
-                return Err(format!(
-                    "Post-commit publication gate violation: failed to list the tree of {commit}"
-                ));
-            }
-            Err(ListingDefect::Unparseable) => {
-                return Err(format!(
-                    "Post-commit publication gate violation: unparseable tree entry in {commit}"
-                ));
-            }
-            Err(ListingDefect::IdMismatch(tree)) => {
-                // Named from the record, then the allowlist, never from the tree.
-                let mut recorded: Vec<&Path> = validated_rel.keys().map(PathBuf::as_path).collect();
-                recorded.sort();
-                let mut allowed: Vec<&Path> = paths.iter().map(PathBuf::as_path).collect();
-                allowed.sort();
-                return Err(
-                    match first_path_under(&tree, recorded.into_iter().chain(allowed)) {
-                        Some(path) => format!(
-                            "Post-commit publication gate violation: an object read for {} {OBJECT_ID_MISMATCH}",
-                            path.display()
-                        ),
-                        None => format!(
-                            "Post-commit publication gate violation: a tree of the commit to publish {OBJECT_ID_MISMATCH}"
-                        ),
-                    },
-                );
-            }
-        };
-        // The staged tree is read too, not trusted: a post-index-change hook can put a
+        // The change list holds blobs only, so an empty directory's name would publish
+        // unlisted. The name is hook-chosen text and is never printed. The staged tree is
+        // read too, not trusted: a post-index-change hook can put a
         // repeated path into it before its id is recorded, and the recorded id then matches
         // (probed). None of these refusals prints a name.
         let listed_blobs = match tree_listing_blobs(&listing) {
@@ -3227,6 +3263,130 @@ fn raw_diff_entries(raw: &[u8]) -> Option<Vec<RawDiffEntry<'_>>> {
 fn split_at_nul(bytes: &[u8]) -> Option<(&[u8], &[u8])> {
     let nul = bytes.iter().position(|byte| *byte == 0)?;
     Some((&bytes[..nul], &bytes[nul + 1..]))
+}
+
+/// One record of an `ls-tree -r -t -z --full-tree` listing that is not a `tree`, as raw bytes.
+struct ListingRecord<'a> {
+    mode: &'a [u8],
+    id: &'a [u8],
+    path: &'a [u8],
+}
+
+/// The records of `listing` (`<mode> SP <type> SP <id> TAB <path>`, each ended by NUL) whose
+/// type is not `tree`, in order. `None` for a record that does not split into a mode, a type,
+/// an id and a path, or whose mode is not octal.
+fn listing_records(listing: &[u8]) -> Option<Vec<ListingRecord<'_>>> {
+    let mut records = Vec::new();
+    for record in listing.split_inclusive(|byte| *byte == 0) {
+        let record = record.strip_suffix(&[0])?;
+        let tab = record.iter().position(|byte| *byte == b'\t')?;
+        let (meta, path) = (&record[..tab], &record[tab + 1..]);
+        let mut fields = meta.split(|byte| *byte == b' ');
+        let (mode, kind, id) = (fields.next()?, fields.next()?, fields.next()?);
+        if fields.next().is_some() || kind.is_empty() || id.is_empty() {
+            return None;
+        }
+        mode_type_bits(mode)?;
+        if kind != b"tree" {
+            records.push(ListingRecord { mode, id, path });
+        }
+    }
+    Some(records)
+}
+
+/// The type bits ([`MODE_TYPE_MASK`]) of a mode written in octal ASCII; `None` when it is not.
+fn mode_type_bits(mode: &[u8]) -> Option<u32> {
+    let mode = std::str::from_utf8(mode).ok()?;
+    if mode.is_empty() || !mode.bytes().all(|digit| (b'0'..=b'7').contains(&digit)) {
+        return None;
+    }
+    Some(u32::from_str_radix(mode, 8).ok()? & MODE_TYPE_MASK)
+}
+
+/// The bytes `diff-tree -r -z --raw --no-commit-id --no-renames <base> <commit>` prints
+/// between the trees whose `ls-tree -r -t -z --full-tree` listings are `base` and `commit`,
+/// so [`raw_diff_entries`] parses them as it parses git's. Only records whose type is not
+/// `tree` count. A commit record matching an unmatched base record at its path in mode and id
+/// is no change; any other is `M` against the first unmatched base record at its path (`T`
+/// when the two modes' type bits differ), consuming it, or `A` with old mode `000000` and an
+/// all-zero old id. Each base record left unmatched is `D`, with new mode `000000` and an
+/// all-zero new id. A zero id has the length of the id beside it. Records are written as
+/// `:<old mode> <new mode> <old id> <new id> <status>` NUL `<path>` NUL and sorted by path
+/// bytes, stably: that is git's order, which compares a directory as its name followed by
+/// `/`. A path listed twice is matched as a multiset, so a repeated entry the base does not
+/// hold identically is a change. `None` when either listing has a record that does not parse.
+fn listing_diff(base: &[u8], commit: &[u8]) -> Option<Vec<u8>> {
+    let base = listing_records(base)?;
+    let commit = listing_records(commit)?;
+    let mut base_at: HashMap<&[u8], Vec<usize>> = HashMap::new();
+    for (index, record) in base.iter().enumerate() {
+        base_at.entry(record.path).or_default().push(index);
+    }
+    let mut matched = vec![false; base.len()];
+    let mut changes: Vec<(&[u8], Vec<u8>)> = Vec::new();
+    for new in &commit {
+        let at_path = base_at.get(new.path).map(Vec::as_slice).unwrap_or_default();
+        let unmatched = || at_path.iter().copied().filter(|index| !matched[*index]);
+        let same =
+            unmatched().find(|index| base[*index].mode == new.mode && base[*index].id == new.id);
+        if let Some(index) = same {
+            matched[index] = true;
+            continue;
+        }
+        let first_unmatched = unmatched().next();
+        let record = match first_unmatched {
+            Some(index) => {
+                matched[index] = true;
+                let old = &base[index];
+                let status = if mode_type_bits(old.mode)? == mode_type_bits(new.mode)? {
+                    b'M'
+                } else {
+                    b'T'
+                };
+                diff_record_bytes(old.mode, new.mode, old.id, new.id, status, new.path)
+            }
+            None => {
+                let zero = vec![b'0'; new.id.len()];
+                diff_record_bytes(b"000000", new.mode, &zero, new.id, b'A', new.path)
+            }
+        };
+        changes.push((new.path, record));
+    }
+    for (old, _) in base.iter().zip(&matched).filter(|(_, matched)| !**matched) {
+        let zero = vec![b'0'; old.id.len()];
+        let record = diff_record_bytes(old.mode, b"000000", old.id, &zero, b'D', old.path);
+        changes.push((old.path, record));
+    }
+    changes.sort_by(|left, right| left.0.cmp(right.0));
+    Some(changes.into_iter().flat_map(|(_, record)| record).collect())
+}
+
+/// One `diff-tree -z --raw` record: `:<old mode> <new mode> <old id> <new id> <status>` NUL
+/// `<path>` NUL.
+fn diff_record_bytes(
+    old_mode: &[u8],
+    new_mode: &[u8],
+    old_id: &[u8],
+    new_id: &[u8],
+    status: u8,
+    path: &[u8],
+) -> Vec<u8> {
+    [
+        b":",
+        old_mode,
+        b" ",
+        new_mode,
+        b" ",
+        old_id,
+        b" ",
+        new_id,
+        b" ",
+        &[status],
+        b"\0",
+        path,
+        b"\0",
+    ]
+    .concat()
 }
 
 /// Removes every `GIT_TEST_*` variable from `command`'s environment: the keys of
@@ -13892,7 +14052,7 @@ git replace -f "$C" "$TG"
         let rows = [
             (".", "path component"),
             ("..", "unvalidated file committed"),
-            ("", "git diff-tree failed"),
+            ("", "unparseable tree entry"),
         ];
         let mut failures = Vec::new();
         for (component, expected) in rows {
@@ -15238,7 +15398,6 @@ git update-ref HEAD "$N"
     /// Refused by the id check naming the recorded path. Control for each, first: the same
     /// commit over the honest fetched head is refused as unvalidated.
     #[test]
-    #[ignore = "RED: fails until 02-25 Task 1 fix"]
     fn test_committed_gate_refuses_base_tree_not_matching_its_id() {
         let git = GitFixture::new();
         let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
@@ -16247,14 +16406,12 @@ git update-ref HEAD "$N"
 
     #[test]
     #[cfg(unix)]
-    #[ignore = "RED: fails until 02-25 Task 1 fix"]
     fn test_direct_push_refuses_added_file_hidden_by_base_tree_not_matching_its_id() {
         assert_added_file_hidden_by_base_tree_refused(false);
     }
 
     #[test]
     #[cfg(unix)]
-    #[ignore = "RED: fails until 02-25 Task 1 fix"]
     fn test_pr_push_refuses_added_file_hidden_by_base_tree_not_matching_its_id() {
         assert_added_file_hidden_by_base_tree_refused(true);
     }
