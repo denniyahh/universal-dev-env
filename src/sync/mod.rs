@@ -2887,13 +2887,14 @@ impl SyncEngine {
     /// What an empty `git status` (or an empty `staged_files`) must satisfy before a push
     /// returns "nothing to push": HEAD is `target.fetched_sha`, its tree, read past replace
     /// refs, holds every recorded path with its recorded content, and every staged path
-    /// with no record (a deletion) is gone from it. Each blob, and each tree above a
-    /// recorded or deleted path, is read against its id, as
-    /// [`Self::first_path_not_held`] describes; git checks the root tree and the commit
-    /// itself. With nothing staged and nothing recorded there is nothing to check. The
-    /// fetched head was confirmed against the remote by the ensure, so Ok here means the
-    /// remote's head held the content when read. Paths in a refusal come from `validated`
-    /// and `staged_files`, never from the tree.
+    /// with no record (a deletion) is gone from it. The listing every decision is taken
+    /// from is built ([`Self::verified_tree_listing`]) from tree bytes hashed against their
+    /// ids, the root included, starting from the fetched head's commit read the same way
+    /// ([`Self::read_verified_object`]); each recorded blob is read against its id too. With
+    /// nothing staged and nothing recorded there is nothing to check. The fetched head was
+    /// confirmed against the remote by the ensure, so Ok here means the remote's head held
+    /// the content when read. A refusal names only a recorded or staged path, or none,
+    /// never a name from the tree.
     fn require_fetched_head_holds(
         &self,
         target: &PublishTarget<'_>,
@@ -2916,37 +2917,58 @@ impl SyncEngine {
             ));
         }
 
-        // Its own invocation, not validate_committed_tree's: the option is what makes this
-        // read see the objects the remote holds, not what a replace ref names.
-        let mut ls_tree = self.git(Some(repo));
-        ls_tree.args([
-            "--no-replace-objects",
-            "ls-tree",
-            "-r",
-            "-t",
-            "-z",
-            "--full-tree",
-            &head,
-        ]);
-        let listing = self.run_local(ls_tree, "git ls-tree");
+        // The commit and every tree are read against their ids, past replace refs, and the
+        // listing is built from those bytes, so no decision below comes from tree bytes that
+        // were not hashed: a tree object swapped between two reads cannot give one answer to
+        // the listing and another to the check.
+        let cannot_list = || format!("{PREFIX} the fetched head's tree cannot be listed");
+        let raw_head = match self.read_verified_object(repo, head.as_bytes(), "commit") {
+            Ok(raw_head) => raw_head,
+            Err(ObjectDefect::Unreadable) => return Err(cannot_list()),
+            Err(ObjectDefect::IdMismatch) => {
+                return Err(format!(
+                    "{PREFIX} the fetched head's commit {OBJECT_ID_MISMATCH}"
+                ));
+            }
+        };
+        let Some(root) = raw_commit_tree(&raw_head).and_then(|tree| std::str::from_utf8(tree).ok())
+        else {
+            return Err(cannot_list());
+        };
+        let listing = self.verified_tree_listing(repo, root, &mut HashMap::new());
         self.after_tree_listing();
-        let listing = listing
-            .map_err(|e| format!("{PREFIX} the fetched head's tree cannot be listed: {e}"))?;
-        if !listing.status.success() {
-            return Err(with_excerpt(
-                format!("{PREFIX} the fetched head's tree cannot be listed"),
-                &listing,
-            ));
-        }
         let unparseable = || {
             format!(
                 "{PREFIX} the fetched head's tree repeats a path, has a bad path component or cannot be parsed"
             )
         };
-        let Ok(listed_blobs) = tree_listing_blobs(&listing.stdout) else {
+        let listing = match listing {
+            Ok(listing) => listing,
+            Err(ListingDefect::Unreadable) => return Err(cannot_list()),
+            Err(ListingDefect::Unparseable) => return Err(unparseable()),
+            Err(ListingDefect::IdMismatch(tree)) => {
+                // Named from the record, then the staged deletions, never from the tree.
+                let mut recorded: Vec<&Path> = validated_rel.keys().map(PathBuf::as_path).collect();
+                recorded.sort();
+                let deleted = staged_files
+                    .iter()
+                    .map(|staged| staged.strip_prefix(repo).unwrap_or(staged))
+                    .filter(|rel| !validated_rel.contains_key(*rel));
+                return Err(
+                    match first_path_under(&tree, recorded.into_iter().chain(deleted)) {
+                        Some(path) => format!(
+                            "{PREFIX} an object read for {} {OBJECT_ID_MISMATCH}",
+                            path.display()
+                        ),
+                        None => format!("{PREFIX} a tree of the fetched head {OBJECT_ID_MISMATCH}"),
+                    },
+                );
+            }
+        };
+        let Ok(listed_blobs) = tree_listing_blobs(&listing) else {
             return Err(unparseable());
         };
-        let Some(listed_trees) = listed_tree_ids(&listing.stdout) else {
+        let Some(listed_trees) = listed_tree_ids(&listing) else {
             return Err(unparseable());
         };
 
@@ -2968,30 +2990,16 @@ impl SyncEngine {
         // Any entry type counts as present, not only the regular files listed_blobs keeps.
         let listed = |path: &[u8]| {
             listing
-                .stdout
                 .split(|byte| *byte == 0)
                 .filter_map(|record| record.splitn(2, |byte| *byte == b'\t').nth(1))
                 .any(|listed_path| listed_path == path)
         };
-        // A rewritten tree above a deleted path can leave the path out of the listing while
-        // the remote's tree still holds it, so the trees above it are read against their ids.
-        let mut verified = HashSet::new();
+        // Every tree in the listing was hashed when it was read, so a rewritten tree above
+        // a deleted path was refused above and cannot leave the path out of the listing.
         for staged in staged_files {
             let rel = staged.strip_prefix(repo).unwrap_or(staged);
             if validated_rel.contains_key(rel) {
                 continue;
-            }
-            match self.verify_ancestor_trees(repo, &listed_trees, rel, &mut verified) {
-                Ok(()) => {}
-                Err(ObjectDefect::IdMismatch) => {
-                    return Err(format!(
-                        "{PREFIX} an object read for {} {OBJECT_ID_MISMATCH}",
-                        rel.display()
-                    ));
-                }
-                Err(ObjectDefect::Unreadable) => {
-                    return Err(format!("{PREFIX} the fetched head's tree cannot be listed"));
-                }
             }
             if listed(&git_path_bytes(rel)) {
                 return Err(format!(
@@ -3013,7 +3021,7 @@ impl SyncEngine {
         self.read_verified_object(repo, oid, "blob")
     }
 
-    /// The exact bytes of the object `oid` of type `kind` (`blob` or `tree`) in `repo`, past
+    /// The exact bytes of the object `oid` of type `kind` (`blob`, `tree` or `commit`) in `repo`, past
     /// any replace ref, checked against the id: git returns the bytes stored under an id
     /// without checking that they hash to it, for a blob read with `cat-file` and for a
     /// subtree walked by `ls-tree -r` (measured). The bytes are hashed with `git hash-object`
@@ -3064,6 +3072,79 @@ impl SyncEngine {
             return Err(ObjectDefect::IdMismatch);
         }
         Ok(out.stdout)
+    }
+
+    /// The listing `ls-tree -r -t -z --full-tree` prints for the tree `root`, built in process
+    /// from tree bytes hashed against their ids ([`Self::read_verified_object`]), the root
+    /// included, so no entry in it comes from bytes that were not hashed. Each record is the
+    /// mode as six octal digits, a space, the type (`tree`, `commit` for a gitlink, `blob`),
+    /// a space, the id as lowercase hex, a tab, the path as raw bytes, NUL; a tree's record
+    /// comes before its contents and its contents before its next sibling, and a gitlink is
+    /// not entered. The id length follows `root`'s (40 or 64 hex digits). Trees already in
+    /// `verified` are not read again, and each tree read is kept there by id. The walk is
+    /// iterative, so no depth can overflow the stack.
+    fn verified_tree_listing(
+        &self,
+        repo: &Path,
+        root: &str,
+        verified: &mut HashMap<String, Vec<u8>>,
+    ) -> Result<Vec<u8>, ListingDefect> {
+        let id_len = match root.len() {
+            40 | 64 => root.len() / 2,
+            _ => return Err(ListingDefect::Unreadable),
+        };
+        let mut listing = Vec::new();
+        // Entries still to print, the next one last: (path, mode, id as hex).
+        let mut pending = Vec::new();
+        self.push_tree_entries(repo, root, &[], id_len, verified, &mut pending)?;
+        while let Some((path, mode, id)) = pending.pop() {
+            let kind = match mode {
+                MODE_DIRECTORY => "tree",
+                MODE_GITLINK => "commit",
+                _ => "blob",
+            };
+            listing.extend_from_slice(format!("{mode:06o} {kind} {id}\t").as_bytes());
+            listing.extend_from_slice(&path);
+            listing.push(0);
+            if mode == MODE_DIRECTORY {
+                self.push_tree_entries(repo, &id, &path, id_len, verified, &mut pending)?;
+            }
+        }
+        Ok(listing)
+    }
+
+    /// Reads the tree `id` at listing path `path` through `verified` (as
+    /// [`Self::verified_tree_listing`] describes) and pushes its entries onto `pending` in
+    /// reverse stored order, so the first entry is popped next.
+    fn push_tree_entries(
+        &self,
+        repo: &Path,
+        id: &str,
+        path: &[u8],
+        id_len: usize,
+        verified: &mut HashMap<String, Vec<u8>>,
+        pending: &mut Vec<(Vec<u8>, u32, String)>,
+    ) -> Result<(), ListingDefect> {
+        if !verified.contains_key(id) {
+            let bytes = match self.read_verified_object(repo, id.as_bytes(), "tree") {
+                Ok(bytes) => bytes,
+                Err(ObjectDefect::IdMismatch) => {
+                    return Err(ListingDefect::IdMismatch(path.to_vec()));
+                }
+                Err(ObjectDefect::Unreadable) => return Err(ListingDefect::Unreadable),
+            };
+            verified.insert(id.to_string(), bytes);
+        }
+        let entries = parse_tree_object(&verified[id], id_len).ok_or(ListingDefect::Unparseable)?;
+        for entry in entries.iter().rev() {
+            let mut entry_path = path.to_vec();
+            if !entry_path.is_empty() {
+                entry_path.push(b'/');
+            }
+            entry_path.extend_from_slice(entry.name);
+            pending.push((entry_path, entry.mode, lower_hex(entry.id)));
+        }
+        Ok(())
     }
 }
 
@@ -3286,6 +3367,112 @@ fn git_path_bytes(path: &Path) -> Vec<u8> {
         .map(|component| component.as_os_str().as_encoded_bytes())
         .collect();
     components.join(&b'/')
+}
+
+/// The bits of a git mode that give the entry type.
+const MODE_TYPE_MASK: u32 = 0o170000;
+/// A regular file's type bits.
+const MODE_REGULAR: u32 = 0o100000;
+/// A symlink's mode.
+const MODE_SYMLINK: u32 = 0o120000;
+/// A directory's (tree's) mode.
+const MODE_DIRECTORY: u32 = 0o040000;
+/// A gitlink's (submodule commit's) mode.
+const MODE_GITLINK: u32 = 0o160000;
+/// The owner-execute bit that makes a regular file 100755.
+const MODE_OWNER_EXECUTE: u32 = 0o100;
+
+/// The mode git's `canon_mode` makes of a raw tree entry's mode: a regular file is 100755
+/// when the owner-execute bit is set and 100644 otherwise, a symlink 120000, a directory
+/// 040000, anything else a gitlink, 160000.
+fn canonical_mode(mode: u32) -> u32 {
+    match mode & MODE_TYPE_MASK {
+        MODE_REGULAR if mode & MODE_OWNER_EXECUTE != 0 => 0o100755,
+        MODE_REGULAR => 0o100644,
+        MODE_SYMLINK => MODE_SYMLINK,
+        MODE_DIRECTORY => MODE_DIRECTORY,
+        _ => MODE_GITLINK,
+    }
+}
+
+/// One entry of a raw tree object, as [`parse_tree_object`] decodes it.
+struct TreeEntry<'a> {
+    /// The mode, canonical as [`canonical_mode`] makes it.
+    mode: u32,
+    /// The entry's name: raw bytes, never empty, with no NUL.
+    name: &'a [u8],
+    /// The raw id bytes, exactly the repository's id length.
+    id: &'a [u8],
+}
+
+/// Decodes a raw tree object (`cat-file tree` output) as git's tree decoder does: each entry
+/// is one or more ASCII octal digits, a space, a non-empty name, NUL, then exactly `id_len`
+/// raw id bytes. `None` where git's decoder refuses (no digit, a digit outside 0-7, an empty
+/// name, no NUL, too few id bytes), and for a mode that overflows u32, which git's mode
+/// parser accepts by wrapping: there this decoder fails closed. Empty input is an empty
+/// tree.
+fn parse_tree_object(bytes: &[u8], id_len: usize) -> Option<Vec<TreeEntry<'_>>> {
+    let mut entries = Vec::new();
+    let mut rest = bytes;
+    while !rest.is_empty() {
+        let space = rest.iter().position(|byte| *byte == b' ')?;
+        let (digits, after_mode) = (&rest[..space], &rest[space + 1..]);
+        if digits.is_empty() {
+            return None;
+        }
+        let mut mode: u32 = 0;
+        for digit in digits {
+            if !(b'0'..=b'7').contains(digit) {
+                return None;
+            }
+            mode = mode.checked_mul(8)?.checked_add(u32::from(digit - b'0'))?;
+        }
+        let (name, after_name) = split_at_nul(after_mode)?;
+        if name.is_empty() || after_name.len() < id_len {
+            return None;
+        }
+        let (id, after_id) = after_name.split_at(id_len);
+        entries.push(TreeEntry {
+            mode: canonical_mode(mode),
+            name,
+            id,
+        });
+        rest = after_id;
+    }
+    Some(entries)
+}
+
+/// Why [`SyncEngine::verified_tree_listing`] did not build a listing.
+#[derive(Debug, PartialEq, Eq)]
+enum ListingDefect {
+    /// The root id is neither 40 nor 64 hex digits, or a tree is missing, of another type,
+    /// or a read or its hash failed.
+    Unreadable,
+    /// A tree's bytes do not decode as git decodes a tree ([`parse_tree_object`]).
+    Unparseable,
+    /// The bytes stored under a tree's id do not hash to it. Holds that tree's listing
+    /// path, empty for the root; it is tree-chosen text and never printed.
+    IdMismatch(Vec<u8>),
+}
+
+/// `bytes` as lowercase hex, the way git prints an object id.
+fn lower_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// The first of `candidates` (recorded, staged or allowlisted paths) that lies under the
+/// listing path `tree`, or the first candidate at all when `tree` is empty (the root).
+/// Compared as raw bytes ([`git_path_bytes`]).
+fn first_path_under<'p>(
+    tree: &[u8],
+    candidates: impl IntoIterator<Item = &'p Path>,
+) -> Option<&'p Path> {
+    candidates.into_iter().find(|path| {
+        tree.is_empty()
+            || git_path_bytes(path)
+                .strip_prefix(tree)
+                .is_some_and(|below| below.starts_with(b"/"))
+    })
 }
 
 /// `remote_url` unchanged, unless it is a relative path that exists, which is made
@@ -15521,14 +15708,12 @@ git update-ref HEAD "$N"
 
     #[test]
     #[cfg(unix)]
-    #[ignore = "RED: fails until 02-24 Task 1 fix"]
     fn test_direct_push_no_changes_refuses_subtree_rewritten_only_while_listed() {
         assert_no_change_subtree_rewritten_only_while_listed_refused(false);
     }
 
     #[test]
     #[cfg(unix)]
-    #[ignore = "RED: fails until 02-24 Task 1 fix"]
     fn test_pr_push_no_changes_refuses_subtree_rewritten_only_while_listed() {
         assert_no_change_subtree_rewritten_only_while_listed_refused(true);
     }
@@ -15607,14 +15792,12 @@ git update-ref HEAD "$N"
 
     #[test]
     #[cfg(unix)]
-    #[ignore = "RED: fails until 02-24 Task 1 fix"]
     fn test_direct_push_no_changes_refuses_deletion_hidden_only_while_listed() {
         assert_no_change_deletion_hidden_only_while_listed_refused(false);
     }
 
     #[test]
     #[cfg(unix)]
-    #[ignore = "RED: fails until 02-24 Task 1 fix"]
     fn test_pr_push_no_changes_refuses_deletion_hidden_only_while_listed() {
         assert_no_change_deletion_hidden_only_while_listed_refused(true);
     }
