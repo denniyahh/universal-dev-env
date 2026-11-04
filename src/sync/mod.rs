@@ -14144,6 +14144,464 @@ git replace -f "$C" "$TG"
         );
     }
 
+    /// The opening of every refusal on the empty-status route.
+    #[cfg(unix)]
+    const EMPTY_STATUS_REFUSAL: &str = "git status reports nothing to push";
+
+    /// The refusal of a record the fetched head does not hold.
+    const NOT_HELD: &str = "does not hold the validated content";
+
+    /// The number of the bare remote's heads whose managed template is exactly `bytes`.
+    #[cfg(unix)]
+    fn remote_heads_holding(git: &GitFixture, bare: &Path, bytes: &[u8]) -> usize {
+        remote_heads(git, bare)
+            .iter()
+            .filter(|(name, _)| {
+                git.cmd(bare)
+                    .args(["show", &format!("{name}:{GATE_REL}")])
+                    .output()
+                    .unwrap()
+                    .stdout
+                    == bytes
+            })
+            .count()
+    }
+
+    /// No `ude-sync-*` branch is left in the cache checkout.
+    #[cfg(unix)]
+    fn assert_no_local_sync_branch(git: &GitFixture, checkout: &Path) {
+        assert_eq!(
+            git.output(checkout, &["branch", "--list", "ude-sync-*"]),
+            "",
+            "a sync branch was left in the cache checkout"
+        );
+    }
+
+    /// Installs, after a first ensure, a post-index-change hook that runs `tail` once
+    /// during the ensure under test, then pushes [`HOOKED_TEMPLATE`].
+    #[cfg(unix)]
+    fn push_with_index_hook_during_ensure(
+        git: &GitFixture,
+        engine: &SyncEngine,
+        open_pr: bool,
+        tail: &str,
+    ) -> EnsuredPush {
+        let setup = |_: &Path, checkout: &Path| {
+            install_checkout_hook(checkout, "post-index-change", "", tail);
+        };
+        push_after_hooked_ensure(git, engine, open_pr, Some(&setup), true)
+    }
+
+    /// A hook that sets assume-unchanged on the template while ensure resets the checkout
+    /// hides the edit from `git status`: the push is refused because the fetched head does
+    /// not hold the record, and no remote head moves. Control: the same hook without the
+    /// flag publishes the edit.
+    #[cfg(unix)]
+    fn assert_flag_set_during_ensure_refused(open_pr: bool) {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let flag = format!("git update-index --assume-unchanged '{GATE_REL}'\n");
+        let pushed = push_with_index_hook_during_ensure(&git, &engine, open_pr, &flag);
+        assert_hook_ran(&pushed);
+        match &pushed.res {
+            Err(PushRemoteError::Failed(e)) => {
+                assert!(e.contains(EMPTY_STATUS_REFUSAL), "{e}");
+                assert!(e.contains(NOT_HELD), "{e}");
+                assert!(e.contains(GATE_REL), "{e}");
+            }
+            other => panic!("expected the empty-status refusal, got {other:?}"),
+        }
+        assert_eq!(
+            remote_heads(&git, pushed.bare.path()),
+            pushed.heads_before,
+            "a remote head moved"
+        );
+        assert_no_local_sync_branch(&git, &pushed.checkout);
+
+        let control = push_with_index_hook_during_ensure(&git, &engine, open_pr, ":\n");
+        assert_hook_ran(&control);
+        assert!(control.res.is_ok(), "{:?}", control.res);
+        assert_eq!(
+            remote_heads_holding(&git, control.bare.path(), HOOKED_TEMPLATE.as_bytes()),
+            1,
+            "the control did not publish the edit"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_direct_push_refuses_assume_unchanged_set_during_ensure() {
+        assert_flag_set_during_ensure_refused(false);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_pr_push_refuses_assume_unchanged_set_during_ensure() {
+        assert_flag_set_during_ensure_refused(true);
+    }
+
+    /// What a test inspects after [`push_with_empty_status`].
+    #[cfg(unix)]
+    struct EmptyStatusPush {
+        res: Result<String, PushRemoteError>,
+        bare: tempfile::TempDir,
+        _cache: tempfile::TempDir,
+        checkout: PathBuf,
+        fetched_sha: String,
+        /// The remote's heads just before the push.
+        heads_before: Vec<(String, String)>,
+    }
+
+    /// What a step hands the push: the staged files and the record.
+    #[cfg(unix)]
+    type StepResult = (Vec<PathBuf>, ValidatedBlobs);
+
+    /// Seeds a bare remote, runs [`SyncEngine::ensure_remote_repo_for_push`], then
+    /// `step(checkout, managed template)`, and pushes what the step returns. Requires
+    /// `git status` to print nothing after the step, so the push takes the empty-status
+    /// route.
+    #[cfg(unix)]
+    fn push_with_empty_status(
+        git: &GitFixture,
+        engine: &SyncEngine,
+        open_pr: bool,
+        step: &dyn Fn(&Path, &Path) -> StepResult,
+    ) -> EmptyStatusPush {
+        let bare = seeded_bare_remote(git);
+        let cache = tempdir().unwrap();
+        let cached = engine
+            .ensure_remote_repo_for_push(bare.path().to_str().unwrap(), "main", cache.path())
+            .unwrap();
+        let checkout = cached.checkout_dir.clone();
+        let managed = cached.templates_dir.join("projects/generic/gitconfig.repo");
+        let (staged, validated) = step(&checkout, &managed);
+        assert_eq!(
+            git.output(&checkout, &["status", "--porcelain"]),
+            "",
+            "the step left git status non-empty, so the push would not take the empty-status route"
+        );
+        let heads_before = remote_heads(git, bare.path());
+        let res =
+            engine.push_to_remote(&cached.publish_target("main"), open_pr, &staged, &validated);
+        let fetched_sha = cached.fetched_sha.clone();
+        drop(cached);
+        EmptyStatusPush {
+            res,
+            bare,
+            _cache: cache,
+            checkout,
+            fetched_sha,
+            heads_before,
+        }
+    }
+
+    /// The push failed hard, no remote head moved and no sync branch is left; returns the
+    /// refusal.
+    #[cfg(unix)]
+    fn assert_empty_status_refused(git: &GitFixture, pushed: &EmptyStatusPush) -> String {
+        let err = match &pushed.res {
+            Err(PushRemoteError::Failed(e)) => e.clone(),
+            other => panic!("expected a hard push failure, got {other:?}"),
+        };
+        assert_eq!(
+            remote_heads(git, pushed.bare.path()),
+            pushed.heads_before,
+            "a remote head moved: {err}"
+        );
+        assert_no_local_sync_branch(git, &pushed.checkout);
+        err
+    }
+
+    /// Writes [`HOOKED_TEMPLATE`] over the managed template and records it.
+    #[cfg(unix)]
+    fn write_hooked_template(managed: &Path) -> StepResult {
+        fs::write(managed, HOOKED_TEMPLATE).unwrap();
+        let validated = ValidatedBlobs::from_files(&[managed.to_path_buf()]);
+        (vec![managed.to_path_buf()], validated)
+    }
+
+    /// assume-unchanged set after ensure, on the edited template: refused, nothing moved.
+    /// No assertion on which refusal fires.
+    #[cfg(unix)]
+    fn assert_flag_set_after_ensure_refused(open_pr: bool) {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let step = |checkout: &Path, managed: &Path| {
+            let pushed = write_hooked_template(managed);
+            git.run(checkout, &["update-index", "--assume-unchanged", GATE_REL]);
+            pushed
+        };
+        let pushed = push_with_empty_status(&git, &engine, open_pr, &step);
+        assert_empty_status_refused(&git, &pushed);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_direct_push_refuses_assume_unchanged_set_after_ensure() {
+        assert_flag_set_after_ensure_refused(false);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_pr_push_refuses_assume_unchanged_set_after_ensure() {
+        assert_flag_set_after_ensure_refused(true);
+    }
+
+    /// A commit holding the validated content on top of the fetched head leaves status
+    /// empty and would read as held, while nothing reached the remote: refused because
+    /// HEAD is not the fetched head, with neither id in the message.
+    #[cfg(unix)]
+    fn assert_head_off_the_fetched_head_refused(open_pr: bool) {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let step = |checkout: &Path, managed: &Path| {
+            let pushed = write_hooked_template(managed);
+            git.run(checkout, &["commit", "-q", "-a", "-m", "hook commit"]);
+            pushed
+        };
+        let pushed = push_with_empty_status(&git, &engine, open_pr, &step);
+        let head = git.output(&pushed.checkout, &["rev-parse", "HEAD"]);
+        assert_ne!(head, pushed.fetched_sha, "the step made no commit");
+        assert_eq!(
+            git.output(&pushed.checkout, &["show", &format!("HEAD:{GATE_REL}")]),
+            HOOKED_TEMPLATE.trim_end(),
+            "HEAD does not hold the validated content, so the HEAD check is not what refuses"
+        );
+        let err = assert_empty_status_refused(&git, &pushed);
+        assert!(err.contains(EMPTY_STATUS_REFUSAL), "{err}");
+        assert!(err.contains("is not the fetched head"), "{err}");
+        assert!(!err.contains(&head), "the refusal printed HEAD's id: {err}");
+        assert!(
+            !err.contains(&pushed.fetched_sha),
+            "the refusal printed the fetched head's id: {err}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_direct_push_no_changes_refuses_head_off_the_fetched_head() {
+        assert_head_off_the_fetched_head_refused(false);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_pr_push_no_changes_refuses_head_off_the_fetched_head() {
+        assert_head_off_the_fetched_head_refused(true);
+    }
+
+    /// assume-unchanged on a template removed from the working tree hides the deletion:
+    /// the staged path with no record is still in the fetched head, so the push is
+    /// refused naming it. test_push_to_remote_deletion is the control: a real deletion
+    /// publishes.
+    #[cfg(unix)]
+    fn assert_deleted_path_still_held_refused(open_pr: bool) {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let step = |checkout: &Path, managed: &Path| {
+            git.run(checkout, &["update-index", "--assume-unchanged", GATE_REL]);
+            fs::remove_file(managed).unwrap();
+            (vec![managed.to_path_buf()], ValidatedBlobs::default())
+        };
+        let pushed = push_with_empty_status(&git, &engine, open_pr, &step);
+        let err = assert_empty_status_refused(&git, &pushed);
+        assert!(err.contains(EMPTY_STATUS_REFUSAL), "{err}");
+        assert!(
+            err.contains(&format!(
+                "{GATE_REL} is staged for deletion and still present"
+            )),
+            "{err}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_direct_push_no_changes_refuses_deleted_path_still_held() {
+        assert_deleted_path_still_held_refused(false);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_pr_push_no_changes_refuses_deleted_path_still_held() {
+        assert_deleted_path_still_held_refused(true);
+    }
+
+    /// A record equal to what the fetched head holds is the legitimate no-change case:
+    /// Ok("No changes..."), the remote's heads unchanged, no sync branch.
+    #[cfg(unix)]
+    fn assert_no_change_publishes_nothing(open_pr: bool) {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let step = |_: &Path, managed: &Path| {
+            let validated = ValidatedBlobs::from_files(&[managed.to_path_buf()]);
+            (vec![managed.to_path_buf()], validated)
+        };
+        let pushed = push_with_empty_status(&git, &engine, open_pr, &step);
+        assert_eq!(
+            pushed.res,
+            Ok("No changes to push to remote repository.".to_string())
+        );
+        assert_eq!(remote_heads(&git, pushed.bare.path()), pushed.heads_before);
+        assert_no_local_sync_branch(&git, &pushed.checkout);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_direct_push_no_changes_publishes_nothing_when_content_is_held() {
+        assert_no_change_publishes_nothing(false);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_pr_push_no_changes_publishes_nothing_when_content_is_held() {
+        assert_no_change_publishes_nothing(true);
+    }
+
+    /// post-checkout tail, run by `checkout -B` before ensure's `reset --hard`: points
+    /// `refs/replace/<HEAD's tree>` at that tree with the blob of
+    /// `.git/ude-test-validated-bytes` at [`GATE_REL`], so the reset fills the index and the
+    /// working tree with the validated bytes. Leaves the tree id and the blob id in
+    /// `.git/ude-test-replaced-tree` and `.git/ude-test-injected-blob`.
+    #[cfg(unix)]
+    const HOOK_REPLACE_FETCHED_TREE: &str = r#"B=$(git hash-object -w --no-filters .git/ude-test-validated-bytes)
+T=$(git rev-parse 'HEAD^{tree}')
+export GIT_INDEX_FILE=.git/ude-probe-idx
+git read-tree "$T"
+git update-index --add --cacheinfo 100644,"$B",templates/projects/generic/gitconfig.repo
+R=$(git write-tree)
+unset GIT_INDEX_FILE
+git update-ref "refs/replace/$T" "$R"
+printf '%s\n' "$T" > .git/ude-test-replaced-tree
+printf '%s\n' "$B" > .git/ude-test-injected-blob
+"#;
+
+    /// A replace ref on the fetched head's tree makes status empty with the validated bytes
+    /// in the working tree and no index flag. The read past replace refs sees the seed's
+    /// blob, so the push is refused on the empty-status route and nothing moves. Control:
+    /// an ordinary `ls-tree` of the fetched head lists the validated blob, so a read
+    /// without the option would have found the content held.
+    #[cfg(unix)]
+    fn assert_replace_ref_on_fetched_tree_refused(open_pr: bool) {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let setup = |_: &Path, checkout: &Path| {
+            fs::write(
+                checkout.join(".git/ude-test-validated-bytes"),
+                HOOKED_TEMPLATE,
+            )
+            .unwrap();
+            install_checkout_hook(checkout, "post-checkout", "", HOOK_REPLACE_FETCHED_TREE);
+        };
+        let pushed = push_after_hooked_ensure(&git, &engine, open_pr, Some(&setup), true);
+        assert_hook_ran(&pushed);
+        let tree = fs::read_to_string(pushed.checkout.join(".git/ude-test-replaced-tree"))
+            .unwrap()
+            .trim()
+            .to_string();
+        let blob = fs::read_to_string(pushed.checkout.join(".git/ude-test-injected-blob"))
+            .unwrap()
+            .trim()
+            .to_string();
+        git.run(
+            &pushed.checkout,
+            &["rev-parse", "--verify", &format!("refs/replace/{tree}")],
+        );
+        match &pushed.res {
+            Err(PushRemoteError::Failed(e)) => {
+                assert!(e.contains(EMPTY_STATUS_REFUSAL), "{e}");
+                assert!(e.contains(NOT_HELD), "{e}");
+            }
+            other => panic!("expected the empty-status refusal, got {other:?}"),
+        }
+        assert_eq!(
+            remote_heads(&git, pushed.bare.path()),
+            pushed.heads_before,
+            "a remote head moved"
+        );
+        assert_no_local_sync_branch(&git, &pushed.checkout);
+
+        let fetched = pushed
+            .fetched_sha
+            .clone()
+            .expect("the ensure returned a cache");
+        let seed_blob = git.output(
+            pushed.bare.path(),
+            &["rev-parse", &format!("main:{GATE_REL}")],
+        );
+        assert_ne!(seed_blob, blob);
+        let replaced = git.output(&pushed.checkout, &["ls-tree", &fetched, GATE_REL]);
+        assert!(replaced.contains(&blob), "{replaced}");
+        let raw = git.output(
+            &pushed.checkout,
+            &["--no-replace-objects", "ls-tree", &fetched, GATE_REL],
+        );
+        assert!(raw.contains(&seed_blob), "{raw}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_direct_push_no_changes_refuses_replace_ref_on_the_fetched_tree() {
+        assert_replace_ref_on_fetched_tree_refused(false);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_pr_push_no_changes_refuses_replace_ref_on_the_fetched_tree() {
+        assert_replace_ref_on_fetched_tree_refused(true);
+    }
+
+    /// The empty-status check on its own, over a plain repository with two committed
+    /// templates: one recorded path held passes; one held and one not refuses naming the
+    /// one not held; a staged path with no record present in HEAD refuses and absent
+    /// passes; nothing staged and nothing recorded passes without reading HEAD (the
+    /// fetched head is empty, which any read refuses: last row); HEAD other than the
+    /// fetched head refuses.
+    #[test]
+    fn test_require_fetched_head_holds_edges() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let (repo, held) = gate_repo(&git);
+        let other_rel = "templates/projects/generic/gitignore.repo";
+        let other = repo.path().join(other_rel);
+        fs::write(&other, "target/\n").unwrap();
+        git.run(repo.path(), &["add", "-A"]);
+        git.run(repo.path(), &["commit", "-q", "-m", "second template"]);
+        let head = git.output(repo.path(), &["rev-parse", "HEAD"]);
+        let at_head = checkout_target(repo.path(), &head);
+        let check = |target: &PublishTarget<'_>, staged: &[PathBuf], record: &ValidatedBlobs| {
+            engine.require_fetched_head_holds(target, staged, record)
+        };
+
+        let one = ValidatedBlobs::from_files(std::slice::from_ref(&held));
+        assert_eq!(check(&at_head, std::slice::from_ref(&held), &one), Ok(()));
+
+        fs::write(&other, "target/\nnode_modules/\n").unwrap();
+        let both_paths = [held.clone(), other.clone()];
+        let both = ValidatedBlobs::from_files(&both_paths);
+        let err = check(&at_head, &both_paths, &both).expect_err("one path is not held");
+        assert!(err.contains(&format!("{NOT_HELD} of {other_rel}")), "{err}");
+        assert!(!err.contains(GATE_REL), "{err}");
+        fs::write(&other, "target/\n").unwrap();
+
+        let none = ValidatedBlobs::default();
+        let err = check(&at_head, std::slice::from_ref(&other), &none)
+            .expect_err("a deleted path still in HEAD");
+        assert!(
+            err.contains(&format!(
+                "{other_rel} is staged for deletion and still present"
+            )),
+            "{err}"
+        );
+        let absent = repo.path().join("templates/projects/generic/absent.repo");
+        assert_eq!(check(&at_head, &[absent], &none), Ok(()));
+
+        let no_fetched_head = checkout_target(repo.path(), "");
+        assert_eq!(check(&no_fetched_head, &[], &none), Ok(()));
+
+        let err = check(&no_fetched_head, std::slice::from_ref(&held), &one)
+            .expect_err("HEAD is not the fetched head");
+        assert!(err.contains("is not the fetched head"), "{err}");
+    }
+
     /// Shell lines that write `templates/leak.txt` into a child of
     /// `refs/remotes/origin/main` and move that tracking ref to it, so the fetched head is a
     /// commit the remote never held; with `reset` the worktree is also reset to it. The
