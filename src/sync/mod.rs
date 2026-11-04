@@ -11145,6 +11145,80 @@ byte() { printf "\\$(printf '%03o' "$1")"; }
         assert!(err.contains("git push failed for branch"), "{err}");
     }
 
+    /// Hook tail: builds a child of UDE's commit holding an injected blob under the managed
+    /// path and points the ref `<prefix><id of UDE's commit>` at it. Leaves the injected
+    /// blob, UDE's commit and the child in `.git/ude-test-injected-blob`,
+    /// `.git/ude-test-validated` and `.git/ude-test-shadow-target`.
+    #[cfg(unix)]
+    fn shadow_ref_tail(prefix: &str) -> String {
+        format!(
+            r#"C=$(git rev-parse HEAD)
+IB=$(printf 'INJECTED_BY_HOOK\n' | git hash-object -w --stdin)
+export GIT_INDEX_FILE=.git/ude-probe-idx
+git read-tree HEAD
+git update-index --add --cacheinfo 100644,"$IB","$F"
+T=$(git write-tree)
+unset GIT_INDEX_FILE
+N=$(git commit-tree "$T" -p "$C" -m injected)
+printf '%s\n' "$IB" > .git/ude-test-injected-blob
+printf '%s\n' "$C" > .git/ude-test-validated
+printf '%s\n' "$N" > .git/ude-test-shadow-target
+git update-ref "{prefix}$C" "$N"
+"#
+        )
+    }
+
+    /// The hook ran, the push succeeded, the object recorded in `.git/<marker>` is not on
+    /// the remote, and the published commit is the one recorded in `.git/ude-test-validated`
+    /// with exactly the validated bytes. Returns that commit.
+    #[cfg(unix)]
+    fn assert_shadow_ignored(
+        git: &GitFixture,
+        pushed: &HookedPush,
+        open_pr: bool,
+        marker: &str,
+    ) -> String {
+        assert!(pushed.hook_ran, "the hook never ran");
+        assert!(pushed.res.is_ok(), "{:?}", pushed.res);
+        let object = hook_recorded_id(pushed, marker);
+        assert!(
+            !holds_object(git, pushed.bare.path(), &object),
+            "the remote holds the object recorded in {marker}"
+        );
+        let validated = hook_recorded_id(pushed, "ude-test-validated");
+        let published = assert_published_exact(git, pushed, open_pr);
+        assert_eq!(
+            published, validated,
+            "the push published another commit than the validated one"
+        );
+        validated
+    }
+
+    /// A plain push of the validated id from the cache checkout to a fresh bare repository
+    /// delivers the object recorded in `.git/<marker>`, so the ref the hook left was really
+    /// in effect.
+    #[cfg(unix)]
+    fn assert_plain_id_delivers(git: &GitFixture, pushed: &HookedPush, marker: &str) {
+        let validated = hook_recorded_id(pushed, "ude-test-validated");
+        let object = hook_recorded_id(pushed, marker);
+        let control = push_to_fresh_bare(git, &pushed.checkout, &validated, &[], false);
+        assert!(
+            holds_object(git, control.path(), &object),
+            "a plain push of the validated id did not deliver the object recorded in {marker}, so the hook's ref had no effect"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_direct_push_ignores_tag_named_after_the_commit() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let pushed =
+            push_with_post_commit_hook(&git, &engine, false, &shadow_ref_tail("refs/tags/"));
+        assert_shadow_ignored(&git, &pushed, false, "ude-test-injected-blob");
+        assert_plain_id_delivers(&git, &pushed, "ude-test-injected-blob");
+    }
+
     #[test]
     fn test_remote_branch_is_at() {
         let git = GitFixture::new();
