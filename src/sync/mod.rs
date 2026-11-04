@@ -111,7 +111,11 @@ fn existing_text_eol_style(path: &Path) -> Option<EolStyle> {
 /// The fingerprint of every file `push_updates` published, keyed by the same path that
 /// appears in `staged_files`, so the publication gates can refuse a stored blob that
 /// differs from what the secret scan (gate 4) and the reversibility check (gate 5)
-/// validated, whatever git filter or commit hook changed it.
+/// validated. The record is compared with the fingerprint of each staged index blob, of
+/// each blob the commit changes (read by object id), and of each recorded path in the
+/// commit's tree, or in the fetched head's tree when there is nothing to push. Which
+/// channels that comparison defends, and which it does not, is the closed list in
+/// `docs/ARCHITECTURE.md`, section 3 ("What the publication gate promises").
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ValidatedBlobs {
     digests: std::collections::BTreeMap<PathBuf, String>,
@@ -1871,7 +1875,8 @@ impl SyncEngine {
     /// the commit to `target.remote_url`, directly to `target.branch`, or to a fresh
     /// `ude-sync-*` branch with a PR when `open_pr` is set. The published commit must have
     /// `target.fetched_sha` as its only parent, and Ok means `git ls-remote` of the URL
-    /// reports the pushed ref at that commit.
+    /// reports the pushed ref at that commit. What this push defends is the closed list in
+    /// `docs/ARCHITECTURE.md`, section 3, and nothing beyond it.
     pub fn push_to_remote(
         &self,
         target: &PublishTarget<'_>,
@@ -2502,7 +2507,9 @@ impl SyncEngine {
     /// (relative to `repo`), free of secrets and identical to what `validated` recorded; its
     /// tree repeats no path and has no path component that is empty, `.` or `..`; it holds
     /// no empty directory; every path `validated` recorded holds its recorded content; and
-    /// its tree is `staged_tree`, the id [`Self::stage_publication`] recorded.
+    /// its tree is `staged_tree`, the id [`Self::stage_publication`] recorded. What these
+    /// checks defend is the closed list in `docs/ARCHITECTURE.md`, section 3, and nothing
+    /// beyond it.
     fn validate_committed_tree(
         &self,
         repo: &Path,
