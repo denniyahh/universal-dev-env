@@ -2,17 +2,17 @@
 gsd_state_version: "1.0"
 current_phase: 02
 current_phase_name: Sanitizer, Boundaries & Security Hardening
-status: executing
-stopped_at: Completed 02-25-PLAN.md
-last_updated: "2026-11-04T18:43:34.860Z"
+status: verifying
+stopped_at: Completed 02-26-PLAN.md
+last_updated: "2026-11-04T19:44:46.338Z"
 last_activity: 2026-11-04
 last_activity_desc: Phase 02 execution started
-state_head: 3ac793072fbc12720d0e1148c4ecf91880b18db2
+state_head: 534a3fcf37cdfb04b704d4c7146e403fcf1a97a2
 progress:
   total_phases: 4
   completed_phases: 1
   total_plans: 37
-  completed_plans: 36
+  completed_plans: 37
   percent: 25
 milestone: null
 ---
@@ -30,7 +30,7 @@ See: `.planning/PROJECT.md` (updated 2026-10-22)
 
 Phase: 02 (Sanitizer, Boundaries & Security Hardening) — EXECUTING
 Plan: 26 of 26
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-11-04 — Phase 02 execution started
 
 Progress: [███░░░░░░░] 25%
@@ -96,6 +96,7 @@ Progress: [███░░░░░░░] 25%
 | Phase 02 P23 | 31 min | 3 tasks | 3 files |
 | Phase 02 P24 | 26 min | 3 tasks | 2 files |
 | Phase 02 P25 | 19 min | 2 tasks | 1 files |
+| Phase 02 P26 | 60 min | 3 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -194,6 +195,8 @@ Recent decisions affecting current work:
 - [Phase 02]: 02-25: the committed gate's change list is listing_diff over two verified listings (fetched head and commit, one map); git diff-tree no longer runs there. A fetched-head tree not matching its id is refused naming a recorded or allowlisted path. The per-task RED-commit gate tripped before GREEN (Rust gap #4379); continued on the operator-approved substitute evidence (bdf59f8, 3 markers, 3 records RED_EVIDENCE_OK); last_gate_trip not written (field absent)
 - [Phase 02]: 02-25 interpretation open to operator objection: 'the trees those diffs read' is met at the committed gate (binding), not at the staged gate's git diff --cached (T-02-105)
 - [Phase 02]: Operator answer 2026-11-04: the staged gate's git diff --cached stays unchecked; 'the id check on the trees the diff reads' is met at the committed (binding) gate per 02-25. Interpretation closed.
+- [Phase 02]: 02-26: all 13 control rows on the final hashed-bytes gate code came out same (no corrected row, T-02-109 unused); scoped mutation run 69 listed, 62 caught, 0 missed, 7 unviable, no test added
+- [Phase 02]: 02-26: DEF-09, DEF-11 and DEF-12 in docs/ARCHITECTURE.md and 02-20-PLAN.md name the swap, commit, root and base-side channels with their tests; NOT-10 unchanged
 
 ### Pending Todos
 
@@ -238,6 +241,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-04T18:01:21.804Z
-Stopped at: Completed 02-25-PLAN.md
+Last session: 2026-11-04T19:44:46.061Z
+Stopped at: Completed 02-26-PLAN.md
 Resume file: None
