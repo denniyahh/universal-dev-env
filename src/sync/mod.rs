@@ -15718,6 +15718,354 @@ git update-ref HEAD "$N"
         );
     }
 
+    /// One `ls-tree -r -t -z` record: `<mode> <type> <id>` TAB `<path>` NUL.
+    fn listing_record(mode: &str, kind: &str, id: &str, path: &[u8]) -> Vec<u8> {
+        [format!("{mode} {kind} {id}\t").as_bytes(), path, b"\0"].concat()
+    }
+
+    /// One `diff-tree -z --raw` record with both modes and ids given.
+    fn raw_change(
+        old_mode: &str,
+        new_mode: &str,
+        old_id: &str,
+        new_id: &str,
+        status: &str,
+        path: &[u8],
+    ) -> Vec<u8> {
+        [
+            format!(":{old_mode} {new_mode} {old_id} {new_id} {status}\0").as_bytes(),
+            path,
+            b"\0",
+        ]
+        .concat()
+    }
+
+    #[test]
+    fn test_listing_diff() {
+        let (x, y, z) = ("a".repeat(40), "b".repeat(40), "c".repeat(40));
+        let zero = "0".repeat(40);
+        let blob = |id: &str, path: &[u8]| listing_record("100644", "blob", id, path);
+        let base = [blob(&x, b"f"), blob(&y, b"g")].concat();
+
+        assert_eq!(listing_diff(&base, &base), Some(Vec::new()), "equal");
+        assert_eq!(
+            listing_diff(b"", &base),
+            Some(
+                [
+                    raw_change("000000", "100644", &zero, &x, "A", b"f"),
+                    raw_change("000000", "100644", &zero, &y, "A", b"g"),
+                ]
+                .concat()
+            ),
+            "an empty base"
+        );
+        assert_eq!(
+            listing_diff(&base, b""),
+            Some(
+                [
+                    raw_change("100644", "000000", &x, &zero, "D", b"f"),
+                    raw_change("100644", "000000", &y, &zero, "D", b"g"),
+                ]
+                .concat()
+            ),
+            "an empty commit"
+        );
+        let changed = [blob(&z, b"f"), listing_record("100755", "blob", &y, b"g")].concat();
+        assert_eq!(
+            listing_diff(&base, &changed),
+            Some(
+                [
+                    raw_change("100644", "100644", &x, &z, "M", b"f"),
+                    raw_change("100644", "100755", &y, &y, "M", b"g"),
+                ]
+                .concat()
+            ),
+            "a content change and an executable flip"
+        );
+        let retyped = [
+            listing_record("120000", "blob", &x, b"f"),
+            listing_record("160000", "commit", &z, b"g"),
+        ]
+        .concat();
+        assert_eq!(
+            listing_diff(&base, &retyped),
+            Some(
+                [
+                    raw_change("100644", "120000", &x, &x, "T", b"f"),
+                    raw_change("100644", "160000", &y, &z, "T", b"g"),
+                ]
+                .concat()
+            ),
+            "a blob that becomes a symlink, and one that becomes a gitlink"
+        );
+        let directory = [listing_record("040000", "tree", &z, b"a"), blob(&x, b"a/x")].concat();
+        assert_eq!(
+            listing_diff(&directory, &blob(&y, b"a")),
+            Some(
+                [
+                    raw_change("000000", "100644", &zero, &y, "A", b"a"),
+                    raw_change("100644", "000000", &x, &zero, "D", b"a/x"),
+                ]
+                .concat()
+            ),
+            "a directory replaced by a file"
+        );
+        assert_eq!(
+            listing_diff(&blob(&x, b"b"), &blob(&y, b"c")),
+            Some(
+                [
+                    raw_change("100644", "000000", &x, &zero, "D", b"b"),
+                    raw_change("000000", "100644", &zero, &y, "A", b"c"),
+                ]
+                .concat()
+            ),
+            "records in path order, a deletion before a later addition"
+        );
+        let other_tree = [listing_record("040000", "tree", &y, b"a"), blob(&x, b"a/x")].concat();
+        assert_eq!(
+            listing_diff(&directory, &other_tree),
+            Some(Vec::new()),
+            "tree records are ignored"
+        );
+        let repeated = [blob(&x, b"p"), blob(&y, b"p")].concat();
+        assert_eq!(
+            listing_diff(&blob(&x, b"p"), &repeated),
+            Some(raw_change("000000", "100644", &zero, &y, "A", b"p")),
+            "a repeated path"
+        );
+        let long = "d".repeat(64);
+        assert_eq!(
+            listing_diff(b"", &blob(&long, b"f")),
+            Some(raw_change(
+                "000000",
+                "100644",
+                &"0".repeat(64),
+                &long,
+                "A",
+                b"f"
+            )),
+            "64-hex ids"
+        );
+        let no_tab = format!("100644 blob {x} f\0").into_bytes();
+        assert_eq!(listing_diff(b"", &no_tab), None, "a record without a tab");
+        assert_eq!(
+            listing_diff(&no_tab, b""),
+            None,
+            "a base record without a tab"
+        );
+    }
+
+    /// The raw stdout of `--no-replace-objects diff-tree -r -z --raw --no-commit-id
+    /// --no-renames <base> <commit>` in `repo`; panics unless it exits 0.
+    fn raw_diff_tree(git: &GitFixture, repo: &Path, base: &str, commit: &str) -> Vec<u8> {
+        let out = git
+            .cmd(repo)
+            .args([
+                "--no-replace-objects",
+                "diff-tree",
+                "-r",
+                "-z",
+                "--raw",
+                "--no-commit-id",
+                "--no-renames",
+                base,
+                commit,
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "diff-tree failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        out.stdout
+    }
+
+    /// listing_diff over the built listings of `base` and `commit` equals git's diff-tree
+    /// between them, in both directions; returns git's forward output.
+    fn assert_listing_diff_matches(
+        engine: &SyncEngine,
+        git: &GitFixture,
+        repo: &Path,
+        base: &str,
+        commit: &str,
+    ) -> Vec<u8> {
+        let base_listing = built_listing(engine, git, repo, base).unwrap();
+        let commit_listing = built_listing(engine, git, repo, commit).unwrap();
+        let forward = raw_diff_tree(git, repo, base, commit);
+        assert_eq!(
+            listing_diff(&base_listing, &commit_listing)
+                .map(|raw| String::from_utf8_lossy(&raw).into_owned()),
+            Some(String::from_utf8_lossy(&forward).into_owned()),
+            "{base} to {commit}"
+        );
+        assert_eq!(
+            listing_diff(&base_listing, &commit_listing),
+            Some(forward.clone()),
+            "{base} to {commit}, as bytes"
+        );
+        assert_eq!(
+            listing_diff(&commit_listing, &base_listing),
+            Some(raw_diff_tree(git, repo, commit, base)),
+            "{commit} to {base}"
+        );
+        forward
+    }
+
+    /// On honest trees listing_diff is byte for byte git's own diff-tree, both directions, in
+    /// a SHA-1 and a SHA-256 repository. The fixture asserts git's output holds every status
+    /// and the odd names, so the comparison is not over an empty diff.
+    #[test]
+    fn test_listing_diff_matches_diff_tree() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let repo = tempdir().unwrap();
+        let dir = repo.path();
+        git.run(dir, &["init", "-b", "main"]);
+        let blob = |bytes: &[u8]| write_blob(&git, dir, bytes);
+        let mktree =
+            |records: &[Vec<u8>]| git_with_input(&git, dir, &["mktree", "-z"], &records.concat());
+        let commit = |tree: &str| git_with_input(&git, dir, &["commit-tree", tree], b"diff\n");
+        let file = |id: &str, name: &[u8]| listing_record("100644", "blob", id, name);
+        let tree = |id: &str, name: &[u8]| listing_record("040000", "tree", id, name);
+
+        let (one, two, three) = (blob(b"one\n"), blob(b"two\n"), blob(b"three\n"));
+        let link = blob(b"target");
+        let empty = mktree(&[]);
+        let module = commit(&empty);
+        let inner = mktree(&[file(&one, b"x")]);
+        let same_leaf = mktree(&[file(&one, b"f")]);
+        let same_nested = mktree(&[tree(&same_leaf, b"deep")]);
+        let base_leaf = mktree(&[file(&one, b"f")]);
+        let commit_leaf = mktree(&[file(&two, b"f"), file(&three, b"g")]);
+        let y_dir = mktree(&[file(&two, b"y")]);
+        let odd = |changed: &str| {
+            vec![
+                file(changed, b"with space"),
+                file(&one, b"with\ttab"),
+                file(changed, b"with\nnewline"),
+                file(&one, b"with\"quote"),
+                file(changed, b"with\\backslash"),
+                file(changed, b"with\xffbyte"),
+            ]
+        };
+        let mut base_records = vec![
+            file(&one, b"changed"),
+            file(&one, b"flip"),
+            file(&one, b"deleted"),
+            file(&one, b"to_link"),
+            file(&one, b"to_module"),
+            tree(&inner, b"a"),
+            file(&one, b"a-b"),
+            file(&one, b"a.b"),
+            file(&one, b"a0"),
+            file(&one, b"b"),
+            tree(&same_nested, b"nested_same"),
+            tree(&mktree(&[tree(&base_leaf, b"deep")]), b"nested"),
+            tree(&empty, b"empty"),
+        ];
+        base_records.extend(odd(&one));
+        let mut commit_records = vec![
+            file(&one, b"added"),
+            file(&two, b"changed"),
+            listing_record("100755", "blob", &one, b"flip"),
+            listing_record("120000", "blob", &link, b"to_link"),
+            listing_record("160000", "commit", &module, b"to_module"),
+            file(&two, b"a"),
+            file(&two, b"a-b"),
+            file(&one, b"a.b"),
+            file(&two, b"a0"),
+            tree(&y_dir, b"b"),
+            tree(&same_nested, b"nested_same"),
+            tree(&mktree(&[tree(&commit_leaf, b"deep")]), b"nested"),
+            tree(&empty, b"empty"),
+        ];
+        commit_records.extend(odd(&two));
+        let base = commit(&mktree(&base_records));
+        let full = commit(&mktree(&commit_records));
+
+        let forward = assert_listing_diff_matches(&engine, &git, dir, &base, &full);
+        for claimed in [
+            b" A\0added\0".as_slice(),
+            b" M\0changed\0",
+            b" M\0flip\0",
+            b" D\0deleted\0",
+            b" T\0to_link\0",
+            b" T\0to_module\0",
+            b" A\0a\0",
+            b" D\0a/x\0",
+            b" D\0b\0",
+            b" A\0b/y\0",
+            b" M\0nested/deep/f\0",
+            b" A\0nested/deep/g\0",
+            b" M\0with\nnewline\0",
+            b" M\0with\xffbyte\0",
+        ] {
+            assert!(
+                holds_bytes(&forward, claimed),
+                "git's diff lacks {:?}",
+                String::from_utf8_lossy(claimed)
+            );
+        }
+        for unchanged in [
+            b"\0with\ttab\0".as_slice(),
+            b"\0a.b\0",
+            b"nested_same",
+            b"empty",
+        ] {
+            assert!(
+                !holds_bytes(&forward, unchanged),
+                "git's diff lists {:?}",
+                String::from_utf8_lossy(unchanged)
+            );
+        }
+
+        let empty_commit = commit(&empty);
+        let from_empty = assert_listing_diff_matches(&engine, &git, dir, &empty_commit, &full);
+        let statuses = raw_diff_entries(&from_empty).unwrap();
+        assert!(!statuses.is_empty() && statuses.iter().all(|entry| entry.status == b'A'));
+        let to_empty = raw_diff_tree(&git, dir, &full, &empty_commit);
+        let statuses = raw_diff_entries(&to_empty).unwrap();
+        assert!(!statuses.is_empty() && statuses.iter().all(|entry| entry.status == b'D'));
+
+        let sha256 = tempdir().unwrap();
+        let dir256 = sha256.path();
+        git.run(dir256, &["init", "--object-format=sha256", "-b", "main"]);
+        let blob256 = |bytes: &[u8]| write_blob(&git, dir256, bytes);
+        let mktree256 = |records: &[Vec<u8>]| {
+            git_with_input(&git, dir256, &["mktree", "-z"], &records.concat())
+        };
+        let commit256 =
+            |tree: &str| git_with_input(&git, dir256, &["commit-tree", tree], b"diff\n");
+        let (one, two) = (blob256(b"one\n"), blob256(b"two\n"));
+        let base_deep = mktree256(&[file(&one, b"h")]);
+        let commit_deep = mktree256(&[file(&two, b"h")]);
+        let base256 = commit256(&mktree256(&[
+            file(&one, b"f"),
+            file(&one, b"g"),
+            tree(&mktree256(&[tree(&base_deep, b"deep")]), b"nested"),
+        ]));
+        let head256 = commit256(&mktree256(&[
+            file(&two, b"f"),
+            file(&one, b"i"),
+            tree(&mktree256(&[tree(&commit_deep, b"deep")]), b"nested"),
+        ]));
+        assert_eq!(head256.len(), 64, "not a SHA-256 id: {head256}");
+        let forward256 = assert_listing_diff_matches(&engine, &git, dir256, &base256, &head256);
+        for claimed in [
+            b" M\0f\0".as_slice(),
+            b" D\0g\0",
+            b" A\0i\0",
+            b" M\0nested/deep/h\0",
+        ] {
+            assert!(
+                holds_bytes(&forward256, claimed),
+                "git's SHA-256 diff lacks {:?}",
+                String::from_utf8_lossy(claimed)
+            );
+        }
+    }
+
     /// Whether `cat-file -e <id>` finds the object in `repo`.
     fn object_exists(git: &GitFixture, repo: &Path, id: &str) -> bool {
         git.cmd(repo)
