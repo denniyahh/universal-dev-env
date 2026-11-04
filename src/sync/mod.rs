@@ -2544,9 +2544,12 @@ impl SyncEngine {
         }
         match raw_commit_parents(&raw_commit.stdout).as_slice() {
             [parent] if parent == base => {}
-            [parent] => {
+            // The parent text is whatever a hook wrote into the header (escape sequences,
+            // a token), so the refusal names only the fetched head, which ensure read and
+            // confirmed against the remote.
+            [_] => {
                 return Err(format!(
-                    "Branch continuity check failed: cache commit parent {parent} is not the fetched head {base}"
+                    "Branch continuity check failed: the cache commit's parent is not the fetched head {base}"
                 ));
             }
             parents => {
