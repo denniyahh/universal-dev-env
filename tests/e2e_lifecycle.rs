@@ -1792,12 +1792,54 @@ impl CliPushWorld {
 
     /// [`CliPushWorld::ude`] with `extra` applied after the world's variables, as
     /// [`sync_cli_with_env`] does.
-    #[expect(
-        dead_code,
-        reason = "plans 02-17 to 02-19 run the CLI world with extra env"
-    )]
     fn ude_with_env(&self, dir: &Path, args: &[&str], extra: Vec<(String, String)>) -> Output {
         sync_cli_with_env(self.temp.path(), extra)(dir, args)
+    }
+
+    /// [`CliPushWorld::ude`] from the project with a `git` shim first on `PATH` that logs
+    /// the arguments of each git process it starts, one line each. Returns the output and
+    /// the lines this run logged.
+    fn ude_logging_git(&self, args: &[&str]) -> (Output, Vec<String>) {
+        use std::os::unix::fs::PermissionsExt;
+        let host_path = std::env::var_os("PATH").expect("PATH is set");
+        let real_git = std::env::split_paths(&host_path)
+            .map(|dir| dir.join("git"))
+            .find(|candidate| candidate.is_file())
+            .expect("git on PATH");
+        let shim_dir = self.temp.path().join("git-shim");
+        fs::create_dir_all(&shim_dir).unwrap();
+        let log = self.temp.path().join("git-args.log");
+        let shim = shim_dir.join("git");
+        fs::write(
+            &shim,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{log}'\nexec '{real}' \"$@\"\n",
+                log = log.display(),
+                real = real_git.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&shim, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::write(&log, "").unwrap();
+        let mut path = vec![shim_dir];
+        path.extend(std::env::split_paths(&host_path));
+        let out = self.ude_with_env(
+            &self.project,
+            args,
+            vec![(
+                "PATH".to_string(),
+                std::env::join_paths(path)
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned(),
+            )],
+        );
+        let lines = fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect();
+        (out, lines)
     }
 
     /// The project's mise.toml with the world's local edit.
@@ -2242,6 +2284,212 @@ fn test_cli_direct_push_refuses_tracking_ref_moved_by_post_checkout_hook() {
 
     let push = world.push(&[]);
     assert_cli_push_refused_moved_base(&world, &checkout, &push, &refs_before, &ancestor_before);
+}
+
+#[test]
+#[cfg(unix)]
+fn test_cli_pr_push_refuses_tracking_ref_moved_by_post_checkout_hook() {
+    let world = cli_push_world();
+    let checkout = world.install_cache_hook("post-checkout", &moved_tracking_ref_hook(false));
+    let refs_before = world.remote_refs();
+    let ancestor_before = mise_ancestor(&world.project);
+
+    let push = world.push(&["--pr"]);
+    assert_cli_push_refused_moved_base(&world, &checkout, &push, &refs_before, &ancestor_before);
+    assert!(
+        !world.remote_refs().contains("refs/heads/ude-sync-"),
+        "a ude-sync branch reached the remote. {}",
+        outputs(&push)
+    );
+}
+
+/// The clone path through the CLI: a global `core.hooksPath` post-checkout hook moves the
+/// tracking ref inside `git clone` and resets the worktree to it. No `sync status` runs
+/// first, so the push's own ensure clones.
+#[cfg(unix)]
+fn assert_cli_clone_path_moved_base_refused(extra_args: &[&str]) {
+    use std::os::unix::fs::PermissionsExt;
+    let world = cli_push_world();
+    let hooks = world.temp.path().join("global-hooks");
+    fs::create_dir_all(&hooks).unwrap();
+    let hook = hooks.join("post-checkout");
+    fs::write(
+        &hook,
+        format!(
+            "#!/bin/sh\n[ -e .git/ude-test-hook-ran ] && exit 0\n: > .git/ude-test-hook-ran\n{}",
+            moved_tracking_ref_hook(true)
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    let global = world.temp.path().join("hooks-gitconfig");
+    fs::write(
+        &global,
+        format!(
+            "{FIXTURE_GITCONFIG}[core]\n\thooksPath = {}\n",
+            hooks.display()
+        ),
+    )
+    .unwrap();
+    assert!(
+        !world.temp.path().join("cache/ude").exists(),
+        "a cache checkout exists before the push"
+    );
+    let refs_before = world.remote_refs();
+    let ancestor_before = mise_ancestor(&world.project);
+
+    let mut args = vec![
+        "sync",
+        "push",
+        "--force",
+        "--remote",
+        world.bare_url.as_str(),
+    ];
+    args.extend_from_slice(extra_args);
+    let push = world.ude_with_env(
+        &world.project,
+        &args,
+        vec![(
+            "GIT_CONFIG_GLOBAL".to_string(),
+            global.to_string_lossy().into_owned(),
+        )],
+    );
+    let checkout = remote_cache_checkout(&world.temp.path().join("cache"));
+    assert_cli_push_refused_moved_base(&world, &checkout, &push, &refs_before, &ancestor_before);
+}
+
+#[test]
+#[cfg(unix)]
+fn test_cli_direct_push_refuses_tracking_ref_moved_on_clone_path() {
+    assert_cli_clone_path_moved_base_refused(&[]);
+}
+
+#[test]
+#[cfg(unix)]
+fn test_cli_pr_push_refuses_tracking_ref_moved_on_clone_path() {
+    assert_cli_clone_path_moved_base_refused(&["--pr"]);
+}
+
+/// `--remote ../<bare>` from the project: the head read runs from the filesystem root, so
+/// it needs the path made absolute; status and push share one cache checkout.
+#[test]
+#[cfg(unix)]
+fn test_cli_push_with_relative_remote_path_publishes() {
+    let world = cli_push_world();
+    let relative = format!("../{}", world.bare.file_name().unwrap().to_string_lossy());
+    assert_eq!(
+        world.project.join(&relative).canonicalize().unwrap(),
+        world.bare.canonicalize().unwrap()
+    );
+    let status = world.ude(&world.project, &["sync", "status", "--remote", &relative]);
+    assert_eq!(status.status.code(), Some(0), "{}", outputs(&status));
+    let push = world.ude(
+        &world.project,
+        &["sync", "push", "--force", "--remote", &relative],
+    );
+    let text = outputs(&push);
+    assert_eq!(push.status.code(), Some(0), "{text}");
+    assert_eq!(
+        format!("{}\n", remote_file(&world.git, &world.bare, MISE_TEMPLATE)),
+        world.local_mise(),
+        "{text}"
+    );
+    // Exactly one cache checkout, or this panics.
+    remote_cache_checkout(&world.temp.path().join("cache"));
+}
+
+/// Status and pull pay no `git ls-remote`; a push in the same world does (the control).
+#[test]
+#[cfg(unix)]
+fn test_cli_status_and_pull_run_no_ls_remote() {
+    let world = cli_push_world();
+    let is_ls_remote = |line: &String| line.split_whitespace().any(|word| word == "ls-remote");
+    let url = world.bare_url.as_str();
+
+    let (status, lines) = world.ude_logging_git(&["sync", "status", "--remote", url]);
+    assert_eq!(status.status.code(), Some(0), "{}", outputs(&status));
+    assert!(!lines.is_empty(), "the shim logged nothing");
+    assert!(!lines.iter().any(is_ls_remote), "status: {lines:#?}");
+
+    let (pull, lines) = world.ude_logging_git(&["sync", "pull", "--remote", url]);
+    assert_eq!(pull.status.code(), Some(0), "{}", outputs(&pull));
+    assert!(!lines.is_empty(), "the shim logged nothing");
+    assert!(!lines.iter().any(is_ls_remote), "pull: {lines:#?}");
+
+    let (push, lines) = world.ude_logging_git(&["sync", "push", "--force", "--remote", url]);
+    assert_eq!(push.status.code(), Some(0), "{}", outputs(&push));
+    assert!(lines.iter().any(is_ls_remote), "push: {lines:#?}");
+}
+
+/// A `remote.origin.uploadpack` wrapper in the cache checkout moves the bare's main
+/// during the push's fetch, so the remote really moved: exit 1 with the pull-first line,
+/// and nothing published. The head reads run from the filesystem root with the URL, so
+/// neither goes through the wrapper.
+#[test]
+#[cfg(unix)]
+fn test_cli_direct_push_reports_upstream_moved_during_fetch() {
+    use std::os::unix::fs::PermissionsExt;
+    let world = cli_push_world();
+    let status = world.ude(
+        &world.project,
+        &["sync", "status", "--remote", &world.bare_url],
+    );
+    assert_eq!(status.status.code(), Some(0), "{}", outputs(&status));
+    let checkout = remote_cache_checkout(&world.temp.path().join("cache"));
+    let tree = world.git.output(&world.bare, &["rev-parse", "main^{tree}"]);
+    let moved = world.git.output(
+        &world.bare,
+        &[
+            "commit-tree",
+            &tree,
+            "-p",
+            "main",
+            "-m",
+            "concurrent publish",
+        ],
+    );
+    let marker = checkout.join(".git/ude-test-hook-ran");
+    let wrapper = checkout.join(".git/ude-test-upload-pack.sh");
+    fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\nif [ ! -e '{marker}' ]; then\n: > '{marker}'\ngit --git-dir='{bare}' update-ref refs/heads/main {moved}\nfi\nexec git upload-pack \"$@\"\n",
+            marker = marker.display(),
+            bare = world.bare.display(),
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+    world.git.run(
+        &checkout,
+        &[
+            "config",
+            "remote.origin.uploadpack",
+            &wrapper.to_string_lossy(),
+        ],
+    );
+    let ancestor_before = mise_ancestor(&world.project);
+
+    let push = world.push(&[]);
+    let text = outputs(&push);
+    assert!(marker.exists(), "the upload-pack wrapper never ran. {text}");
+    assert_eq!(push.status.code(), Some(1), "{text}");
+    assert!(
+        text.contains("upstream changed, run ude sync pull"),
+        "{text}"
+    );
+    assert_eq!(
+        world
+            .git
+            .output(&world.bare, &["rev-parse", "refs/heads/main"]),
+        moved,
+        "the remote's main must be the wrapper's commit, with no sync commit on it. {text}"
+    );
+    assert_eq!(
+        mise_ancestor(&world.project),
+        ancestor_before,
+        "a refused push must not advance ancestor state. {text}"
+    );
 }
 
 #[test]
