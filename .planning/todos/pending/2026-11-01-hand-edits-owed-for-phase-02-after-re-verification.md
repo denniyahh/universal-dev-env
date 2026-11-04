@@ -42,3 +42,17 @@ The edits in this todo are owed by 02-15-PLAN.md's "Who updates which document, 
 - When re-verifying: name the closed list in 02-20-PLAN.md and docs/ARCHITECTURE.md (section 3, `What the publication gate promises`) to the verifier, and say a finding is classified by that list's rule. Re-run each control row 02-21-SUMMARY.md lists after `Re-run at re-verification:` (rows 10, 11, 29, 34, 35, 36, 37, 38, 39, 40 and 43, all corrected by added names only).
 
 When these are done, move this todo to completed and run gsd_run query state.resolve-blocker --text "Hand edits owed after re-verification".
+
+## Added by plan 02-23
+
+The edits in this todo are owed by 02-15-PLAN.md's "Who updates which document, and when", by 02-21-PLAN.md's `## Who updates which document` and by 02-23-PLAN.md's `## Who updates which document`. They are still conditional on re-verification of phase 02 passing; if it finds gaps they wait.
+
+- 02-REVIEW-DISPOSITION.md: CR-400 to `fixed`, with plan 02-22 and the confirming commit in the Source cell. The fix commits named by 02-22-SUMMARY.md: 91446c2 (blobs on both routes) and 3abb023 (the trees above recorded and deleted paths); efe86b6 pins git's own refusal of a rewritten fetched root tree. No other row changes because of plans 02-22 and 02-23.
+- When re-verifying, tell the verifier three things:
+  - DEF-11 and DEF-12 now name the object-id channel: a blob or tree in the cache checkout whose stored bytes do not match its object id (02-23-PLAN.md `## The two rows`, and docs/ARCHITECTURE.md section 3). A finding is classified by the closed list's rule.
+  - The channel includes subtrees, against 02-VERIFICATION.md's earlier conclusion that on git 2.56.0 it is blobs only (blobs read by `cat-file`, concluded from a forged root tree). A rewritten subtree is read silently: `ls-tree -r` exits 0 listing the forged blob (measured at planning and by the plan checker); only a root tree or commit makes git refuse. 02-22's tree rows pin it.
+  - Re-run each control row 02-23-SUMMARY.md lists after `Re-run at re-verification:`; 02-21's list above still stands.
+- Still open with the operator, to be listed in each report until it is answered: the base-side channel in 02-22-PLAN.md's `Not in this plan` bullet (a further gap plan, or a NOT row). A base-side tree whose stored bytes do not match its id hides an added file from the staged diff and from `diff-tree`. Measured with plain git, not through UDE:
+  - With `pack.window=0` the push published the added path, but its blob was one the remote already held.
+  - With a blob the remote did not hold, the push was refused (`missing necessary objects`, the plan checker's probe).
+  - So no new bytes reached the remote in what was run; what is published is an unvalidated path.
