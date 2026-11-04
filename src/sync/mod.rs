@@ -1880,7 +1880,7 @@ impl SyncEngine {
         validated: &ValidatedBlobs,
     ) -> Result<String, PushRemoteError> {
         let Some(staged) = self
-            .stage_publication(target.checkout, staged_files, validated)
+            .stage_publication(target, staged_files, validated)
             .map_err(PushRemoteError::Failed)?
         else {
             return Ok("No changes to push to remote repository.".to_string());
@@ -1893,18 +1893,20 @@ impl SyncEngine {
         }
     }
 
-    /// Stages exactly `staged_files` in the cache checkout and runs the publication gate
-    /// on the index (allowlist, secret scan of every staged blob). Returns the validated
-    /// allowlist relative to `remote_checkout` and the id of the staged tree, or `None`
-    /// when there is nothing to push. The id is recorded here, in the one place both modes
-    /// share and before PR mode's `git checkout -b`, so no hook that runs after this
-    /// function can move what the committed gate compares the commit with.
+    /// Stages exactly `staged_files` in the cache checkout (`target.checkout`) and runs the
+    /// publication gate on the index (allowlist, secret scan of every staged blob). Returns
+    /// the validated allowlist relative to the checkout and the id of the staged tree, or
+    /// `None` when there is nothing to push, which needs
+    /// [`SyncEngine::require_fetched_head_holds`] to pass. The id is recorded here, in the
+    /// one place both modes share and before PR mode's `git checkout -b`, so no hook that
+    /// runs after this function can move what the committed gate compares the commit with.
     fn stage_publication(
         &self,
-        remote_checkout: &Path,
+        target: &PublishTarget<'_>,
         staged_files: &[PathBuf],
         validated: &ValidatedBlobs,
     ) -> Result<Option<StagedPublication>, String> {
+        let remote_checkout = target.checkout;
         let mut status_cmd = self.git(Some(remote_checkout));
         status_cmd.args(["status", "--porcelain"]);
         let status = self
@@ -1922,11 +1924,16 @@ impl SyncEngine {
             ));
         }
 
+        // Index flags, excludes, fsmonitor and config can make status print nothing while
+        // the working tree holds UDE's edit, so "nothing to push" is checked against what
+        // the fetched head holds, whatever emptied status.
         if status.stdout.is_empty() {
+            self.require_fetched_head_holds(target, staged_files, validated)?;
             return Ok(None);
         }
 
         if staged_files.is_empty() {
+            self.require_fetched_head_holds(target, staged_files, validated)?;
             return Ok(None);
         }
 
@@ -2742,15 +2749,113 @@ impl SyncEngine {
         listed_blobs: &HashMap<&[u8], &[u8]>,
         validated_rel: &HashMap<PathBuf, &str>,
     ) -> Result<(), String> {
-        for (path, digest) in validated_rel {
+        match self.first_path_not_held(repo, listed_blobs, validated_rel) {
+            Some(path) => Err(format!(
+                "Post-commit publication gate violation: the commit to publish does not hold the validated content of {}",
+                path.display()
+            )),
+            None => Ok(()),
+        }
+    }
+
+    /// The first path of the record (`validated_rel`) that `listed_blobs`
+    /// ([`tree_listing_blobs`]) does not hold as a regular file with its recorded content,
+    /// or `None` when every recorded path is held. The path comes from the record, never
+    /// from the tree.
+    fn first_path_not_held<'r>(
+        &self,
+        repo: &Path,
+        listed_blobs: &HashMap<&[u8], &[u8]>,
+        validated_rel: &'r HashMap<PathBuf, &str>,
+    ) -> Option<&'r Path> {
+        validated_rel.iter().find_map(|(path, digest)| {
             let held = listed_blobs
                 .get(git_path_bytes(path).as_slice())
                 .and_then(|oid| self.read_blob_by_id(repo, oid))
                 .is_some_and(|blob| Self::fingerprint(&blob) == *digest);
-            if !held {
+            (!held).then_some(path.as_path())
+        })
+    }
+
+    /// What an empty `git status` (or an empty `staged_files`) must satisfy before a push
+    /// returns "nothing to push": HEAD is `target.fetched_sha`, its tree, read past replace
+    /// refs, holds every recorded path with its recorded content, and every staged path
+    /// with no record (a deletion) is gone from it. With nothing staged and nothing
+    /// recorded there is nothing to check. The fetched head was confirmed against the
+    /// remote by the ensure, so Ok here means the remote's head held the content when read.
+    /// Paths in a refusal come from `validated` and `staged_files`, never from the tree.
+    fn require_fetched_head_holds(
+        &self,
+        target: &PublishTarget<'_>,
+        staged_files: &[PathBuf],
+        validated: &ValidatedBlobs,
+    ) -> Result<(), String> {
+        const PREFIX: &str = "Publication gate violation: git status reports nothing to push, but";
+        let repo = target.checkout;
+        let validated_rel = validated.relative_to(repo);
+        if staged_files.is_empty() && validated_rel.is_empty() {
+            return Ok(());
+        }
+
+        // A commit holding the content on top of the fetched head would read as held while
+        // nothing reached the remote, so HEAD must be the fetched head itself.
+        let head = self.resolve_commit(repo, "HEAD")?;
+        if head != target.fetched_sha {
+            return Err(format!(
+                "{PREFIX} HEAD in the cache checkout is not the fetched head; a hook in the cache checkout most likely moved it"
+            ));
+        }
+
+        // Its own invocation, not validate_committed_tree's: the option is what makes this
+        // read see the objects the remote holds, not what a replace ref names.
+        let mut ls_tree = self.git(Some(repo));
+        ls_tree.args([
+            "--no-replace-objects",
+            "ls-tree",
+            "-r",
+            "-t",
+            "-z",
+            "--full-tree",
+            &head,
+        ]);
+        let listing = self
+            .run_local(ls_tree, "git ls-tree")
+            .map_err(|e| format!("{PREFIX} the fetched head's tree cannot be listed: {e}"))?;
+        if !listing.status.success() {
+            return Err(with_excerpt(
+                format!("{PREFIX} the fetched head's tree cannot be listed"),
+                &listing,
+            ));
+        }
+        let Ok(listed_blobs) = tree_listing_blobs(&listing.stdout) else {
+            return Err(format!(
+                "{PREFIX} the fetched head's tree repeats a path, has a bad path component or cannot be parsed"
+            ));
+        };
+
+        if let Some(path) = self.first_path_not_held(repo, &listed_blobs, &validated_rel) {
+            return Err(format!(
+                "{PREFIX} the fetched head does not hold the validated content of {}; a hook in the cache checkout most likely hid the change",
+                path.display()
+            ));
+        }
+        // Any entry type counts as present, not only the regular files listed_blobs keeps.
+        let listed = |path: &[u8]| {
+            listing
+                .stdout
+                .split(|byte| *byte == 0)
+                .filter_map(|record| record.splitn(2, |byte| *byte == b'\t').nth(1))
+                .any(|listed_path| listed_path == path)
+        };
+        for staged in staged_files {
+            let rel = staged.strip_prefix(repo).unwrap_or(staged);
+            if validated_rel.contains_key(rel) {
+                continue;
+            }
+            if listed(&git_path_bytes(rel)) {
                 return Err(format!(
-                    "Post-commit publication gate violation: the commit to publish does not hold the validated content of {}",
-                    path.display()
+                    "{PREFIX} {} is staged for deletion and still present in the fetched head; a hook in the cache checkout most likely hid the change",
+                    rel.display()
                 ));
             }
         }
@@ -8546,6 +8651,18 @@ mod tests {
     /// tests stop at the staged gate or at `git status`, before any push or read.
     const NO_REMOTE_URL: &str = "/nonexistent/ude-test-remote.git";
 
+    /// A [`PublishTarget`] over the plain repository `checkout` with no remote, for tests
+    /// that call `stage_publication` directly. `fetched_sha` matters only on the
+    /// empty-status route, which requires HEAD to be it.
+    fn checkout_target<'a>(checkout: &'a Path, fetched_sha: &'a str) -> PublishTarget<'a> {
+        PublishTarget {
+            checkout,
+            remote_url: NO_REMOTE_URL,
+            branch: "main",
+            fetched_sha,
+        }
+    }
+
     /// The message of a hard push failure; panics on success or on `UpstreamMoved`.
     fn push_failure(res: Result<String, PushRemoteError>) -> String {
         match res {
@@ -8659,7 +8776,11 @@ mod tests {
             "cat\necho '{# unterminated'\necho '{{ user.home }}'\n",
         );
         let err = engine
-            .stage_publication(repo.path(), std::slice::from_ref(&file), &validated)
+            .stage_publication(
+                &checkout_target(repo.path(), ""),
+                std::slice::from_ref(&file),
+                &validated,
+            )
             .expect_err("a blob changed by a clean filter must be refused");
         assert!(
             err.contains("Publication gate violation: staged index blob"),
@@ -8674,7 +8795,11 @@ mod tests {
         // Control: a pass-through filter stores the validated bytes and is published.
         set_clean_filter(&git, repo.path(), "cat\n");
         let staged = engine
-            .stage_publication(repo.path(), std::slice::from_ref(&file), &validated)
+            .stage_publication(
+                &checkout_target(repo.path(), ""),
+                std::slice::from_ref(&file),
+                &validated,
+            )
             .expect("a pass-through filter must publish");
         assert!(
             staged
@@ -8698,7 +8823,11 @@ mod tests {
         let rewritten = "[core]\n{# unterminated\n{{ user.home }}\n";
         fs::write(&file, rewritten).unwrap();
         let err = engine
-            .stage_publication(repo.path(), std::slice::from_ref(&file), &validated)
+            .stage_publication(
+                &checkout_target(repo.path(), ""),
+                std::slice::from_ref(&file),
+                &validated,
+            )
             .expect_err("a rewritten file must be refused");
         assert!(err.contains("differs from the validated content"), "{err}");
         assert_eq!(
@@ -8718,14 +8847,18 @@ mod tests {
         // Control: the validated text restored is published.
         fs::write(&file, original).unwrap();
         let staged = engine
-            .stage_publication(repo.path(), std::slice::from_ref(&file), &validated)
+            .stage_publication(
+                &checkout_target(repo.path(), ""),
+                std::slice::from_ref(&file),
+                &validated,
+            )
             .expect("the validated text must publish");
         assert!(staged.is_some(), "{staged:?}");
 
         // Control: a staged path with no record is refused.
         let err = engine
             .stage_publication(
-                repo.path(),
+                &checkout_target(repo.path(), ""),
                 std::slice::from_ref(&file),
                 &ValidatedBlobs::default(),
             )
@@ -11118,7 +11251,11 @@ byte() { printf "\\$(printf '%03o' "$1")"; }
         .unwrap();
 
         let staged = engine
-            .stage_publication(repo.path(), std::slice::from_ref(&file), &validated)
+            .stage_publication(
+                &checkout_target(repo.path(), ""),
+                std::slice::from_ref(&file),
+                &validated,
+            )
             .expect("CRLF-to-LF normalization must still publish");
         assert!(staged.is_some(), "{staged:?}");
         // The stored blob differs from the working-tree bytes, so the filter ran and
@@ -11153,7 +11290,7 @@ byte() { printf "\\$(printf '%03o' "$1")"; }
         fs::write(&edited, "[core]\n").unwrap();
         let err = engine
             .stage_publication(
-                not_repo.path(),
+                &checkout_target(not_repo.path(), ""),
                 std::slice::from_ref(&edited),
                 &ValidatedBlobs::default(),
             )
@@ -11175,8 +11312,8 @@ byte() { printf "\\$(printf '%03o' "$1")"; }
             "{pushed:?}"
         );
 
-        // Negative control: in a real checkout a clean tree is "nothing to push" and an
-        // edit is staged.
+        // Negative control: in a real checkout a clean tree whose HEAD (the fetched head)
+        // holds the record is "nothing to push", and an edit is staged.
         let repo = tempdir().unwrap();
         git.run(repo.path(), &["init", "-b", "main"]);
         let tracked = repo.path().join(rel);
@@ -11184,18 +11321,23 @@ byte() { printf "\\$(printf '%03o' "$1")"; }
         fs::write(&tracked, "[core]\n").unwrap();
         git.run(repo.path(), &["add", "-A"]);
         git.run(repo.path(), &["commit", "-m", "seed"]);
+        let head = git.output(repo.path(), &["rev-parse", "HEAD"]);
         assert_eq!(
             engine.stage_publication(
-                repo.path(),
+                &checkout_target(repo.path(), &head),
                 std::slice::from_ref(&tracked),
-                &ValidatedBlobs::default()
+                &ValidatedBlobs::from_files(std::slice::from_ref(&tracked))
             ),
             Ok(None)
         );
         fs::write(&tracked, "[core]\n  autocrlf = false\n").unwrap();
         let validated = ValidatedBlobs::from_files(std::slice::from_ref(&tracked));
         let staged = engine
-            .stage_publication(repo.path(), std::slice::from_ref(&tracked), &validated)
+            .stage_publication(
+                &checkout_target(repo.path(), ""),
+                std::slice::from_ref(&tracked),
+                &validated,
+            )
             .unwrap()
             .expect("the edit must be staged");
         assert!(staged.paths.contains(rel), "{staged:?}");
@@ -13013,7 +13155,11 @@ git replace -f "$C" "$TG"
         fs::write(&file, "[core]\n\tx = 1\n").unwrap();
         let validated = ValidatedBlobs::from_files(std::slice::from_ref(&file));
         let staged = engine
-            .stage_publication(repo.path(), std::slice::from_ref(&file), &validated)
+            .stage_publication(
+                &checkout_target(repo.path(), ""),
+                std::slice::from_ref(&file),
+                &validated,
+            )
             .unwrap()
             .expect("the edit must be staged");
         assert_eq!(staged.tree, git.output(repo.path(), &["write-tree"]));
@@ -13054,7 +13200,11 @@ git replace -f "$C" "$TG"
         let engine = SyncEngine::new().with_extra_env(env);
 
         let err = engine
-            .stage_publication(repo.path(), std::slice::from_ref(&file), &validated)
+            .stage_publication(
+                &checkout_target(repo.path(), ""),
+                std::slice::from_ref(&file),
+                &validated,
+            )
             .expect_err("an unrecorded tree must refuse");
         assert!(err.contains("cannot record the staged tree"), "{err}");
         assert_eq!(
