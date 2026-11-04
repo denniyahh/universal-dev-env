@@ -11122,19 +11122,6 @@ byte() { printf "\\$(printf '%03o' "$1")"; }
 
     #[test]
     #[cfg(unix)]
-    fn test_direct_push_replaced_commit_refusal_does_not_say_upstream_moved() {
-        let git = GitFixture::new();
-        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
-        let pushed = push_with_post_commit_hook(&git, &engine, false, HOOK_REPLACE_WITH_PARENTLESS);
-
-        assert!(pushed.hook_ran, "the hook never ran");
-        assert_remote_unchanged(&git, &pushed);
-        let err = push_failure(pushed.res);
-        assert!(err.contains("still at the commit UDE fetched"), "{err}");
-    }
-
-    #[test]
-    #[cfg(unix)]
     fn test_pr_push_with_shallow_file_publishes_nothing() {
         let git = GitFixture::new();
         let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
@@ -11218,6 +11205,423 @@ git update-ref "{prefix}$C" "$N"
             push_with_post_commit_hook(&git, &engine, false, &shadow_ref_tail("refs/tags/"));
         assert_shadow_ignored(&git, &pushed, false, "ude-test-injected-blob");
         assert_plain_id_delivers(&git, &pushed, "ude-test-injected-blob");
+    }
+
+    /// A post-commit hook points `<prefix><id>` at a child holding an injected blob; the
+    /// push publishes the validated commit and a plain push of the id delivers the blob.
+    #[cfg(unix)]
+    fn assert_shadow_ref_ignored(open_pr: bool, prefix: &str) {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let pushed = push_with_post_commit_hook(&git, &engine, open_pr, &shadow_ref_tail(prefix));
+        assert_shadow_ignored(&git, &pushed, open_pr, "ude-test-injected-blob");
+        assert_plain_id_delivers(&git, &pushed, "ude-test-injected-blob");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_pr_push_ignores_tag_named_after_the_commit() {
+        assert_shadow_ref_ignored(true, "refs/tags/");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_direct_push_ignores_branch_named_after_the_commit() {
+        assert_shadow_ref_ignored(false, "refs/heads/");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_pr_push_ignores_branch_named_after_the_commit() {
+        assert_shadow_ref_ignored(true, "refs/heads/");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_direct_push_ignores_remote_ref_named_after_the_commit() {
+        assert_shadow_ref_ignored(false, "refs/remotes/");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_pr_push_ignores_remote_ref_named_after_the_commit() {
+        assert_shadow_ref_ignored(true, "refs/remotes/");
+    }
+
+    /// `refs/<id>` does not shadow even a plain id (probed), so there is no delivering
+    /// control; the checkout still has the ref, so the hook really made it.
+    #[cfg(unix)]
+    fn assert_top_level_ref_ignored(open_pr: bool) {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let pushed = push_with_post_commit_hook(&git, &engine, open_pr, &shadow_ref_tail("refs/"));
+        let validated = assert_shadow_ignored(&git, &pushed, open_pr, "ude-test-injected-blob");
+        assert_eq!(
+            git.output(
+                &pushed.checkout,
+                &["rev-parse", "--verify", &format!("refs/{validated}")]
+            ),
+            hook_recorded_id(&pushed, "ude-test-shadow-target"),
+            "the hook's ref is missing"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_direct_push_ignores_top_level_ref_named_after_the_commit() {
+        assert_top_level_ref_ignored(false);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_pr_push_ignores_top_level_ref_named_after_the_commit() {
+        assert_top_level_ref_ignored(true);
+    }
+
+    /// Hook tail: writes a loose ref file whose name is the push's source spelled out,
+    /// `refs/tags/<id>^{commit}`, holding a child with an injected blob.
+    #[cfg(unix)]
+    const HOOK_REF_FILE_SPELLED_LIKE_SOURCE: &str = r#"C=$(git rev-parse HEAD)
+IB=$(printf 'INJECTED_BY_HOOK\n' | git hash-object -w --stdin)
+export GIT_INDEX_FILE=.git/ude-probe-idx
+git read-tree HEAD
+git update-index --add --cacheinfo 100644,"$IB","$F"
+T=$(git write-tree)
+unset GIT_INDEX_FILE
+N=$(git commit-tree "$T" -p "$C" -m injected)
+printf '%s\n' "$IB" > .git/ude-test-injected-blob
+printf '%s\n' "$C" > .git/ude-test-validated
+mkdir -p .git/refs/tags
+printf '%s\n' "$N" > ".git/refs/tags/$C^{commit}"
+"#;
+
+    #[test]
+    #[cfg(unix)]
+    fn test_direct_push_ignores_ref_file_spelled_like_the_source() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let pushed =
+            push_with_post_commit_hook(&git, &engine, false, HOOK_REF_FILE_SPELLED_LIKE_SOURCE);
+        let validated = assert_shadow_ignored(&git, &pushed, false, "ude-test-injected-blob");
+        assert!(
+            pushed
+                .checkout
+                .join(format!(".git/refs/tags/{validated}^{{commit}}"))
+                .is_file(),
+            "the hook's ref file is missing"
+        );
+    }
+
+    /// The shadow ref's injected blob is a GitHub PAT shape: absent from the remote and from
+    /// the published file, delivered by a plain push of the id.
+    #[cfg(unix)]
+    fn assert_token_behind_shadow_ref_ignored(open_pr: bool) {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let tail = with_injected_token(&shadow_ref_tail("refs/tags/"));
+        let pushed = push_with_post_commit_hook(&git, &engine, open_pr, &tail);
+        let published = assert_shadow_ignored(&git, &pushed, open_pr, "ude-test-injected-blob");
+        let file = remote_managed_blob(&git, &pushed, &published);
+        assert!(
+            !String::from_utf8_lossy(&file).contains(HOOK_TOKEN_BODY),
+            "the published file holds the token"
+        );
+        assert_plain_id_delivers(&git, &pushed, "ude-test-injected-blob");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_direct_push_ignores_token_behind_shadow_ref() {
+        assert_token_behind_shadow_ref_ignored(false);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_pr_push_ignores_token_behind_shadow_ref() {
+        assert_token_behind_shadow_ref_ignored(true);
+    }
+
+    /// `tail` (which moves HEAD to a rebuilt commit) behind a shadow tag: HEAD is put back on
+    /// UDE's commit and `refs/tags/<id>` points at the rebuilt one. Leaves UDE's commit and
+    /// the rebuilt one in `.git/ude-test-validated` and `.git/ude-test-shadow-target`.
+    #[cfg(unix)]
+    fn behind_shadow_tag(tail: &str) -> String {
+        format!(
+            r#"C=$(git rev-parse HEAD)
+printf '%s\n' "$C" > .git/ude-test-validated
+{tail}N=$(git rev-parse HEAD)
+printf '%s\n' "$N" > .git/ude-test-shadow-target
+git update-ref HEAD "$C"
+git update-ref "refs/tags/$C" "$N"
+"#
+        )
+    }
+
+    /// A rebuilt commit the gate would refuse, behind a shadow tag, stays off the remote,
+    /// and a plain push of the id delivers it.
+    #[cfg(unix)]
+    fn assert_rebuilt_commit_behind_shadow_ignored(
+        open_pr: bool,
+        tail: &str,
+    ) -> (GitFixture, HookedPush) {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let pushed = push_with_post_commit_hook(&git, &engine, open_pr, &behind_shadow_tag(tail));
+        assert_shadow_ignored(&git, &pushed, open_pr, "ude-test-shadow-target");
+        assert_plain_id_delivers(&git, &pushed, "ude-test-shadow-target");
+        (git, pushed)
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_direct_push_ignores_duplicate_tree_behind_shadow_ref() {
+        assert_rebuilt_commit_behind_shadow_ignored(false, HOOK_DUPLICATE_ENTRY);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_pr_push_ignores_duplicate_tree_behind_shadow_ref() {
+        assert_rebuilt_commit_behind_shadow_ignored(true, HOOK_DUPLICATE_ENTRY);
+    }
+
+    /// [`assert_rebuilt_commit_behind_shadow_ignored`] with the `.` subtree, and the remote
+    /// still clones.
+    #[cfg(unix)]
+    fn assert_dot_tree_behind_shadow_ignored(open_pr: bool) {
+        let (git, pushed) = assert_rebuilt_commit_behind_shadow_ignored(open_pr, HOOK_DOT_SUBTREE);
+        let clone = tempdir().unwrap();
+        let out = git
+            .cmd(clone.path())
+            .args(["clone", "-q", pushed.bare.path().to_str().unwrap(), "c"])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "cloning the remote failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_direct_push_ignores_dot_tree_behind_shadow_ref() {
+        assert_dot_tree_behind_shadow_ignored(false);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_pr_push_ignores_dot_tree_behind_shadow_ref() {
+        assert_dot_tree_behind_shadow_ignored(true);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_direct_push_ignores_deleted_file_behind_shadow_ref() {
+        assert_rebuilt_commit_behind_shadow_ignored(false, HOOK_DELETE_VALIDATED);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_pr_push_ignores_deleted_file_behind_shadow_ref() {
+        assert_rebuilt_commit_behind_shadow_ignored(true, HOOK_DELETE_VALIDATED);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_direct_push_ignores_reverted_file_behind_shadow_ref() {
+        assert_rebuilt_commit_behind_shadow_ignored(false, HOOK_REVERT_VALIDATED);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_pr_push_ignores_reverted_file_behind_shadow_ref() {
+        assert_rebuilt_commit_behind_shadow_ignored(true, HOOK_REVERT_VALIDATED);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_direct_push_ignores_amended_message_behind_shadow_ref() {
+        assert_rebuilt_commit_behind_shadow_ignored(false, HOOK_AMEND_MESSAGE);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_pr_push_ignores_amended_message_behind_shadow_ref() {
+        assert_rebuilt_commit_behind_shadow_ignored(true, HOOK_AMEND_MESSAGE);
+    }
+
+    /// A pass-through clean filter that, during `git add`, installs a post-commit hook
+    /// running [`shadow_ref_tail`] with `refs/tags/`: the filter and the hook ran, the
+    /// validated commit is published, and a plain push of the id delivers the blob.
+    #[cfg(unix)]
+    fn assert_shadow_ref_left_by_clean_filter_ignored(open_pr: bool) {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let hook = format!(
+            "#!/bin/sh\n[ -e .git/ude-test-hook-ran ] && exit 0\n: > .git/ude-test-hook-ran\nF='{GATE_REL}'\n{}",
+            shadow_ref_tail("refs/tags/")
+        );
+        let filter = format!(
+            r#"cd "$(git rev-parse --show-toplevel)" || exit 1
+if [ ! -e .git/ude-test-filter-ran ]; then
+  : > .git/ude-test-filter-ran
+  mkdir -p .git/hooks
+  cat > .git/hooks/post-commit <<'UDE_HOOK'
+{hook}UDE_HOOK
+  chmod +x .git/hooks/post-commit
+fi
+cat
+"#
+        );
+        let mut pushed = push_managed_file(&git, &engine, open_pr, HOOKED_TEMPLATE, |repo| {
+            set_clean_filter(&git, repo, &filter);
+        });
+        assert!(
+            pushed.checkout.join(".git/ude-test-filter-ran").exists(),
+            "the clean filter never ran"
+        );
+        pushed.hook_ran = pushed.checkout.join(".git/ude-test-hook-ran").exists();
+        assert_shadow_ignored(&git, &pushed, open_pr, "ude-test-injected-blob");
+        assert_plain_id_delivers(&git, &pushed, "ude-test-injected-blob");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_direct_push_ignores_shadow_ref_left_by_clean_filter() {
+        assert_shadow_ref_left_by_clean_filter_ignored(false);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_pr_push_ignores_shadow_ref_left_by_clean_filter() {
+        assert_shadow_ref_left_by_clean_filter_ignored(true);
+    }
+
+    /// [`HOOK_REPLACE_WITH_PARENTLESS`] was in effect in the cache checkout (the published
+    /// commit walks as parentless there) and the remote's raw commit still names the
+    /// fetched head as its parent.
+    #[cfg(unix)]
+    fn assert_parentless_replace_in_effect(git: &GitFixture, pushed: &HookedPush, published: &str) {
+        let walked = git.output(
+            &pushed.checkout,
+            &["rev-list", "--parents", "-1", published],
+        );
+        assert_eq!(walked.split_whitespace().count(), 1, "{walked}");
+        let raw = git.output(
+            pushed.bare.path(),
+            &["--no-replace-objects", "cat-file", "commit", published],
+        );
+        assert!(
+            raw.lines()
+                .any(|line| line == format!("parent {}", pushed.fetched_sha)),
+            "{raw}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_direct_push_publishes_validated_commit_past_replace_ref() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let pushed = push_with_post_commit_hook(&git, &engine, false, HOOK_REPLACE_WITH_PARENTLESS);
+        let published = assert_published_exact(&git, &pushed, false);
+        assert_parentless_replace_in_effect(&git, &pushed, &published);
+
+        // Control: the same source without --no-replace-objects, to a bare clone reset to
+        // the fetched head, is refused as not a fast-forward.
+        let clone = tempdir().unwrap();
+        git.run(
+            clone.path(),
+            &[
+                "clone",
+                "--bare",
+                "-q",
+                pushed.bare.path().to_str().unwrap(),
+                ".",
+            ],
+        );
+        git.run(
+            clone.path(),
+            &["update-ref", "refs/heads/main", &pushed.fetched_sha],
+        );
+        let out = git
+            .cmd(&pushed.checkout)
+            .args([
+                "push",
+                "--no-follow-tags",
+                clone.path().to_str().unwrap(),
+                &format!("{published}^{{commit}}:refs/heads/main"),
+            ])
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            !out.status.success(),
+            "the control push succeeded: {stderr}"
+        );
+        assert!(stderr.contains("non-fast-forward"), "{stderr}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_pr_push_publishes_validated_commit_past_replace_ref() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let pushed = push_with_post_commit_hook(&git, &engine, true, HOOK_REPLACE_WITH_PARENTLESS);
+        let published = assert_published_exact(&git, &pushed, true);
+        assert_parentless_replace_in_effect(&git, &pushed, &published);
+    }
+
+    /// post-commit tail: builds a commit holding an injected blob on UDE's parent, wraps it
+    /// in an annotated tag and replaces UDE's commit with that tag, so `<id>^{commit}` peels
+    /// to the injected commit wherever replace refs are honoured.
+    #[cfg(unix)]
+    const HOOK_REPLACE_WITH_TAG: &str = r#"C=$(git rev-parse HEAD)
+IB=$(printf 'INJECTED_BY_HOOK\n' | git hash-object -w --stdin)
+export GIT_INDEX_FILE=.git/ude-probe-idx
+git read-tree HEAD
+git update-index --add --cacheinfo 100644,"$IB","$F"
+T=$(git write-tree)
+unset GIT_INDEX_FILE
+N=$(git commit-tree "$T" -p "$(git rev-parse HEAD~1)" -m injected)
+printf '%s\n' "$IB" > .git/ude-test-injected-blob
+printf '%s\n' "$C" > .git/ude-test-validated
+TG=$(printf 'object %s\ntype commit\ntag x\ntagger t <t@e> 1 +0000\n\nm\n' "$N" | git mktag)
+git replace -f "$C" "$TG"
+"#;
+
+    /// A replace ref from UDE's commit to a tag holding the injected commit changes nothing
+    /// that is published; the same source without `--no-replace-objects` delivers the blob.
+    #[cfg(unix)]
+    fn assert_replace_ref_to_tag_ignored(open_pr: bool) {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let pushed = push_with_post_commit_hook(&git, &engine, open_pr, HOOK_REPLACE_WITH_TAG);
+        let validated = assert_shadow_ignored(&git, &pushed, open_pr, "ude-test-injected-blob");
+        let injected = hook_recorded_id(&pushed, "ude-test-injected-blob");
+        let control = push_to_fresh_bare(
+            &git,
+            &pushed.checkout,
+            &format!("{validated}^{{commit}}"),
+            &[],
+            false,
+        );
+        assert!(
+            holds_object(&git, control.path(), &injected),
+            "the control push did not deliver the injected blob, so the replace ref had no effect"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_direct_push_ignores_replace_ref_to_a_tag() {
+        assert_replace_ref_to_tag_ignored(false);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_pr_push_ignores_replace_ref_to_a_tag() {
+        assert_replace_ref_to_tag_ignored(true);
     }
 
     #[test]
