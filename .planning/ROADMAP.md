@@ -71,7 +71,7 @@ Plans:
   3. Path parameterization matches only full word and punctuation boundaries (`\b`, path delimiters), preventing corruption of partial substring tokens.
   4. Sanitizer round-tripping verifies that templated tokens substitute back cleanly to local machine environments on initialization.
 
-**Plans**: 18/21 plans executed
+**Plans**: 19/21 plans executed
 
 Plans:
 **Wave 1**
@@ -123,7 +123,7 @@ Plans:
 - [x] 02-18: Both pushes go to the caller's URL through `PublishTarget`, and Ok requires `git ls-remote` from outside the checkout to report the ref at the commit, so a hook-written pushurl or `url.*.pushInsteadOf` cannot produce Ok (review WR-301; gap 5) (SEC-04, SEC-02).
 
 **Wave 16** *(gap closure; blocked on Wave 15 completion)*
-- [ ] 02-19: Empty `git status` with a validated record requires the fetched head to hold that record and deleted paths to be gone, and the continuity refusal prints no hook-chosen bytes (review WR-300, WR-302; gaps 5, 6) (SEC-04, SEC-02).
+- [x] 02-19: Empty `git status` with a validated record requires the fetched head to hold that record and deleted paths to be gone, and the continuity refusal prints no hook-chosen bytes (review WR-300, WR-302; gaps 5, 6) (SEC-04, SEC-02).
 
 **Wave 17** *(gap closure; blocked on Wave 16 completion)*
 - [ ] 02-20: The closed list of what the gate promises: DEF rows with the tests that pin each, NOT rows with their reason or status, in docs/ARCHITECTURE.md, with a rule that classifies any later finding; reconciles the absolute wording of 02-13 and 02-08 without weakening a fix (SEC-04, SEC-02).
@@ -177,7 +177,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Sync Engine & State Hermeticity | 11/11 | Complete    | 2026-10-22 |
-| 2. Sanitizer, Boundaries & Security Hardening | 18/21 | In Progress | - |
+| 2. Sanitizer, Boundaries & Security Hardening | 19/21 | In Progress | - |
 | 3. Doctor & CLI Hardening | 0/4 | Not started | - |
 | 4. Templates, Archetypes & Manifest Decoupling | 0/3 | Not started | - |
 
