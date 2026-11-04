@@ -4,10 +4,10 @@ current_phase: 02
 current_phase_name: Sanitizer, Boundaries & Security Hardening
 status: verifying
 stopped_at: Completed 02-23-PLAN.md
-last_updated: "2026-11-04T15:10:22.329Z"
+last_updated: "2026-11-04T15:43:00.055Z"
 last_activity: 2026-11-04
 last_activity_desc: Phase 02 execution started
-state_head: 0c5f27c45cb1d4328789c2177714f421593cbbc3
+state_head: c461d4135a72ea5c4466e3577090f033a8fdaba2
 progress:
   total_phases: 4
   completed_phases: 1
@@ -186,6 +186,7 @@ Recent decisions affecting current work:
 - [Phase 02]: 02-22: the fetched root tree and the commit get pin rows, not code: git refuses a rewritten root tree itself (git status exit 128, hash mismatch)
 - [Phase 02]: 02-23: all 10 control rows on the final id-check code came out same (no corrected row, T-02-96 unused); scoped mutation run 49 listed, 35 caught, 0 missed, 14 unviable, no test added
 - [Phase 02]: 02-23: DEF-11 and DEF-12 in docs/ARCHITECTURE.md and 02-20-PLAN.md name the object-id channel (a blob or tree whose stored bytes do not match its id) with its tests; NOT-10 unchanged
+- [Phase 02]: Operator override 2026-11-04: TDD gate block on 02-22 (GREEN before RED; plan said do not commit RED) accepted, no history rewrite. Evidence: 11 uncommitted RED runs in target/gsd-red/02-22-* (RED_EVIDENCE_OK) and 02-23's 10 controls on the final code
 
 ### Pending Todos
 
