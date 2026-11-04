@@ -2,17 +2,17 @@
 gsd_state_version: "1.0"
 current_phase: 02
 current_phase_name: Sanitizer, Boundaries & Security Hardening
-status: executing
-stopped_at: Completed 02-22-PLAN.md
-last_updated: "2026-11-04T14:34:55.466Z"
+status: verifying
+stopped_at: Completed 02-23-PLAN.md
+last_updated: "2026-11-04T15:10:22.329Z"
 last_activity: 2026-11-04
 last_activity_desc: Phase 02 execution started
-state_head: 6b78831391ea22f935f0d96b24dd8a99a643e885
+state_head: 0c5f27c45cb1d4328789c2177714f421593cbbc3
 progress:
   total_phases: 4
   completed_phases: 1
   total_plans: 34
-  completed_plans: 33
+  completed_plans: 34
   percent: 25
 milestone: null
 ---
@@ -30,7 +30,7 @@ See: `.planning/PROJECT.md` (updated 2026-10-22)
 
 Phase: 02 (Sanitizer, Boundaries & Security Hardening) — EXECUTING
 Plan: 23 of 23
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-11-04 — Phase 02 execution started
 
 Progress: [███░░░░░░░] 25%
@@ -93,6 +93,7 @@ Progress: [███░░░░░░░] 25%
 | Phase 02 P20 | 7 min | 2 tasks | 2 files |
 | Phase 02 P21 | 2h 40m | 3 tasks | 2 files |
 | Phase 02 P22 | 19 min | 3 tasks | 2 files |
+| Phase 02 P23 | 31 min | 3 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -183,6 +184,8 @@ Recent decisions affecting current work:
 - [Phase 02]: 02-21: scoped mutation run 122 listed, 103 caught, 0 missed, 19 unviable after one survivor (== to != in require_fetched_head_holds' deletion check) was killed by two filter-selected no-change tests
 - [Phase 02]: 02-22: blobs and the trees above recorded or deleted paths are hashed with git hash-object in the cache checkout (own object format, no write flag) and compared whole with the id on both push routes; a mismatch is refused with its own text naming only a path from the record, the staged list or an allowlisted changed entry
 - [Phase 02]: 02-22: the fetched root tree and the commit get pin rows, not code: git refuses a rewritten root tree itself (git status exit 128, hash mismatch)
+- [Phase 02]: 02-23: all 10 control rows on the final id-check code came out same (no corrected row, T-02-96 unused); scoped mutation run 49 listed, 35 caught, 0 missed, 14 unviable, no test added
+- [Phase 02]: 02-23: DEF-11 and DEF-12 in docs/ARCHITECTURE.md and 02-20-PLAN.md name the object-id channel (a blob or tree whose stored bytes do not match its id) with its tests; NOT-10 unchanged
 
 ### Pending Todos
 
@@ -227,6 +230,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-04T14:34:55.188Z
-Stopped at: Completed 02-22-PLAN.md
+Last session: 2026-11-04T15:10:22.044Z
+Stopped at: Completed 02-23-PLAN.md
 Resume file: None

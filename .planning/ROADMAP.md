@@ -71,7 +71,7 @@ Plans:
   3. Path parameterization matches only full word and punctuation boundaries (`\b`, path delimiters), preventing corruption of partial substring tokens.
   4. Sanitizer round-tripping verifies that templated tokens substitute back cleanly to local machine environments on initialization.
 
-**Plans**: 22/23 plans executed
+**Plans**: 23/23 plans executed
 
 Plans:
 **Wave 1**
@@ -135,7 +135,7 @@ Plans:
 - [x] 02-22: Every blob, and every tree above a recorded or deleted path, that the committed and empty-status checks read is hashed with `git hash-object` in the cache checkout and refused when it does not match its id, so a rewritten local object cannot read as the record and give Ok, in direct and PR mode (review CR-400; verification gaps 1, 2) (SEC-04).
 
 **Wave 20** *(gap closure; blocked on Wave 19 completion)*
-- [ ] 02-23: DEF-11 and DEF-12 name the object-id channel in docs/ARCHITECTURE.md and 02-20-PLAN.md; controls on each part of the check, scoped mutation run and phase final gates on the final code; hand edits carried forward; no production code (SEC-04).
+- [x] 02-23: DEF-11 and DEF-12 name the object-id channel in docs/ARCHITECTURE.md and 02-20-PLAN.md; controls on each part of the check, scoped mutation run and phase final gates on the final code; hand edits carried forward; no production code (SEC-04).
 
 ### Phase 3: Doctor & CLI Hardening
 
@@ -183,7 +183,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Sync Engine & State Hermeticity | 11/11 | Complete    | 2026-10-22 |
-| 2. Sanitizer, Boundaries & Security Hardening | 22/23 | In Progress | - |
+| 2. Sanitizer, Boundaries & Security Hardening | 23/23 | In Progress | - |
 | 3. Doctor & CLI Hardening | 0/4 | Not started | - |
 | 4. Templates, Archetypes & Manifest Decoupling | 0/3 | Not started | - |
 
