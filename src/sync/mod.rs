@@ -15877,19 +15877,25 @@ git update-ref HEAD "$N"
             .any(|window| window == needle)
     }
 
-    /// On honest trees the built listing is byte for byte git's own, in a SHA-1 and a
-    /// SHA-256 repository. Negative control: a subtree whose object file holds another
-    /// tree's bytes still lists with git, and is refused by the built listing naming it.
-    #[test]
-    fn test_verified_tree_listing_matches_ls_tree() {
-        let git = GitFixture::new();
-        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
-        let repo = tempdir().unwrap();
-        let dir = repo.path();
+    /// The ids of [`ls_tree_fixture`]'s SHA-1 repository that its scenarios assert on.
+    struct LsTreeFixture {
+        full: String,
+        generic: String,
+        other_dir: String,
+        empty_commit: String,
+        plain: String,
+        empty: String,
+        link: String,
+    }
+
+    /// Builds in `dir` a SHA-1 repository whose commit `full` lists every mode git
+    /// writes, a legacy mode, an empty tree, a gitlink and names with bytes ls-tree
+    /// quotes; `empty_commit` is a commit of the empty tree.
+    fn ls_tree_fixture(git: &GitFixture, dir: &Path) -> LsTreeFixture {
         git.run(dir, &["init", "-b", "main"]);
-        let blob = |bytes: &[u8]| write_blob(&git, dir, bytes);
-        let mktree = |listing: &str| git_with_input(&git, dir, &["mktree"], listing.as_bytes());
-        let commit = |tree: &str| git_with_input(&git, dir, &["commit-tree", tree], b"listing\n");
+        let blob = |bytes: &[u8]| write_blob(git, dir, bytes);
+        let mktree = |listing: &str| git_with_input(git, dir, &["mktree"], listing.as_bytes());
+        let commit = |tree: &str| git_with_input(git, dir, &["commit-tree", tree], b"listing\n");
         let record = |mode: &str, kind: &str, id: &str, name: &[u8]| {
             [format!("{mode} {kind} {id}\t").as_bytes(), name, b"\0"].concat()
         };
@@ -15907,7 +15913,7 @@ git update-ref HEAD "$N"
         // A legacy mode git still reads and lists as 100644; mktree would not write it.
         let legacy_bytes = [b"100664 legacy.repo\0".as_slice(), &raw_id(&plain)].concat();
         let legacy = git_with_input(
-            &git,
+            git,
             dir,
             &["hash-object", "-t", "tree", "--literally", "-w", "--stdin"],
             &legacy_bytes,
@@ -15936,8 +15942,34 @@ git update-ref HEAD "$N"
         ] {
             records.extend(record("100644", "blob", &plain, name));
         }
-        let root = git_with_input(&git, dir, &["mktree", "-z"], &records);
+        let root = git_with_input(git, dir, &["mktree", "-z"], &records);
         let full = commit(&root);
+        LsTreeFixture {
+            full,
+            generic,
+            other_dir,
+            empty_commit,
+            plain,
+            empty,
+            link,
+        }
+    }
+
+    /// On the SHA-1 fixture's honest trees the built listing is byte for byte git's own.
+    #[test]
+    fn test_verified_tree_listing_matches_ls_tree() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let repo = tempdir().unwrap();
+        let dir = repo.path();
+        let LsTreeFixture {
+            full,
+            empty_commit,
+            plain,
+            empty,
+            link,
+            ..
+        } = ls_tree_fixture(&git, dir);
 
         let listed = raw_ls_tree(&git, dir, &full);
         // The fixture holds what it claims, as git lists it.
@@ -15962,6 +15994,16 @@ git update-ref HEAD "$N"
             );
         }
         assert_eq!(built_listing(&engine, &git, dir, &full), Ok(listed));
+    }
+
+    /// A commit of the empty tree lists nothing, in git and in the built listing.
+    #[test]
+    fn test_verified_tree_listing_matches_ls_tree_on_the_empty_tree() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let repo = tempdir().unwrap();
+        let dir = repo.path();
+        let LsTreeFixture { empty_commit, .. } = ls_tree_fixture(&git, dir);
 
         let listed_empty = raw_ls_tree(&git, dir, &empty_commit);
         assert!(listed_empty.is_empty(), "{listed_empty:?}");
@@ -15969,6 +16011,14 @@ git update-ref HEAD "$N"
             built_listing(&engine, &git, dir, &empty_commit),
             Ok(listed_empty)
         );
+    }
+
+    /// In a SHA-256 repository the built listing is byte for byte git's own, 64-digit ids
+    /// and the executable mode included.
+    #[test]
+    fn test_verified_tree_listing_matches_ls_tree_in_sha256_repository() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
 
         let sha256 = tempdir().unwrap();
         let dir256 = sha256.path();
@@ -15992,6 +16042,22 @@ git update-ref HEAD "$N"
             "{listed256:?}"
         );
         assert_eq!(built_listing(&engine, &git, dir256, &head), Ok(listed256));
+    }
+
+    /// Negative control: a subtree whose object file holds another tree's bytes still
+    /// lists with git, and is refused by the built listing naming it.
+    #[test]
+    fn test_verified_tree_listing_refuses_subtree_not_matching_its_id() {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let repo = tempdir().unwrap();
+        let dir = repo.path();
+        let LsTreeFixture {
+            full,
+            generic,
+            other_dir,
+            ..
+        } = ls_tree_fixture(&git, dir);
 
         forge_loose_object(dir, &generic, &other_dir);
         raw_ls_tree(&git, dir, &full);
@@ -16036,102 +16102,205 @@ git update-ref HEAD "$N"
         }
     }
 
-    #[test]
-    fn test_listing_diff() {
-        let (x, y, z) = ("a".repeat(40), "b".repeat(40), "c".repeat(40));
-        let zero = "0".repeat(40);
-        let blob = |id: &str, path: &[u8]| listing_record("100644", "blob", id, path);
-        let base = [blob(&x, b"f"), blob(&y, b"g")].concat();
+    /// Three distinct 40-digit ids and the 40-digit zero id the listing_diff cases use.
+    struct DiffIds {
+        x: String,
+        y: String,
+        z: String,
+        zero: String,
+    }
 
+    fn diff_ids() -> DiffIds {
+        DiffIds {
+            x: "a".repeat(40),
+            y: "b".repeat(40),
+            z: "c".repeat(40),
+            zero: "0".repeat(40),
+        }
+    }
+
+    /// A `100644 blob` listing record of `path` with the id `id`.
+    fn listing_blob(id: &str, path: &[u8]) -> Vec<u8> {
+        listing_record("100644", "blob", id, path)
+    }
+
+    /// The base listing most listing_diff cases start from: `f` at x, `g` at y.
+    fn diff_base(ids: &DiffIds) -> Vec<u8> {
+        [listing_blob(&ids.x, b"f"), listing_blob(&ids.y, b"g")].concat()
+    }
+
+    /// Two equal listings have no changes.
+    #[test]
+    fn test_listing_diff_of_equal_listings_is_empty() {
+        let ids = diff_ids();
+        let base = diff_base(&ids);
         assert_eq!(diff_unbounded(&base, &base), Some(Vec::new()), "equal");
+    }
+
+    /// Over an empty base every commit record is an `A` record from the zero id.
+    #[test]
+    fn test_listing_diff_adds_every_record_over_an_empty_base() {
+        let ids = diff_ids();
+        let DiffIds { x, y, zero, .. } = &ids;
+        let base = diff_base(&ids);
         assert_eq!(
             diff_unbounded(b"", &base),
             Some(
                 [
-                    raw_change("000000", "100644", &zero, &x, "A", b"f"),
-                    raw_change("000000", "100644", &zero, &y, "A", b"g"),
+                    raw_change("000000", "100644", zero, x, "A", b"f"),
+                    raw_change("000000", "100644", zero, y, "A", b"g"),
                 ]
                 .concat()
             ),
             "an empty base"
         );
+    }
+
+    /// For an empty commit every base record is a `D` record to the zero id.
+    #[test]
+    fn test_listing_diff_deletes_every_record_for_an_empty_commit() {
+        let ids = diff_ids();
+        let DiffIds { x, y, zero, .. } = &ids;
+        let base = diff_base(&ids);
         assert_eq!(
             diff_unbounded(&base, b""),
             Some(
                 [
-                    raw_change("100644", "000000", &x, &zero, "D", b"f"),
-                    raw_change("100644", "000000", &y, &zero, "D", b"g"),
+                    raw_change("100644", "000000", x, zero, "D", b"f"),
+                    raw_change("100644", "000000", y, zero, "D", b"g"),
                 ]
                 .concat()
             ),
             "an empty commit"
         );
-        let changed = [blob(&z, b"f"), listing_record("100755", "blob", &y, b"g")].concat();
+    }
+
+    /// A new id and a mode change within the regular-file type are both `M` records.
+    #[test]
+    fn test_listing_diff_lists_content_change_and_executable_flip_as_modified() {
+        let ids = diff_ids();
+        let DiffIds { x, y, z, .. } = &ids;
+        let base = diff_base(&ids);
+        let changed = [
+            listing_blob(z, b"f"),
+            listing_record("100755", "blob", y, b"g"),
+        ]
+        .concat();
         assert_eq!(
             diff_unbounded(&base, &changed),
             Some(
                 [
-                    raw_change("100644", "100644", &x, &z, "M", b"f"),
-                    raw_change("100644", "100755", &y, &y, "M", b"g"),
+                    raw_change("100644", "100644", x, z, "M", b"f"),
+                    raw_change("100644", "100755", y, y, "M", b"g"),
                 ]
                 .concat()
             ),
             "a content change and an executable flip"
         );
+    }
+
+    /// A blob that becomes a symlink or a gitlink is a `T` record, the id kept or changed.
+    #[test]
+    fn test_listing_diff_lists_symlink_and_gitlink_retype_as_type_change() {
+        let ids = diff_ids();
+        let DiffIds { x, y, z, .. } = &ids;
+        let base = diff_base(&ids);
         let retyped = [
-            listing_record("120000", "blob", &x, b"f"),
-            listing_record("160000", "commit", &z, b"g"),
+            listing_record("120000", "blob", x, b"f"),
+            listing_record("160000", "commit", z, b"g"),
         ]
         .concat();
         assert_eq!(
             diff_unbounded(&base, &retyped),
             Some(
                 [
-                    raw_change("100644", "120000", &x, &x, "T", b"f"),
-                    raw_change("100644", "160000", &y, &z, "T", b"g"),
+                    raw_change("100644", "120000", x, x, "T", b"f"),
+                    raw_change("100644", "160000", y, z, "T", b"g"),
                 ]
                 .concat()
             ),
             "a blob that becomes a symlink, and one that becomes a gitlink"
         );
-        let directory = [listing_record("040000", "tree", &z, b"a"), blob(&x, b"a/x")].concat();
+    }
+
+    /// A directory replaced by a file of its name is the file's `A` and the old files' `D`.
+    #[test]
+    fn test_listing_diff_lists_directory_replaced_by_file_as_added_and_deleted() {
+        let DiffIds { x, y, z, zero } = &diff_ids();
+        let directory = [
+            listing_record("040000", "tree", z, b"a"),
+            listing_blob(x, b"a/x"),
+        ]
+        .concat();
         assert_eq!(
-            diff_unbounded(&directory, &blob(&y, b"a")),
+            diff_unbounded(&directory, &listing_blob(y, b"a")),
             Some(
                 [
-                    raw_change("000000", "100644", &zero, &y, "A", b"a"),
-                    raw_change("100644", "000000", &x, &zero, "D", b"a/x"),
+                    raw_change("000000", "100644", zero, y, "A", b"a"),
+                    raw_change("100644", "000000", x, zero, "D", b"a/x"),
                 ]
                 .concat()
             ),
             "a directory replaced by a file"
         );
+    }
+
+    /// Records come in path order: a deletion of `b` before the addition of `c`.
+    #[test]
+    fn test_listing_diff_orders_a_deletion_before_a_later_addition() {
+        let DiffIds { x, y, zero, .. } = &diff_ids();
         assert_eq!(
-            diff_unbounded(&blob(&x, b"b"), &blob(&y, b"c")),
+            diff_unbounded(&listing_blob(x, b"b"), &listing_blob(y, b"c")),
             Some(
                 [
-                    raw_change("100644", "000000", &x, &zero, "D", b"b"),
-                    raw_change("000000", "100644", &zero, &y, "A", b"c"),
+                    raw_change("100644", "000000", x, zero, "D", b"b"),
+                    raw_change("000000", "100644", zero, y, "A", b"c"),
                 ]
                 .concat()
             ),
             "records in path order, a deletion before a later addition"
         );
-        let other_tree = [listing_record("040000", "tree", &y, b"a"), blob(&x, b"a/x")].concat();
+    }
+
+    /// A tree record whose id changed, with the same files under it, is no change.
+    #[test]
+    fn test_listing_diff_ignores_tree_records() {
+        let DiffIds { x, y, z, .. } = &diff_ids();
+        let directory = [
+            listing_record("040000", "tree", z, b"a"),
+            listing_blob(x, b"a/x"),
+        ]
+        .concat();
+        let other_tree = [
+            listing_record("040000", "tree", y, b"a"),
+            listing_blob(x, b"a/x"),
+        ]
+        .concat();
         assert_eq!(
             diff_unbounded(&directory, &other_tree),
             Some(Vec::new()),
             "tree records are ignored"
         );
-        let repeated = [blob(&x, b"p"), blob(&y, b"p")].concat();
+    }
+
+    /// A path the commit lists twice is matched as a multiset: one record per extra copy.
+    #[test]
+    fn test_listing_diff_matches_a_repeated_path_as_a_multiset() {
+        let DiffIds { x, y, zero, .. } = &diff_ids();
+        let repeated = [listing_blob(x, b"p"), listing_blob(y, b"p")].concat();
         assert_eq!(
-            diff_unbounded(&blob(&x, b"p"), &repeated),
-            Some(raw_change("000000", "100644", &zero, &y, "A", b"p")),
+            diff_unbounded(&listing_blob(x, b"p"), &repeated),
+            Some(raw_change("000000", "100644", zero, y, "A", b"p")),
             "a repeated path"
         );
+    }
+
+    /// With 64-digit ids the zero id is 64 digits too.
+    #[test]
+    fn test_listing_diff_writes_64_digit_zero_ids_for_64_digit_ids() {
         let long = "d".repeat(64);
         assert_eq!(
-            diff_unbounded(b"", &blob(&long, b"f")),
+            diff_unbounded(b"", &listing_blob(&long, b"f")),
             Some(raw_change(
                 "000000",
                 "100644",
@@ -16142,8 +16311,21 @@ git update-ref HEAD "$N"
             )),
             "64-hex ids"
         );
+    }
+
+    /// A commit listing record without a tab is unparseable.
+    #[test]
+    fn test_listing_diff_refuses_a_commit_record_without_a_tab() {
+        let DiffIds { x, .. } = &diff_ids();
         let no_tab = format!("100644 blob {x} f\0").into_bytes();
         assert_eq!(diff_unbounded(b"", &no_tab), None, "a record without a tab");
+    }
+
+    /// A base listing record without a tab is unparseable.
+    #[test]
+    fn test_listing_diff_refuses_a_base_record_without_a_tab() {
+        let DiffIds { x, .. } = &diff_ids();
+        let no_tab = format!("100644 blob {x} f\0").into_bytes();
         assert_eq!(
             diff_unbounded(&no_tab, b""),
             None,
