@@ -25,7 +25,7 @@ findings:
     title: "count_empty_directories' new doc comment claims a `/` in a name can never hide an empty tree; it can"
   - id: IN-704
     severity: info
-    disposition: open
+    disposition: fixed
     title: "DEF-09 says the deadline \"also covers the changes\", which reads as covering the change loop"
   - id: WR-600
     severity: warning
@@ -215,7 +215,7 @@ findings:
     severity: info
     disposition: open
     title: "The vendored rule pin is enforced only under `cargo test`, and line-ending conversion would break it"
-open: 30
+open: 29
 total: 53
 recorded: 2026-11-05T02:35:41.986Z
 ---
@@ -229,7 +229,7 @@ recorded: 2026-11-05T02:35:41.986Z
 | IN-701 | info | fixed | code fixer (d69322b), doc comments only; confirmed by re-verification 597921d |
 | IN-702 | info | skipped | not taken: the record-limit rows pin the fetched-head route phrase by design; fails closed |
 | IN-703 | info | fixed | code fixer (e0e2d4c); confirmed by re-verification 597921d |
-| IN-704 | info | open | - |
+| IN-704 | info | fixed | DEF-09 wording in docs/ARCHITECTURE.md and 02-20-PLAN.md (95e88de); confirmed by the verification refresh |
 | WR-600 | warning | fixed | plan 02-27 (e914a41, RED e818692; 1125c68, RED 5452316); confirmed by re-verification 597921d |
 | IN-600 | info | fixed | plan 02-28 (20d9a90); confirmed by re-verification 597921d |
 | WR-500 | warning | fixed | plan 02-24 (146fad2, RED c9e74a0; 7ee7eb3, RED 0737048); confirmed by re-verification 597921d |

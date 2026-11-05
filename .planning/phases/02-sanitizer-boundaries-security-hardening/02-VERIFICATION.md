@@ -1,6 +1,6 @@
 ---
 phase: 02-sanitizer-boundaries-security-hardening
-verified: 2026-11-05T03:51:18Z
+verified: 2026-11-05T04:13:41Z
 status: passed
 score: 113/113 must-haves verified
 covered_files:
@@ -71,12 +71,16 @@ covered_files:
   - "src/sync/mod.rs"
   - "src/template/mod.rs"
   - "tests/e2e_lifecycle.rs"
-covered_digest: "v4:sha256:9a8a5be91f9696e31ffe2a2b68501f1eefa0a794b6ac2a89ec84a2ea9fac80e9"
+covered_digest: "v4:sha256:a7076d715c86741993313ef153d286a547a81f06110f269f5d68e9f6d80e227e"
 behavior_unverified: 0
 overrides_applied: 0
 re_verification:
-  previous_status: gaps_found
-  previous_score: 70/75
+  # Refresh of the 597921d report (passed, 113/113) after document-only commits 550613b, 349deaa,
+  # 95e88de, ead78f6. The gap closure below is that report's, carried over unchanged.
+  previous_status: passed
+  previous_score: 113/113
+  gap_round_previous_status: gaps_found
+  gap_round_previous_score: 70/75
   gaps_closed:
     - "DEF-11 / 02-13 prohibition (CR-400, committed route): a blob or tree in the cache checkout whose stored bytes do not match its id is refused in direct and PR mode; removing the id comparison in read_verified_object makes the four committed-route push rows return Ok again (negative control run here)"
     - "DEF-12 / 02-19 prohibition (CR-400, empty-status route): same, both modes; the same negative control makes the ten empty-status rows return Ok(\"No changes to push to remote repository.\")"
@@ -88,9 +92,32 @@ re_verification:
 # Phase 2: Sanitizer, Boundaries & Security Hardening Verification Report
 
 **Phase Goal:** Screen and redact all confidential tokens, raw credentials, and user-specific paths before any remote git staging or push.
-**Verified:** 2026-11-05T03:51:18Z
+**Verified:** 2026-11-05T04:13:41Z (refresh of the 2026-11-05T03:51:18Z report, 597921d)
 **Status:** passed
-**Re-verification:** Yes, after gap plans 02-22 to 02-28 and the review fixes WR-700, IN-700, IN-701, IN-703
+**Re-verification:** Yes, after gap plans 02-22 to 02-28 and the review fixes WR-700, IN-700, IN-701, IN-703; refreshed after the document-only commits 550613b, 349deaa, 95e88de (IN-704) and ead78f6 (02-SECURITY.md)
+
+## Refresh, 2026-11-05T04:13:41Z
+
+Nothing code-side changed since 597921d, so every code result below carries over unchanged; only the
+documents moved. `git diff --stat 597921d..HEAD` lists five files, all documents (02-20-PLAN.md,
+02-REVIEW-DISPOSITION.md, 02-SECURITY.md, 02-VALIDATION.md, docs/ARCHITECTURE.md);
+`git diff --quiet 597921d..HEAD -- src tests Cargo.toml Cargo.lock` exits 0. The full suite and the negative
+controls A to D were not re-run: they ran on the same sources.
+
+| Check | Result |
+|-------|--------|
+| New DEF-09 deadline clause (95e88de, IN-704) against src/sync/mod.rs | True. One `ListingBudget` per gate call (2740) is passed to both `verified_tree_listing` calls (2741, 2801-2806), and its `deadline` goes to `listing_diff` (2869), which checks it once per record in both loops (3586, 3618): that is "both listings and the list of changes". `push_tree_entries` calls `check_time()` (3277) before `read_verified_object` (3279), so a read already started is not interrupted: "checked before each tree is read". The change loop's `read_blob_by_id` (2887 → 3156 → `read_verified_object`) takes no budget, and no production `is_past`/`check_time` sits in 2873-2990: "not the blob reads that check each change". The word diff changes only this clause |
+| DEF rows, ARCHITECTURE vs 02-20-PLAN | Byte-identical (diff exit 0), 15 each. Control: the DEF rows against 597921d's differ (exit 1), so the comparison can see a change |
+| NOT rows vs 597921d | Unchanged in both files (diff exit 0 each), 15 each |
+| DEF-row test names | 278 occurrences, 275 distinct, each defined exactly once in src/ or tests/ (`fn <name>(`). Control: the invented name `test_invented_name_that_does_not_exist_zz` counts 0 and is the only name not counted once |
+| 02-VALIDATION.md T-02-52 line (349deaa) | Its four test names are each defined once (control: a misspelt name counts 0); `GIT_GRAFT_FILE` is set on both push paths (2296, 2450) |
+| Debt markers in docs/ARCHITECTURE.md, src/sync/mod.rs, src/process.rs | 0 (control: a scratch copy of ARCHITECTURE with a planted FIXME counts 1) |
+| 02-SECURITY.md (ead78f6) | `status: verified`, `threats_open: 0`. 115 threat rows: 110 closed, 5 open (T-02-60, -61, -64, -65, -67), all low and pending the operator. Counted from the status column, which agrees with the approval line |
+
+Not established by this refresh: the DEF-09 clause is checked for being true, not complete. It does not mention
+the empty-status route, whose recorded-blob reads (`first_path_not_held` → `read_blob_by_id`, 3002) are outside
+the deadline too. DEF-09 is about the committed route, so the clause does not overclaim. The failure-mode column
+still reads "whose listings and changes take longer"; that is loose but makes no claim about coverage. Info only.
 
 ## Bottom line
 
@@ -133,7 +160,7 @@ removed (controls below). No code finding in this round re-opens a DEF row.
 | Plan | Status | Evidence |
 |------|--------|----------|
 | 02-22 (id check) | VERIFIED | Truths hold via 02-24's stronger form; artifacts `run_bounded_with_input`, `read_verified_object` present; `--literally --no-filters`, no `-w`; test_read_verified_object_checks_bytes_against_the_id asserts the check wrote nothing; SHA-256 and abbreviated-id tests pass; Cargo.toml/Cargo.lock unchanged since 4f9f043 |
-| 02-23 (DEF-11/12 rows) | VERIFIED | DEF rows of ARCHITECTURE and 02-20-PLAN byte-identical (diff exit 0); NOT rows unchanged since ab5dc34 (diff exit 0; control: DEF rows since ab5dc34 differ, exit 1); stored mutation output missed=0, caught=35 |
+| 02-23 (DEF-11/12 rows) | VERIFIED | DEF rows of ARCHITECTURE and 02-20-PLAN byte-identical (diff exit 0, re-checked after 95e88de); NOT rows unchanged since ab5dc34 and since 597921d (diff exit 0; control: DEF rows since ab5dc34 differ, exit 1); stored mutation output missed=0, caught=35 |
 | 02-24 (hashed listing, WR-500/501/502) | VERIFIED | `verified_tree_listing`, `parse_tree_object`, `first_path_under` present and wired (verify.artifacts 4/4, key-links 2/2); swap rows pass, fail under control A; `test_fetched_head_holds_refuses_root_tree_not_matching_its_id` fails under control A (`a root tree not matching its id must be refused`); root push rows assert `git status failed` with a not-held control |
 | 02-25 (base-side DEF-09) | VERIFIED | Change list from `listing_diff` over two verified listings (2868-2869); `test_committed_gate_refuses_base_tree_not_matching_its_id` and the two push rows pass, fail under control A; `test_listing_diff_matches_diff_tree` passes |
 | 02-26 (rows, controls) | VERIFIED | Rows as above; stored mutation output missed=0, caught=62 |
@@ -174,7 +201,7 @@ Classified by the closed list's rule in docs/ARCHITECTURE.md section 3.
 | IN-701 | Fixed (d69322b), comment only | push_tree_entries and ListingBudget docs now say the deadline stops new reads; not a DEF failure (push still refuses) |
 | IN-702 | Not taken; Info | Refusal names the fetched head when the commit's listing used the shared budget; fails closed |
 | IN-703 | Fixed (e0e2d4c), comment plus a pinning test | Probed here with plain git: a root entry literally named `a/x` lists byte-identical to an honest `a/x`, pushes, clones (exit 0) and checks out the same file; fsck warns `fullPathname`. Control: honest tree clones the same. No new path text is published; Info |
-| IN-704 | Owed hand edit (todo); Info | DEF-09 still reads "which also covers the changes"; the change loop is outside the deadline by the 2026-11-04 decision. Wording only |
+| IN-704 | Fixed (95e88de), wording only; Info | DEF-09 now says the deadline covers both listings and the list of changes, not the change loop's blob reads, and is checked before each tree is read; true against the code (see Refresh). 02-REVIEW-DISPOSITION.md (550613b, written before 95e88de) still records IN-704 as `open` |
 | WR-400 | Warning, open, not a goal gap | ensure_remote_repo_for_push unchanged since the previous report, which reproduced it; it fails closed (a push from a second directory whose `../x` names another repository), names the wrong cause, persists until the cache is removed. Not a DEF-15 failure: publishing there would build on another repository's head |
 | IN-400..IN-403, IN-300, IN-301 | Info / open, unchanged code | stage_publication, ensure, src/main.rs and tests/ unchanged since ab5dc34; rulings of the previous report stand (IN-401 is a DEF-02 wording overclaim; no bypass, and control D shows the id check alone now refuses replace-ref reads) |
 
@@ -269,7 +296,6 @@ All four claimed by plans; none orphaned. REQUIREMENTS.md is inconsistent with i
 
 | File | Line | Pattern | Severity | Impact |
 |------|------|---------|----------|--------|
-| docs/ARCHITECTURE.md | DEF-09 | "which also covers the changes" | Info | IN-704, owed hand edit |
 | docs/ARCHITECTURE.md | DEF-02 | "Every gate read ... past replace refs" | Info | IN-401; staged gate's reads do not; binding gate does |
 | src/sync/mod.rs | 1262-1266 | Refusal blames a hook | Warning | WR-400 wrong cause |
 
@@ -281,8 +307,10 @@ None. No judgment-tier item, no visual or external-service behaviour in scope.
 
 - T-02-60, T-02-61, T-02-64, T-02-65, T-02-67: still "pending the operator, not accepted" in 02-15-PLAN
   `## Operator answers`. That table says an unanswered row stays OPEN and does not hold up the phase.
-- The hand edits in `.planning/todos/pending/2026-11-01-hand-edits-owed-for-phase-02-after-re-verification.md`
-  become due now that re-verification passes; 02-SECURITY.md is still to be regenerated by `/gsd-secure-phase`.
+- 02-SECURITY.md was regenerated by `/gsd-secure-phase` (ead78f6): verified, threats_open 0, the same five
+  low threats OPEN pending the operator and not in the Accepted Risks Log. Its own approval line says it is a
+  grep-depth audit that cannot see bypasses; behaviour under attack rests on this report's controls.
+- 02-REVIEW-DISPOSITION.md lists IN-704 as `open` although 95e88de fixed it. The record is stale, not the code.
 
 ### Gaps Summary
 
@@ -301,11 +329,14 @@ size and time) are closed with tests that fail when the checks are removed.
   production code they covered changed afterwards only by comments and by the behaviour-preserving
   `diff_refusal` extraction (5f64809), which no mutation run covers; a unit test pins its texts.
 - Memory under a single very large tree object, the `verified` map and the change loop are outside the
-  walk bound by 02-27's "Not claimed" section; the closed list does not say so (beside IN-704). Not run.
+  walk bound by 02-27's "Not claimed" section. Since 95e88de the closed list says the change loop's blob reads
+  are outside the deadline; it still says nothing about memory outside the record and byte limits. Not run.
+- The refresh re-checked documents and code by reading and diffing them; it ran no test. The suite and control
+  results are the 597921d run's, valid because src/, tests/, Cargo.toml and Cargo.lock are byte-identical.
 - Clippy's result was a cached replay at unchanged sources, not a fresh analysis.
 - The slash-named entry probe ran with plain git, not through UDE.
 
 ---
 
-_Verified: 2026-11-05T03:51:18Z_
+_Verified: 2026-11-05T04:13:41Z (refresh; full run 2026-11-05T03:51:18Z)_
 _Verifier: Claude (gsd-verifier)_
