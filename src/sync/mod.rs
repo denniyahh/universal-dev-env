@@ -2616,7 +2616,9 @@ impl SyncEngine {
     /// its header is free of secrets; its listing and the fetched head's together stay
     /// within one budget of [`MAX_LISTING_RECORDS`] records and [`MAX_LISTING_BYTES`]
     /// listing bytes, and one deadline, the local time limit from the start of the walk,
-    /// covers both listings and the diff; its tree repeats no path and has no path
+    /// covers both listings and the diff (the walk checks it before each tree read, so it
+    /// stops new reads, and a read already started can overrun it by up to one object read,
+    /// three local-tier git runs); its tree repeats no path and has no path
     /// component that is empty, `.` or `..`, checked before any blob is read; every blob it
     /// changes, read by object id and checked against it, is on the allowlist `paths`
     /// (relative to `repo`), free of secrets and identical to what `validated` recorded; it
@@ -3252,7 +3254,10 @@ impl SyncEngine {
     /// reverse stored order, so the first entry is popped next. Before it pushes any, it
     /// takes from `budget` one record per entry and the bytes the listing will write for
     /// them (mode, type word, id, the full path and the separators), summed with checked
-    /// arithmetic, so an overflow is [`ListingDefect::TooLarge`] too.
+    /// arithmetic, so an overflow is [`ListingDefect::TooLarge`] too. It checks `budget`'s
+    /// deadline before the tree read, never after it: the deadline stops new reads, and a
+    /// read already started can overrun it by up to one object read (three local-tier git
+    /// runs).
     #[expect(
         clippy::too_many_arguments,
         reason = "the walk state verified_tree_listing threads through each tree"
@@ -3367,7 +3372,10 @@ const MAX_LISTING_BYTES: usize = 1 << 26;
 /// What one publication gate call may still list, shared by every listing of that call
 /// ([`SyncEngine::verified_tree_listing`]) and by its diff ([`listing_diff`]), so the
 /// call's listings together never hold more records or listing bytes than it started
-/// with, and its walk and diff stop at one deadline set when the walk starts.
+/// with, and its walk and diff stop at one deadline set when the walk starts. The walk
+/// checks the deadline before each tree read, so the deadline stops new reads; a read
+/// already started can overrun it by up to one object read
+/// ([`SyncEngine::read_verified_object`], three local-tier git runs).
 struct ListingBudget {
     records_left: usize,
     bytes_left: usize,
