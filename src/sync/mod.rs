@@ -19527,13 +19527,13 @@ git update-ref HEAD "$N"
     /// a walk time of 15 s and a test hook sleeping 16 s right after the commit's listing,
     /// the fetched head's listing starts past the deadline and is refused. A budget made
     /// afresh for it would give it a new 15 s and pass. Control, first: the same walk time
-    /// with no hook passes, in under a third of it.
+    /// with no hook passes. No wall-clock bound is asserted: the refusal's text decides the
+    /// result (the commit's listing finished inside the deadline, the fetched head's started
+    /// past it), and the test run's own timeout bounds a hang.
     #[test]
     fn test_committed_gate_carries_the_deadline_into_the_fetched_head_listing() {
         const WALK: Duration = Duration::from_secs(15);
         const HOOK_SLEEP: Duration = Duration::from_secs(16);
-        // The refused call returns this soon after the hook's sleep ends.
-        const AFTER_SLEEP: Duration = Duration::from_secs(5);
         let git = GitFixture::new();
         let (repo, base, commit) = commit_changing_f(&git);
         let dir = repo.path();
@@ -19542,21 +19542,15 @@ git update-ref HEAD "$N"
         let control = validate_templates_commit(&git, dir, &commit, &base, |engine| {
             engine.with_listing_time(WALK)
         });
-        let control_elapsed = started.elapsed();
+        // A measurement, not a claim: a slow host may take longer.
+        println!("control elapsed: {:?}", started.elapsed());
         assert_eq!(control, Ok(()));
-        println!("control elapsed: {control_elapsed:?}");
-        assert!(
-            control_elapsed < WALK / 3,
-            "the control took {control_elapsed:?}, so the margin under {WALK:?} is under 3x"
-        );
 
-        let started = std::time::Instant::now();
         let res = validate_templates_commit(&git, dir, &commit, &base, |engine| {
             engine
                 .with_listing_time(WALK)
                 .with_after_tree_listing(|| std::thread::sleep(HOOK_SLEEP))
         });
-        let elapsed = started.elapsed();
         let err = match res {
             Err(err) => err,
             other => panic!("the fetched head's listing starts past the deadline, got {other:?}"),
@@ -19564,7 +19558,6 @@ git update-ref HEAD "$N"
         assert!(err.contains(PAST_DEADLINE), "{err}");
         assert!(err.contains("the tree of the fetched head"), "{err}");
         assert!(!err.contains("the tree of the commit to publish"), "{err}");
-        assert!(elapsed < HOOK_SLEEP + AFTER_SLEEP, "took {elapsed:?}");
     }
 
     /// A commit repeating one allowlisted path 64 times at the validated blob is refused
