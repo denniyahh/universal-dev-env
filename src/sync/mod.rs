@@ -609,17 +609,21 @@ impl SyncEngine {
         self
     }
 
-    /// The budget one publication gate call's listings draw on: [`MAX_LISTING_RECORDS`]
-    /// records and [`MAX_LISTING_BYTES`] bytes, or a test's lower limits when set.
+    /// The budget one publication gate call's listings and diff draw on:
+    /// [`MAX_LISTING_RECORDS`] records, [`MAX_LISTING_BYTES`] bytes and a deadline of the
+    /// local time limit from now (the bound each `git ls-tree` and `git diff-tree` run had
+    /// before the walk replaced them), or a test's lower limits when set.
     fn listing_budget(&self) -> ListingBudget {
+        let time = self.limits.local;
         #[cfg(test)]
-        let (records, bytes) = (
+        let (records, bytes, time) = (
             self.listing_record_limit.unwrap_or(MAX_LISTING_RECORDS),
             self.listing_byte_limit.unwrap_or(MAX_LISTING_BYTES),
+            self.listing_time.unwrap_or(time),
         );
         #[cfg(not(test))]
         let (records, bytes) = (MAX_LISTING_RECORDS, MAX_LISTING_BYTES);
-        ListingBudget::new(records, bytes)
+        ListingBudget::new(records, bytes, time)
     }
 
     /// Runs the test hook set by `with_after_tree_listing`, if any. Called right after a
@@ -2611,10 +2615,12 @@ impl SyncEngine {
     /// checks: it has exactly one parent, `base`; its message is the sync commit message and
     /// its header is free of secrets; its listing and the fetched head's together stay
     /// within one budget of [`MAX_LISTING_RECORDS`] records and [`MAX_LISTING_BYTES`]
-    /// listing bytes; every blob it changes, read by object id and checked
-    /// against it, is on the allowlist `paths` (relative to `repo`), free of secrets and
-    /// identical to what `validated` recorded; its tree repeats no path and has no path
-    /// component that is empty, `.` or `..`; it holds no empty directory; every path
+    /// listing bytes, and one deadline, the local time limit from the start of the walk,
+    /// covers both listings and the diff; its tree repeats no path and has no path
+    /// component that is empty, `.` or `..`, checked before any blob is read; every blob it
+    /// changes, read by object id and checked against it, is on the allowlist `paths`
+    /// (relative to `repo`), free of secrets and identical to what `validated` recorded; it
+    /// holds no empty directory; every path
     /// `validated` recorded holds its recorded content, each blob read against its id; and
     /// its tree is `staged_tree`, the id [`Self::stage_publication`] recorded. What these
     /// checks defend is the closed list in `docs/ARCHITECTURE.md`, section 3, and nothing
@@ -2728,7 +2734,7 @@ impl SyncEngine {
             |tree: &[u8]| first_path_under(tree, recorded.iter().chain(&allowed).copied());
         let mut verified = HashMap::new();
         // One budget for both listings of this call, so together they stay within the
-        // record and byte limits.
+        // record and byte limits, and both listings and the diff stop at one deadline.
         let mut budget = self.listing_budget();
         let listing = self.verified_tree_listing(repo, root, &mut verified, &mut budget);
         self.after_tree_listing();
@@ -2742,6 +2748,11 @@ impl SyncEngine {
             Err(ListingDefect::TooLarge) => {
                 return Err(format!(
                     "Post-commit publication gate violation: the tree of the commit to publish {LISTING_TOO_LARGE}"
+                ));
+            }
+            Err(ListingDefect::PastDeadline) => {
+                return Err(format!(
+                    "Post-commit publication gate violation: the tree of the commit to publish {LISTING_PAST_DEADLINE}"
                 ));
             }
             Err(ListingDefect::Unparseable) => {
@@ -2798,6 +2809,11 @@ impl SyncEngine {
                     "Post-commit publication gate violation: the tree of the fetched head {LISTING_TOO_LARGE}"
                 ));
             }
+            Err(ListingDefect::PastDeadline) => {
+                return Err(format!(
+                    "Post-commit publication gate violation: the tree of the fetched head {LISTING_PAST_DEADLINE}"
+                ));
+            }
             Err(ListingDefect::Unparseable) => {
                 return Err(
                     "Post-commit publication gate violation: unparseable tree entry in the fetched head"
@@ -2817,14 +2833,46 @@ impl SyncEngine {
             }
         };
 
+        // The commit's tree repeats no path and has no bad component, checked before any
+        // blob is read: a repeated path would make the change loop below read the same blob
+        // once per repeat. The staged tree is read too, not trusted: a post-index-change hook
+        // can put a repeated path into it before its id is recorded, and the recorded id then
+        // matches (probed). None of these refusals prints a name.
+        let listed_blobs = match tree_listing_blobs(&listing) {
+            Ok(blobs) => blobs,
+            Err(TreeDefect::Unparseable) => {
+                return Err(format!(
+                    "Post-commit publication gate violation: unparseable tree entry in {commit}"
+                ));
+            }
+            Err(TreeDefect::RepeatedPath) => {
+                return Err(
+                    "Post-commit publication gate violation: the tree of the commit to publish repeats a path"
+                        .to_string(),
+                );
+            }
+            Err(TreeDefect::BadComponent) => {
+                return Err(
+                    "Post-commit publication gate violation: the tree of the commit to publish has a path component that is empty, `.` or `..`"
+                        .to_string(),
+                );
+            }
+        };
+
         // A tree can list one name twice, and a lookup by name returns one of the entries
         // while the push sends both (probed), so each listed blob is read by its own id.
         // Paths and ids are hook-chosen bytes: a refusal below never prints a listed name
         // that has not passed the allowlist.
         const UNPARSEABLE_ENTRY: &str =
             "Post-commit publication gate violation: unparseable committed entry";
-        let Some(changes) = listing_diff(&base_listing, &listing) else {
-            return Err(UNPARSEABLE_ENTRY.to_string());
+        let changes = match listing_diff(&base_listing, &listing, budget.deadline) {
+            Ok(changes) => changes,
+            Err(DiffDefect::Unparseable) => return Err(UNPARSEABLE_ENTRY.to_string()),
+            Err(DiffDefect::PastDeadline) => {
+                return Err(format!(
+                    "Post-commit publication gate violation: the changes of the commit to publish {LISTING_PAST_DEADLINE}"
+                ));
+            }
         };
         let Some(entries) = raw_diff_entries(&changes) else {
             return Err(UNPARSEABLE_ENTRY.to_string());
@@ -2887,30 +2935,7 @@ impl SyncEngine {
         }
 
         // The change list holds blobs only, so an empty directory's name would publish
-        // unlisted. The name is hook-chosen text and is never printed. The staged tree is
-        // read too, not trusted: a post-index-change hook can put a
-        // repeated path into it before its id is recorded, and the recorded id then matches
-        // (probed). None of these refusals prints a name.
-        let listed_blobs = match tree_listing_blobs(&listing) {
-            Ok(blobs) => blobs,
-            Err(TreeDefect::Unparseable) => {
-                return Err(format!(
-                    "Post-commit publication gate violation: unparseable tree entry in {commit}"
-                ));
-            }
-            Err(TreeDefect::RepeatedPath) => {
-                return Err(
-                    "Post-commit publication gate violation: the tree of the commit to publish repeats a path"
-                        .to_string(),
-                );
-            }
-            Err(TreeDefect::BadComponent) => {
-                return Err(
-                    "Post-commit publication gate violation: the tree of the commit to publish has a path component that is empty, `.` or `..`"
-                        .to_string(),
-                );
-            }
-        };
+        // unlisted. The name is hook-chosen text and is never printed.
         match count_empty_directories(&listing) {
             None => {
                 return Err(format!(
@@ -3056,6 +3081,11 @@ impl SyncEngine {
                     "{PREFIX} the fetched head's tree {LISTING_TOO_LARGE}"
                 ));
             }
+            Err(ListingDefect::PastDeadline) => {
+                return Err(format!(
+                    "{PREFIX} the fetched head's tree {LISTING_PAST_DEADLINE}"
+                ));
+            }
             Err(ListingDefect::Unparseable) => return Err(unparseable()),
             Err(ListingDefect::IdMismatch(tree)) => {
                 // Named from the record, then the staged deletions, never from the tree.
@@ -3197,7 +3227,8 @@ impl SyncEngine {
     /// iterative, so no depth can overflow the stack. Every record is taken from `budget`
     /// before it is pushed ([`Self::push_tree_entries`]), so the listing and the entries
     /// still pending together never hold more records or bytes than `budget` had left;
-    /// past either, [`ListingDefect::TooLarge`].
+    /// past either, [`ListingDefect::TooLarge`]. Each tree checks `budget`'s deadline before
+    /// it is read; at or past it, [`ListingDefect::PastDeadline`].
     fn verified_tree_listing(
         &self,
         repo: &Path,
@@ -3245,6 +3276,9 @@ impl SyncEngine {
         pending: &mut Vec<(Vec<u8>, u32, String)>,
         budget: &mut ListingBudget,
     ) -> Result<(), ListingDefect> {
+        // Before any read: the root and every tree the walk pops check the deadline. A blob
+        // record between two checks costs no read.
+        budget.check_time()?;
         if !verified.contains_key(id) {
             let bytes = match self.read_verified_object(repo, id.as_bytes(), "tree") {
                 Ok(bytes) => bytes,
@@ -3309,6 +3343,11 @@ const OBJECT_ID_MISMATCH: &str = "does not match its object id in the cache chec
 /// which amount ran out, and prints no number, so a test's lower limit prints it too.
 const LISTING_TOO_LARGE: &str = "is larger than the publication gate lists for one push; a tree in the cache checkout most likely repeats a subtree or holds very long names";
 
+/// The refusal text of a listing or diff not finished by the deadline of one gate call
+/// ([`ListingBudget`]), the local time limit from the start of the walk.
+const LISTING_PAST_DEADLINE: &str =
+    "could not be listed within the publication gate's time limit for one push";
+
 /// The records one publication gate call may list, over all its listings together
 /// ([`ListingBudget`]). A tree whose subtrees repeat lists 2^d paths from d + 3 tree
 /// objects, and git limits neither, so without a limit a hook in the cache checkout could
@@ -3335,19 +3374,32 @@ const MAX_LISTING_RECORDS: usize = 1 << 18;
 const MAX_LISTING_BYTES: usize = 1 << 26;
 
 /// What one publication gate call may still list, shared by every listing of that call
-/// ([`SyncEngine::verified_tree_listing`]), so the call's listings together never hold
-/// more records or listing bytes than it started with.
+/// ([`SyncEngine::verified_tree_listing`]) and by its diff ([`listing_diff`]), so the
+/// call's listings together never hold more records or listing bytes than it started
+/// with, and its walk and diff stop at one deadline set when the walk starts.
 struct ListingBudget {
     records_left: usize,
     bytes_left: usize,
+    deadline: std::time::Instant,
 }
 
 impl ListingBudget {
-    fn new(max_records: usize, max_bytes: usize) -> Self {
+    /// A budget of `max_records` records and `max_bytes` bytes whose deadline is `time`
+    /// from now.
+    fn new(max_records: usize, max_bytes: usize, time: Duration) -> Self {
         Self {
             records_left: max_records,
             bytes_left: max_bytes,
+            deadline: std::time::Instant::now() + time,
         }
+    }
+
+    /// [`ListingDefect::PastDeadline`] at or past the budget's deadline.
+    fn check_time(&self) -> Result<(), ListingDefect> {
+        if is_past(self.deadline) {
+            return Err(ListingDefect::PastDeadline);
+        }
+        Ok(())
     }
 
     /// Takes `records` records and `bytes` listing bytes from what is left;
@@ -3363,6 +3415,14 @@ impl ListingBudget {
         self.bytes_left = bytes_left;
         Ok(())
     }
+}
+
+/// Whether `deadline` has come: true at or past it. The only deadline test of the gate's
+/// walk and diff; it holds no comparison operator.
+fn is_past(deadline: std::time::Instant) -> bool {
+    std::time::Instant::now()
+        .checked_duration_since(deadline)
+        .is_some()
 }
 
 /// The type word of a listing record for an entry of mode `mode`: `tree`, `commit` for a
@@ -3506,10 +3566,17 @@ fn mode_type_bits(mode: &[u8]) -> Option<u32> {
 /// `:<old mode> <new mode> <old id> <new id> <status>` NUL `<path>` NUL and sorted by path
 /// bytes, stably: that is git's order, which compares a directory as its name followed by
 /// `/`. A path listed twice is matched as a multiset, so a repeated entry the base does not
-/// hold identically is a change. `None` when either listing has a record that does not parse.
-fn listing_diff(base: &[u8], commit: &[u8]) -> Option<Vec<u8>> {
-    let base = listing_records(base)?;
-    let commit = listing_records(commit)?;
+/// hold identically is a change. [`DiffDefect::Unparseable`] when either listing has a
+/// record that does not parse. [`DiffDefect::PastDeadline`] when `deadline` has come at the
+/// start of a pass of either loop: a path listed many times in both listings makes the
+/// multiset match quadratic, which the record limit alone does not bound.
+fn listing_diff(
+    base: &[u8],
+    commit: &[u8],
+    deadline: std::time::Instant,
+) -> Result<Vec<u8>, DiffDefect> {
+    let base = listing_records(base).ok_or(DiffDefect::Unparseable)?;
+    let commit = listing_records(commit).ok_or(DiffDefect::Unparseable)?;
     let mut base_at: HashMap<&[u8], Vec<usize>> = HashMap::new();
     for (index, record) in base.iter().enumerate() {
         base_at.entry(record.path).or_default().push(index);
@@ -3517,6 +3584,9 @@ fn listing_diff(base: &[u8], commit: &[u8]) -> Option<Vec<u8>> {
     let mut matched = vec![false; base.len()];
     let mut changes: Vec<(&[u8], Vec<u8>)> = Vec::new();
     for new in &commit {
+        if is_past(deadline) {
+            return Err(DiffDefect::PastDeadline);
+        }
         let at_path = base_at.get(new.path).map(Vec::as_slice).unwrap_or_default();
         let unmatched = || at_path.iter().copied().filter(|index| !matched[*index]);
         let same =
@@ -3530,7 +3600,8 @@ fn listing_diff(base: &[u8], commit: &[u8]) -> Option<Vec<u8>> {
             Some(index) => {
                 matched[index] = true;
                 let old = &base[index];
-                let status = if mode_type_bits(old.mode)? == mode_type_bits(new.mode)? {
+                let bits = |mode| mode_type_bits(mode).ok_or(DiffDefect::Unparseable);
+                let status = if bits(old.mode)? == bits(new.mode)? {
                     b'M'
                 } else {
                     b'T'
@@ -3545,12 +3616,24 @@ fn listing_diff(base: &[u8], commit: &[u8]) -> Option<Vec<u8>> {
         changes.push((new.path, record));
     }
     for (old, _) in base.iter().zip(&matched).filter(|(_, matched)| !**matched) {
+        if is_past(deadline) {
+            return Err(DiffDefect::PastDeadline);
+        }
         let zero = vec![b'0'; old.id.len()];
         let record = diff_record_bytes(old.mode, b"000000", old.id, &zero, b'D', old.path);
         changes.push((old.path, record));
     }
     changes.sort_by(|left, right| left.0.cmp(right.0));
-    Some(changes.into_iter().flat_map(|(_, record)| record).collect())
+    Ok(changes.into_iter().flat_map(|(_, record)| record).collect())
+}
+
+/// Why [`listing_diff`] did not produce a change list.
+#[derive(Debug, PartialEq, Eq)]
+enum DiffDefect {
+    /// A record of either listing does not parse.
+    Unparseable,
+    /// The deadline came before the diff finished.
+    PastDeadline,
 }
 
 /// One `diff-tree -z --raw` record: `:<old mode> <new mode> <old id> <new id> <status>` NUL
@@ -3768,6 +3851,8 @@ enum ListingDefect {
     IdMismatch(Vec<u8>),
     /// The listing would take more records or bytes than its [`ListingBudget`] had left.
     TooLarge,
+    /// The walk reached a tree at or past its [`ListingBudget`]'s deadline.
+    PastDeadline,
 }
 
 /// `bytes` as lowercase hex, the way git prints an object id.
@@ -13952,11 +14037,12 @@ git replace -f "$C" "$TG"
     }
 
     /// The injected entry the staged gate cannot see is refused, and its blob stays off
-    /// the remote.
+    /// the remote. The tree lists the managed file three times, so it is refused for the
+    /// repeat before the injected blob is read.
     #[cfg(unix)]
     fn assert_index_hook_hidden_blob_refused(open_pr: bool) {
         let (git, pushed, err) = index_hook_refusal(open_pr, HOOK_INDEX_HIDDEN_BLOB);
-        assert!(err.contains("differs from the validated content"), "{err}");
+        assert!(err.contains("repeats a path"), "{err}");
         let blob = hook_recorded_id(&pushed, "ude-test-injected-blob");
         assert!(
             !holds_object(&git, pushed.bare.path(), &blob),
@@ -13976,16 +14062,14 @@ git replace -f "$C" "$TG"
         assert_index_hook_hidden_blob_refused(true);
     }
 
-    /// A token-shaped entry the staged gate cannot see is scanned and refused, and its body
-    /// is not printed.
+    /// A token-shaped entry the staged gate cannot see is refused, and its body is not
+    /// printed. The tree lists the managed file three times, so it is refused for the repeat
+    /// before the token-shaped blob is read or scanned.
     #[cfg(unix)]
     fn assert_index_hook_hidden_token_refused(open_pr: bool) {
         let tail = with_injected_token(HOOK_INDEX_HIDDEN_BLOB);
         let (_git, _pushed, err) = index_hook_refusal(open_pr, &tail);
-        assert!(
-            err.contains("secret detected in committed HEAD blob"),
-            "{err}"
-        );
+        assert!(err.contains("repeats a path"), "{err}");
         assert!(
             !err.contains(HOOK_TOKEN_BODY),
             "the refusal leaked the token"
@@ -14247,7 +14331,7 @@ git replace -f "$C" "$TG"
 
         let rows = [
             (".", "path component"),
-            ("..", "unvalidated file committed"),
+            ("..", "path component"),
             ("", "unparseable tree entry"),
         ];
         let mut failures = Vec::new();
@@ -15941,6 +16025,17 @@ git update-ref HEAD "$N"
         .concat()
     }
 
+    /// [`listing_diff`] with a deadline an hour away: Some for a change list, None for an
+    /// unparseable listing; a deadline this far cannot come, so it panics if it does.
+    fn diff_unbounded(base: &[u8], commit: &[u8]) -> Option<Vec<u8>> {
+        let far = std::time::Instant::now() + Duration::from_secs(3600);
+        match listing_diff(base, commit, far) {
+            Ok(changes) => Some(changes),
+            Err(DiffDefect::Unparseable) => None,
+            Err(DiffDefect::PastDeadline) => panic!("a deadline an hour away has come"),
+        }
+    }
+
     #[test]
     fn test_listing_diff() {
         let (x, y, z) = ("a".repeat(40), "b".repeat(40), "c".repeat(40));
@@ -15948,9 +16043,9 @@ git update-ref HEAD "$N"
         let blob = |id: &str, path: &[u8]| listing_record("100644", "blob", id, path);
         let base = [blob(&x, b"f"), blob(&y, b"g")].concat();
 
-        assert_eq!(listing_diff(&base, &base), Some(Vec::new()), "equal");
+        assert_eq!(diff_unbounded(&base, &base), Some(Vec::new()), "equal");
         assert_eq!(
-            listing_diff(b"", &base),
+            diff_unbounded(b"", &base),
             Some(
                 [
                     raw_change("000000", "100644", &zero, &x, "A", b"f"),
@@ -15961,7 +16056,7 @@ git update-ref HEAD "$N"
             "an empty base"
         );
         assert_eq!(
-            listing_diff(&base, b""),
+            diff_unbounded(&base, b""),
             Some(
                 [
                     raw_change("100644", "000000", &x, &zero, "D", b"f"),
@@ -15973,7 +16068,7 @@ git update-ref HEAD "$N"
         );
         let changed = [blob(&z, b"f"), listing_record("100755", "blob", &y, b"g")].concat();
         assert_eq!(
-            listing_diff(&base, &changed),
+            diff_unbounded(&base, &changed),
             Some(
                 [
                     raw_change("100644", "100644", &x, &z, "M", b"f"),
@@ -15989,7 +16084,7 @@ git update-ref HEAD "$N"
         ]
         .concat();
         assert_eq!(
-            listing_diff(&base, &retyped),
+            diff_unbounded(&base, &retyped),
             Some(
                 [
                     raw_change("100644", "120000", &x, &x, "T", b"f"),
@@ -16001,7 +16096,7 @@ git update-ref HEAD "$N"
         );
         let directory = [listing_record("040000", "tree", &z, b"a"), blob(&x, b"a/x")].concat();
         assert_eq!(
-            listing_diff(&directory, &blob(&y, b"a")),
+            diff_unbounded(&directory, &blob(&y, b"a")),
             Some(
                 [
                     raw_change("000000", "100644", &zero, &y, "A", b"a"),
@@ -16012,7 +16107,7 @@ git update-ref HEAD "$N"
             "a directory replaced by a file"
         );
         assert_eq!(
-            listing_diff(&blob(&x, b"b"), &blob(&y, b"c")),
+            diff_unbounded(&blob(&x, b"b"), &blob(&y, b"c")),
             Some(
                 [
                     raw_change("100644", "000000", &x, &zero, "D", b"b"),
@@ -16024,19 +16119,19 @@ git update-ref HEAD "$N"
         );
         let other_tree = [listing_record("040000", "tree", &y, b"a"), blob(&x, b"a/x")].concat();
         assert_eq!(
-            listing_diff(&directory, &other_tree),
+            diff_unbounded(&directory, &other_tree),
             Some(Vec::new()),
             "tree records are ignored"
         );
         let repeated = [blob(&x, b"p"), blob(&y, b"p")].concat();
         assert_eq!(
-            listing_diff(&blob(&x, b"p"), &repeated),
+            diff_unbounded(&blob(&x, b"p"), &repeated),
             Some(raw_change("000000", "100644", &zero, &y, "A", b"p")),
             "a repeated path"
         );
         let long = "d".repeat(64);
         assert_eq!(
-            listing_diff(b"", &blob(&long, b"f")),
+            diff_unbounded(b"", &blob(&long, b"f")),
             Some(raw_change(
                 "000000",
                 "100644",
@@ -16048,9 +16143,9 @@ git update-ref HEAD "$N"
             "64-hex ids"
         );
         let no_tab = format!("100644 blob {x} f\0").into_bytes();
-        assert_eq!(listing_diff(b"", &no_tab), None, "a record without a tab");
+        assert_eq!(diff_unbounded(b"", &no_tab), None, "a record without a tab");
         assert_eq!(
-            listing_diff(&no_tab, b""),
+            diff_unbounded(&no_tab, b""),
             None,
             "a base record without a tab"
         );
@@ -16095,18 +16190,18 @@ git update-ref HEAD "$N"
         let commit_listing = built_listing(engine, git, repo, commit).unwrap();
         let forward = raw_diff_tree(git, repo, base, commit);
         assert_eq!(
-            listing_diff(&base_listing, &commit_listing)
+            diff_unbounded(&base_listing, &commit_listing)
                 .map(|raw| String::from_utf8_lossy(&raw).into_owned()),
             Some(String::from_utf8_lossy(&forward).into_owned()),
             "{base} to {commit}"
         );
         assert_eq!(
-            listing_diff(&base_listing, &commit_listing),
+            diff_unbounded(&base_listing, &commit_listing),
             Some(forward.clone()),
             "{base} to {commit}, as bytes"
         );
         assert_eq!(
-            listing_diff(&commit_listing, &base_listing),
+            diff_unbounded(&commit_listing, &base_listing),
             Some(raw_diff_tree(git, repo, commit, base)),
             "{commit} to {base}"
         );
@@ -19179,7 +19274,6 @@ git update-ref HEAD "$N"
     /// neither the record limit's nor a failed read's (the reads keep their own 30 s limit).
     /// Control, first: the same call with the default walk time passes.
     #[test]
-    #[ignore = "RED: fails until 02-27 Task 2 fix"]
     fn test_committed_gate_refuses_commit_listing_past_the_deadline() {
         let git = GitFixture::new();
         let (repo, base, commit) = commit_changing_f(&git);
@@ -19210,7 +19304,6 @@ git update-ref HEAD "$N"
     /// past the deadline, not as a listing that cannot be read.
     #[test]
     #[cfg(unix)]
-    #[ignore = "RED: fails until 02-27 Task 2 fix"]
     fn test_fetched_head_holds_refuses_listing_past_the_deadline() {
         let git = GitFixture::new();
         let (repo, file) = gate_repo(&git);
@@ -19249,15 +19342,16 @@ git update-ref HEAD "$N"
     }
 
     /// The fetched head's listing reuses the commit listing's deadline, not a new one. With
-    /// a walk time of 5 s and a test hook sleeping 6 s right after the commit's listing,
+    /// a walk time of 15 s and a test hook sleeping 16 s right after the commit's listing,
     /// the fetched head's listing starts past the deadline and is refused. A budget made
-    /// afresh for it would give it a new 5 s and pass. Control, first: the same walk time
-    /// with no hook passes, in well under 5 s.
+    /// afresh for it would give it a new 15 s and pass. Control, first: the same walk time
+    /// with no hook passes, in under a third of it.
     #[test]
-    #[ignore = "RED: fails until 02-27 Task 2 fix"]
     fn test_committed_gate_carries_the_deadline_into_the_fetched_head_listing() {
-        const WALK: Duration = Duration::from_secs(5);
-        const HOOK_SLEEP: Duration = Duration::from_secs(6);
+        const WALK: Duration = Duration::from_secs(15);
+        const HOOK_SLEEP: Duration = Duration::from_secs(16);
+        // The refused call returns this soon after the hook's sleep ends.
+        const AFTER_SLEEP: Duration = Duration::from_secs(5);
         let git = GitFixture::new();
         let (repo, base, commit) = commit_changing_f(&git);
         let dir = repo.path();
@@ -19288,7 +19382,7 @@ git update-ref HEAD "$N"
         assert!(err.contains(PAST_DEADLINE), "{err}");
         assert!(err.contains("the tree of the fetched head"), "{err}");
         assert!(!err.contains("the tree of the commit to publish"), "{err}");
-        assert!(elapsed < HOOK_SLEEP + WALK, "took {elapsed:?}");
+        assert!(elapsed < HOOK_SLEEP + AFTER_SLEEP, "took {elapsed:?}");
     }
 
     /// A commit repeating one allowlisted path 64 times at the validated blob is refused
@@ -19296,7 +19390,6 @@ git update-ref HEAD "$N"
     /// path listed once passes, and the counter reads 2 (the change loop's read and the
     /// record check's), so the counter counts real reads.
     #[test]
-    #[ignore = "RED: fails until 02-27 Task 2 fix"]
     fn test_committed_gate_refuses_repeated_path_before_reading_its_blobs() {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -19330,5 +19423,86 @@ git update-ref HEAD "$N"
             "{err}"
         );
         assert_eq!(reads, 0, "blobs read before the repeat was refused");
+    }
+
+    /// One base record `f` at x and one commit record `f` at y (40-hex ids), as listings.
+    fn one_changed_record() -> (Vec<u8>, Vec<u8>, String, String) {
+        let (x, y) = ("a".repeat(40), "b".repeat(40));
+        let record = |id: &str| format!("100644 blob {id}\tf\0").into_bytes();
+        (record(&x), record(&y), x, y)
+    }
+
+    /// listing_diff checks its deadline in the loop over the commit's records: a deadline
+    /// already come refuses the change; control: a deadline an hour away gives the `M`.
+    #[test]
+    fn test_listing_diff_refuses_changes_past_its_deadline() {
+        let (base, commit, x, y) = one_changed_record();
+        assert_eq!(
+            listing_diff(&base, &commit, std::time::Instant::now()),
+            Err(DiffDefect::PastDeadline)
+        );
+        let far = std::time::Instant::now() + Duration::from_secs(3600);
+        assert_eq!(
+            listing_diff(&base, &commit, far),
+            Ok(diff_record_bytes(
+                b"100644",
+                b"100644",
+                x.as_bytes(),
+                y.as_bytes(),
+                b'M',
+                b"f"
+            ))
+        );
+    }
+
+    /// listing_diff checks its deadline in the deletion loop too: with an empty commit only
+    /// that loop runs, and a deadline already come refuses it; control: a deadline an hour
+    /// away gives the `D`.
+    #[test]
+    fn test_listing_diff_refuses_deletions_past_its_deadline() {
+        let (base, _, x, _) = one_changed_record();
+        assert_eq!(
+            listing_diff(&base, b"", std::time::Instant::now()),
+            Err(DiffDefect::PastDeadline)
+        );
+        let far = std::time::Instant::now() + Duration::from_secs(3600);
+        let zero = "0".repeat(40);
+        assert_eq!(
+            listing_diff(&base, b"", far),
+            Ok(diff_record_bytes(
+                b"100644",
+                b"000000",
+                x.as_bytes(),
+                zero.as_bytes(),
+                b'D',
+                b"f"
+            ))
+        );
+    }
+
+    /// The walk's deadline is the engine's local time limit from when the budget is made:
+    /// process::LOCAL_TIMEOUT by default, and what with_limits sets otherwise.
+    #[test]
+    fn test_listing_budget_deadline_follows_the_local_time_limit() {
+        let seven = Duration::from_secs(7);
+        let engines = [
+            (SyncEngine::new(), process::LOCAL_TIMEOUT),
+            (
+                SyncEngine::new().with_limits(ProcessLimits {
+                    local: seven,
+                    network: process::NETWORK_TIMEOUT,
+                }),
+                seven,
+            ),
+        ];
+        for (engine, local) in engines {
+            let before = std::time::Instant::now();
+            let budget = engine.listing_budget();
+            let after = std::time::Instant::now();
+            assert!(
+                before + local <= budget.deadline && budget.deadline <= after + local,
+                "deadline outside [before + {local:?}, after + {local:?}]"
+            );
+        }
     }
 }
