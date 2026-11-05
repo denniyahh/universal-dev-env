@@ -103,3 +103,11 @@ The edits below are owed by 02-28-PLAN.md, as the earlier sections' edits are ow
   - DEF-09 and DEF-10 changed (02-28-PLAN.md `## The DEF-09 and DEF-10 rows`, and docs/ARCHITECTURE.md section 3); a finding is classified by the closed list's rule.
   - NOT-14 is unchanged.
   - Re-run at re-verification: 02-28-SUMMARY.md lists no row (all 20 control rows came out `same`, no corrected row). The lists of 02-21, 02-23 and 02-26 still stand.
+
+## Added after the review of plans 02-27..02-28 (orchestrator, 2026-11-04)
+
+Still conditional on re-verification of phase 02 passing, like the sections above.
+- 02-REVIEW-DISPOSITION.md:
+  - WR-700, IN-700, IN-701, IN-703 → `fixed`, by commits 57ed03a, 5f64809, d69322b and e0e2d4c (code fixer, scoped by the orchestrator). Suite after them: 484 unit (1 ignored) and 114 e2e passed.
+  - IN-702 → `not taken`: when the commit's listing uses up the shared budget, the refusal names the fetched head. The record-limit rows pin that route phrase by design.
+- docs/ARCHITECTURE.md and 02-20-PLAN.md (IN-704), byte-identical in both: DEF-09's "which also covers the changes" reads as if the change loop were under the deadline. It is not, by the 2026-11-04 decision. Reword it to say the deadline covers both listings and the change list (listing_diff), not the blob reads of the change loop, and that it is checked before each tree read (IN-701).
