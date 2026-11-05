@@ -3702,9 +3702,13 @@ fn remove_git_test_env(command: &mut Command, inherited: impl IntoIterator<Item 
 /// directly below the path its own path holds before its last `/`, compared as raw bytes,
 /// never through a lossy decode. Only that parent path is kept per record, so the work is
 /// linear in the listing's bytes. Every listing it reads lists every intermediate tree
-/// (as `ls-tree -r -t` does), so on names holding no `/` this is the count of trees with
-/// no record anywhere below them; a name holding `/` can only add to the count, never
-/// hide an empty tree. `None` for a record it cannot parse.
+/// (as `ls-tree -r -t` does), so on names holding no `/` the count equals the old rule's,
+/// which counted the trees with no record anywhere below them (every ancestor of a record
+/// held). On names holding `/` it is never lower than that rule's count: a record's direct
+/// parent is one of its ancestors. Neither rule sees an empty tree whose path a `/`-named
+/// sibling also spells: a blob named `a/x` beside an empty tree `a` lists as `a` and
+/// `a/x`, as an `a` holding `x` does, so the count misses that empty tree. `None` for a
+/// record it cannot parse.
 fn count_empty_directories(listing: &[u8]) -> Option<usize> {
     let mut trees = Vec::new();
     let mut parents = HashSet::new();
@@ -10870,6 +10874,53 @@ byte() { printf "\\$(printf '%03o' "$1")"; }
             }
         }
         assert!(failures.is_empty(), "{failures:#?}");
+    }
+
+    /// The documented limit of count_empty_directories: a root tree holding an empty tree
+    /// `a` and, written with `hash-object --literally`, a blob named `a/x` lists as an `a`
+    /// holding `x`, so the empty tree is not counted. Control, first: the same root without
+    /// the `a/x` entry counts it.
+    #[test]
+    fn test_count_empty_directories_misses_an_empty_tree_beside_a_slash_named_blob() {
+        let git = GitFixture::new();
+        let repo = tempdir().unwrap();
+        let dir = repo.path();
+        git.run(dir, &["init", "-b", "main"]);
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let empty = git_with_input(&git, dir, &["mktree"], b"");
+        let blob = write_blob(&git, dir, b"x\n");
+        let entry = |mode: &str, name: &str, id: &str| {
+            [format!("{mode} {name}\0").as_bytes(), &raw_id(id)].concat()
+        };
+        // The verified listing of the root tree whose stored bytes are `root_bytes`.
+        let listed = |root_bytes: Vec<u8>| {
+            let root = git_with_input(
+                &git,
+                dir,
+                &["hash-object", "-w", "-t", "tree", "--literally", "--stdin"],
+                &root_bytes,
+            );
+            engine
+                .verified_tree_listing(
+                    dir,
+                    &root,
+                    &mut HashMap::new(),
+                    &mut engine.listing_budget(),
+                )
+                .expect("the root lists")
+        };
+
+        let alone = listed(entry("40000", "a", &empty));
+        assert_eq!(count_empty_directories(&alone), Some(1));
+
+        let beside = listed([entry("40000", "a", &empty), entry("100644", "a/x", &blob)].concat());
+        let records = [
+            format!("040000 tree {empty}\ta\0"),
+            format!("100644 blob {blob}\ta/x\0"),
+        ]
+        .concat();
+        assert_eq!(beside, records.into_bytes());
+        assert_eq!(count_empty_directories(&beside), Some(0));
     }
 
     #[test]
