@@ -518,6 +518,15 @@ pub struct SyncEngine {
     /// limit (tests only), so a test can reach the limit with a small tree.
     #[cfg(test)]
     listing_byte_limit: Option<usize>,
+    /// The time one publication gate call's walk may take, in place of the local time
+    /// limit (tests only). It shortens only the walk, not the git reads, so a test can tell
+    /// the walk's deadline from a read that timed out.
+    #[cfg(test)]
+    listing_time: Option<Duration>,
+    /// Counts each blob [`Self::read_blob_by_id`] reads (tests only), so a test can show
+    /// that a blob was not read.
+    #[cfg(test)]
+    blob_reads: Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>,
 }
 
 impl SyncEngine {
@@ -533,6 +542,10 @@ impl SyncEngine {
             listing_record_limit: None,
             #[cfg(test)]
             listing_byte_limit: None,
+            #[cfg(test)]
+            listing_time: None,
+            #[cfg(test)]
+            blob_reads: None,
         }
     }
 
@@ -576,6 +589,23 @@ impl SyncEngine {
     #[cfg(test)]
     fn with_listing_byte_limit(mut self, bytes: usize) -> Self {
         self.listing_byte_limit = Some(bytes);
+        self
+    }
+
+    /// Sets the time one publication gate call's walk may take (tests only).
+    #[cfg(test)]
+    fn with_listing_time(mut self, time: Duration) -> Self {
+        self.listing_time = Some(time);
+        self
+    }
+
+    /// Counts each blob [`Self::read_blob_by_id`] reads into `reads` (tests only).
+    #[cfg(test)]
+    fn with_blob_read_counter(
+        mut self,
+        reads: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) -> Self {
+        self.blob_reads = Some(reads);
         self
     }
 
@@ -3096,6 +3126,10 @@ impl SyncEngine {
     /// (probed). The bytes must also hash to `oid` ([`Self::read_verified_object`]), because
     /// `cat-file` does not check that.
     fn read_blob_by_id(&self, repo: &Path, oid: &[u8]) -> Result<Vec<u8>, ObjectDefect> {
+        #[cfg(test)]
+        if let Some(reads) = &self.blob_reads {
+            reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
         self.read_verified_object(repo, oid, "blob")
     }
 
@@ -19119,5 +19153,182 @@ git update-ref HEAD "$N"
             production_listing(&git, dir, &root).map(|listing| listing.len()),
             Err(ListingDefect::TooLarge)
         );
+    }
+
+    /// The refusal text of a walk past the publication gate's deadline; a literal of its
+    /// own, so a changed production text fails the rows.
+    const PAST_DEADLINE: &str = "could not be listed within the publication gate's time limit";
+
+    /// `templates_repo` with `f` = `f base\n` and a commit on it changing f to `f new\n`;
+    /// returns the repository, the base and the commit.
+    fn commit_changing_f(git: &GitFixture) -> (tempfile::TempDir, String, String) {
+        let (repo, base) = templates_repo(git, &[("f", "f base\n")]);
+        let f_new = write_blob(git, repo.path(), b"f new\n");
+        let commit = commit_of_templates(
+            git,
+            repo.path(),
+            &base,
+            &format!("100644 blob {f_new}\tf\n"),
+        );
+        (repo, base, commit)
+    }
+
+    /// The committed gate's walk stops at one deadline. With a walk time of 1 ms the commit's
+    /// listing is refused past the deadline: the root read alone is three git runs, each
+    /// well over 1 ms, so the next tree's check is past it whatever the load. The refusal is
+    /// neither the record limit's nor a failed read's (the reads keep their own 30 s limit).
+    /// Control, first: the same call with the default walk time passes.
+    #[test]
+    #[ignore = "RED: fails until 02-27 Task 2 fix"]
+    fn test_committed_gate_refuses_commit_listing_past_the_deadline() {
+        let git = GitFixture::new();
+        let (repo, base, commit) = commit_changing_f(&git);
+        let dir = repo.path();
+        assert_eq!(
+            validate_templates_commit(&git, dir, &commit, &base, |engine| engine),
+            Ok(())
+        );
+
+        let started = std::time::Instant::now();
+        let res = validate_templates_commit(&git, dir, &commit, &base, |engine| {
+            engine.with_listing_time(Duration::from_millis(1))
+        });
+        let elapsed = started.elapsed();
+        let err = match res {
+            Err(err) => err,
+            other => panic!("a 1 ms walk must refuse, got {other:?}"),
+        };
+        assert!(err.contains(PAST_DEADLINE), "{err}");
+        assert!(err.contains("the tree of the commit to publish"), "{err}");
+        assert!(!err.contains(TOO_LARGE), "{err}");
+        assert!(!err.contains("failed to list the tree of"), "{err}");
+        assert!(elapsed < Duration::from_secs(5), "took {elapsed:?}");
+    }
+
+    /// The empty-status route's listing stops at the same deadline. Control, first: the
+    /// head holding the record passes with the default walk time; with 1 ms it is refused
+    /// past the deadline, not as a listing that cannot be read.
+    #[test]
+    #[cfg(unix)]
+    #[ignore = "RED: fails until 02-27 Task 2 fix"]
+    fn test_fetched_head_holds_refuses_listing_past_the_deadline() {
+        let git = GitFixture::new();
+        let (repo, file) = gate_repo(&git);
+        let dir = repo.path();
+        fs::write(&file, HOOKED_TEMPLATE).unwrap();
+        let validated = ValidatedBlobs::from_files(std::slice::from_ref(&file));
+        let staged = std::slice::from_ref(&file);
+        let base = git.output(dir, &["rev-parse", "HEAD"]);
+        let root = root_listing_validated_blob(&git, dir);
+        let holding = git_with_input(
+            &git,
+            dir,
+            &["commit-tree", &root, "-p", &base],
+            b"holds the record\n",
+        );
+        git.run(dir, &["update-ref", "refs/heads/main", &holding]);
+        let holds = |engine: SyncEngine| {
+            engine
+                .with_extra_env(git.gitconfig_env())
+                .require_fetched_head_holds(&checkout_target(dir, &holding), staged, &validated)
+        };
+
+        assert_eq!(holds(SyncEngine::new()), Ok(()));
+        let started = std::time::Instant::now();
+        let res = holds(SyncEngine::new().with_listing_time(Duration::from_millis(1)));
+        let elapsed = started.elapsed();
+        let err = match res {
+            Err(err) => err,
+            other => panic!("a 1 ms walk must refuse, got {other:?}"),
+        };
+        assert!(err.contains(PAST_DEADLINE), "{err}");
+        assert!(err.contains(EMPTY_STATUS_REFUSAL), "{err}");
+        assert!(err.contains("the fetched head's tree"), "{err}");
+        assert!(!err.contains("cannot be listed"), "{err}");
+        assert!(elapsed < Duration::from_secs(5), "took {elapsed:?}");
+    }
+
+    /// The fetched head's listing reuses the commit listing's deadline, not a new one. With
+    /// a walk time of 5 s and a test hook sleeping 6 s right after the commit's listing,
+    /// the fetched head's listing starts past the deadline and is refused. A budget made
+    /// afresh for it would give it a new 5 s and pass. Control, first: the same walk time
+    /// with no hook passes, in well under 5 s.
+    #[test]
+    #[ignore = "RED: fails until 02-27 Task 2 fix"]
+    fn test_committed_gate_carries_the_deadline_into_the_fetched_head_listing() {
+        const WALK: Duration = Duration::from_secs(5);
+        const HOOK_SLEEP: Duration = Duration::from_secs(6);
+        let git = GitFixture::new();
+        let (repo, base, commit) = commit_changing_f(&git);
+        let dir = repo.path();
+
+        let started = std::time::Instant::now();
+        let control = validate_templates_commit(&git, dir, &commit, &base, |engine| {
+            engine.with_listing_time(WALK)
+        });
+        let control_elapsed = started.elapsed();
+        assert_eq!(control, Ok(()));
+        println!("control elapsed: {control_elapsed:?}");
+        assert!(
+            control_elapsed < WALK / 3,
+            "the control took {control_elapsed:?}, so the margin under {WALK:?} is under 3x"
+        );
+
+        let started = std::time::Instant::now();
+        let res = validate_templates_commit(&git, dir, &commit, &base, |engine| {
+            engine
+                .with_listing_time(WALK)
+                .with_after_tree_listing(|| std::thread::sleep(HOOK_SLEEP))
+        });
+        let elapsed = started.elapsed();
+        let err = match res {
+            Err(err) => err,
+            other => panic!("the fetched head's listing starts past the deadline, got {other:?}"),
+        };
+        assert!(err.contains(PAST_DEADLINE), "{err}");
+        assert!(err.contains("the tree of the fetched head"), "{err}");
+        assert!(!err.contains("the tree of the commit to publish"), "{err}");
+        assert!(elapsed < HOOK_SLEEP + WALK, "took {elapsed:?}");
+    }
+
+    /// A commit repeating one allowlisted path 64 times at the validated blob is refused
+    /// for the repeat before the change loop reads any of its blobs. Control, first: the
+    /// path listed once passes, and the counter reads 2 (the change loop's read and the
+    /// record check's), so the counter counts real reads.
+    #[test]
+    #[ignore = "RED: fails until 02-27 Task 2 fix"]
+    fn test_committed_gate_refuses_repeated_path_before_reading_its_blobs() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let git = GitFixture::new();
+        let (repo, base) = templates_repo(&git, &[("f", "f base\n")]);
+        let dir = repo.path();
+        let f_new = write_blob(&git, dir, b"f new\n");
+        let entry = format!("100644 blob {f_new}\tf\n");
+        let validate = |commit: &str| {
+            let reads = Arc::new(AtomicUsize::new(0));
+            let counter = Arc::clone(&reads);
+            let res = validate_templates_commit(&git, dir, commit, &base, move |engine| {
+                engine.with_blob_read_counter(Arc::clone(&counter))
+            });
+            (res, reads.load(Ordering::SeqCst))
+        };
+
+        let once = commit_of_templates(&git, dir, &base, &entry);
+        assert_eq!(validate(&once), (Ok(()), 2));
+
+        let repeated = commit_of_templates(&git, dir, &base, &entry.repeat(64));
+        assert_eq!(
+            ls_tree_record_count(&git, dir, &repeated),
+            65,
+            "templates and 64 entries named f"
+        );
+        let (res, reads) = validate(&repeated);
+        let err = res.expect_err("a repeated path must be refused");
+        assert!(
+            err.contains("the tree of the commit to publish repeats a path"),
+            "{err}"
+        );
+        assert_eq!(reads, 0, "blobs read before the repeat was refused");
     }
 }
