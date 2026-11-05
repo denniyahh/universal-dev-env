@@ -71,7 +71,7 @@ Plans:
   3. Path parameterization matches only full word and punctuation boundaries (`\b`, path delimiters), preventing corruption of partial substring tokens.
   4. Sanitizer round-tripping verifies that templated tokens substitute back cleanly to local machine environments on initialization.
 
-**Plans**: 26/28 plans executed
+**Plans**: 27/28 plans executed
 
 Plans:
 **Wave 1**
@@ -147,7 +147,7 @@ Plans:
 - [x] 02-26: DEF-09, DEF-11 and DEF-12 name the closed channels in docs/ARCHITECTURE.md and 02-20-PLAN.md; controls on each part of the change, scoped mutation run and phase final gates on the final code; hand edits carried forward; no production code (SEC-04).
 
 **Wave 24** *(gap closure, operator decision 2026-11-04; blocked on Wave 23 completion)*
-- [ ] 02-27: The publication gate's in-process tree walk is bounded again: every listing of one gate call draws on one record limit (1 << 18 records) and one deadline (the local time limit), which also covers listing_diff, so a tree whose subtrees repeat is refused with a fixed text instead of exhausting memory or running without a deadline, on both routes and in direct and PR mode; the repeated-path check runs before the change loop reads any blob, so a repeated allowlisted path is refused without reading its repeats; the cost is measured at the limit and against this repository; NOT-14 unchanged (review WR-600; SEC-04).
+- [x] 02-27: The publication gate's in-process tree walk is bounded again: every listing of one gate call draws on one record limit (1 << 18 records) and one deadline (the local time limit), which also covers listing_diff, so a tree whose subtrees repeat is refused with a fixed text instead of exhausting memory or running without a deadline, on both routes and in direct and PR mode; the repeated-path check runs before the change loop reads any blob, so a repeated allowlisted path is refused without reading its repeats; the cost is measured at the limit and against this repository; NOT-14 unchanged (review WR-600; SEC-04).
 
 **Wave 25** *(gap closure; blocked on Wave 24 completion)*
 - [ ] 02-28: The listing and listing-diff tests split into atomic tests (review IN-600); DEF-09 and DEF-10 name the walk bound, the earlier repeated-path check and the split tests in docs/ARCHITECTURE.md and 02-20-PLAN.md; controls on each part of the bound, a mutation run over the changed lines and the phase final gates on the final code; hand edits carried forward; no production code (SEC-04).
@@ -198,7 +198,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Sync Engine & State Hermeticity | 11/11 | Complete    | 2026-10-22 |
-| 2. Sanitizer, Boundaries & Security Hardening | 26/28 | In Progress | - |
+| 2. Sanitizer, Boundaries & Security Hardening | 27/28 | In Progress | - |
 | 3. Doctor & CLI Hardening | 0/4 | Not started | - |
 | 4. Templates, Archetypes & Manifest Decoupling | 0/3 | Not started | - |
 
