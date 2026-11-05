@@ -7,7 +7,7 @@ Systematic execution of the 4-track remediation plan derived from external adver
 ## Phases
 
 - [x] **Phase 1: Sync Engine & State Hermeticity** - Deletion tombstones, 2-phase shadow materialization, CRLF normalization, Myers diff conflicts, and bounded subprocess timeouts. (completed 2026-10-22)
-- [ ] **Phase 2: Sanitizer, Boundaries & Security Hardening** - Shannon entropy analysis, expanded Gitleaks-equivalent regex screening, boundary-safe path parameterization, and reversible token verification.
+- [x] **Phase 2: Sanitizer, Boundaries & Security Hardening** - Shannon entropy analysis, expanded Gitleaks-equivalent regex screening, boundary-safe path parameterization, and reversible token verification. (completed 2026-11-04)
 - [ ] **Phase 3: Doctor & CLI Hardening** - Strict OpenSSH public key parsing, dual disk/git-index hook mode audits, canonical relative include resolution against `.git/`, and strict POSIX exit codes.
 - [ ] **Phase 4: Templates, Archetypes & Manifest Decoupling** - Parameterized `.ude.toml` manifest variables, safe re-initialization with backup semantics, strict Minijinja undefined checks, and config precedence.
 
@@ -71,7 +71,7 @@ Plans:
   3. Path parameterization matches only full word and punctuation boundaries (`\b`, path delimiters), preventing corruption of partial substring tokens.
   4. Sanitizer round-tripping verifies that templated tokens substitute back cleanly to local machine environments on initialization.
 
-**Plans**: 28/28 plans executed
+**Plans**: 28/28 plans complete
 
 Plans:
 **Wave 1**
@@ -198,7 +198,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Sync Engine & State Hermeticity | 11/11 | Complete    | 2026-10-22 |
-| 2. Sanitizer, Boundaries & Security Hardening | 28/28 | In Progress | - |
+| 2. Sanitizer, Boundaries & Security Hardening | 28/28 | Complete    | 2026-11-04 |
 | 3. Doctor & CLI Hardening | 0/4 | Not started | - |
 | 4. Templates, Archetypes & Manifest Decoupling | 0/3 | Not started | - |
 
