@@ -2,17 +2,17 @@
 gsd_state_version: "1.0"
 current_phase: 02
 current_phase_name: Sanitizer, Boundaries & Security Hardening
-status: executing
-stopped_at: Completed 02-27-PLAN.md
-last_updated: "2026-11-05T00:34:23.021Z"
+status: verifying
+stopped_at: Completed 02-28-PLAN.md
+last_updated: "2026-11-05T02:16:25.564Z"
 last_activity: 2026-11-04
 last_activity_desc: Phase 02 execution started
-state_head: 9594b4754744f22a1de5a953457d88d670feff6e
+state_head: 8af921fec3031b47088478cd09eae1c083d6092e
 progress:
   total_phases: 4
   completed_phases: 1
   total_plans: 39
-  completed_plans: 38
+  completed_plans: 39
   percent: 25
 milestone: null
 ---
@@ -30,7 +30,7 @@ See: `.planning/PROJECT.md` (updated 2026-10-22)
 
 Phase: 02 (Sanitizer, Boundaries & Security Hardening) — READY TO EXECUTE
 Plan: 26 of 26
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-11-04 — Phase 02 execution started
 
 Progress: [███░░░░░░░] 25%
@@ -98,6 +98,7 @@ Progress: [███░░░░░░░] 25%
 | Phase 02 P25 | 19 min | 2 tasks | 1 files |
 | Phase 02 P26 | 60 min | 3 tasks | 3 files |
 | Phase 02 P27 | 51min | 3 tasks | 2 files |
+| Phase 02 P28 | 96min | 3 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -202,6 +203,7 @@ Recent decisions affecting current work:
 - [Phase 02]: 2026-11-04: change-loop amplification in the post-commit gate (repeated allowlisted path read before refusal): operator delegated; orchestrator decided to run the repeated-path check before the blob loop in 02-27 (no deadline on the loop, no push-size ceiling). Operator: template repos are far below 1000 directories, so the 30 s walk deadline stands.
 - [Phase 02]: 02-27: the gate's walk is bounded per call by one ListingBudget (MAX_LISTING_RECORDS 1 << 18 records, MAX_LISTING_BYTES 1 << 26 bytes, one deadline of the local time limit over both listings and listing_diff); the repeated-path check runs before the change loop reads any blob. The per-task RED-commit gate tripped before both GREENs (Rust gap #4379); continued on the substitute evidence (e818692, 5452316; 10 records RED_EVIDENCE_OK); last_gate_trip not written (field absent)
 - [Phase 02]: 02-27: orchestrator set the deadline-carry test to WALK 15 s / HOOK_SLEEP 16 s after the 5 s / 6 s control failed its 3x margin under parallel load (1.861 s vs 1.667 s); accepted deviations: no expect(dead_code) on seams, expect(clippy::too_many_arguments) on push_tree_entries, RED literal 1 << 18 replaced in GREEN
+- [Phase 02]: Plan 02-28: all 20 control rows on the final code came out same (no corrected row, T-02-119 unused); scoped mutation run 44 listed, 43 caught, 0 missed, 1 unviable
 
 ### Pending Todos
 
@@ -246,6 +248,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-05T00:34:22.736Z
-Stopped at: Completed 02-27-PLAN.md
+Last session: 2026-11-05T02:16:25.149Z
+Stopped at: Completed 02-28-PLAN.md
 Resume file: None
