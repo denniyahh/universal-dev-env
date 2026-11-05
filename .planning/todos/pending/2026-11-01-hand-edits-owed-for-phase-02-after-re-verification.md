@@ -91,3 +91,15 @@ The edits below are owed by 02-27-PLAN.md, as the earlier sections' edits are ow
   - The repeated-path check now runs before the change loop reads any blob (T-02-115, orchestrator decision 2026-11-04). So five tests now expect `repeats a path` or `path component` (02-27-PLAN.md Task 2's table).
   - NOT-14 is unchanged. DEF-09 and DEF-10 name the change once plan 02-28 lands.
 - 02-VALIDATION.md, when its validation strategy is updated: two rows describe the order before 02-27. They are the SEC-02 row of 02-13 (`A token-shaped second entry under a repeated name, or a token hidden by an index hook, is scanned and refused`) and the SEC-04 row `Each changed blob is read by its own object id, so a blob hidden behind a repeated entry or an index hook is the one checked`. Such a tree is now refused by the repeated-path check before any blob is read or scanned. Reword them then; not by hand here.
+
+## Added by plan 02-28
+
+The edits below are owed by 02-28-PLAN.md, as the earlier sections' edits are owed by their plans. They are still conditional on re-verification of phase 02 passing; if it finds gaps they wait.
+
+- 02-REVIEW-DISPOSITION.md: IN-600 to `fixed`, with plan 02-28 and its split commit in the Source cell: 20d9a90 test(02-28): split the listing and listing-diff tests into atomic tests. WR-600 as `## Added by plan 02-27` says.
+- 02-VALIDATION.md: plan 02-28 already renamed the split tests in the two SEC-04 rows (the rows of 02-24 and 02-25, commit 10659a3). When its validation strategy is updated for plans 02-27 and 02-28, add a row for the walk bound naming plan 02-27's sixteen tests (the last sixteen names of DEF-09's test list).
+- The renames, for anyone re-running older commands: test_listing_diff became the twelve names of 02-28-PLAN.md `## The split`, each starting `test_listing_diff_`, and three scenarios left test_verified_tree_listing_matches_ls_tree (now `_on_the_empty_tree`, `_in_sha256_repository` and test_verified_tree_listing_refuses_subtree_not_matching_its_id); the kept name holds the SHA-1 fixture only. 02-26's control rows 1, 10, 11 and 13 and its mutation filters name the old tests; rows 15, 16 and 17 of 02-28 re-establish 10, 11 and 13 under the new names, and 02-26 listed no row for re-running. Row 18 of 02-28 is the control for 02-27's reorder.
+- When re-verifying, tell the verifier:
+  - DEF-09 and DEF-10 changed (02-28-PLAN.md `## The DEF-09 and DEF-10 rows`, and docs/ARCHITECTURE.md section 3); a finding is classified by the closed list's rule.
+  - NOT-14 is unchanged.
+  - Re-run at re-verification: 02-28-SUMMARY.md lists no row (all 20 control rows came out `same`, no corrected row). The lists of 02-21, 02-23 and 02-26 still stand.
