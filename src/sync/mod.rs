@@ -2863,17 +2863,8 @@ impl SyncEngine {
         // while the push sends both (probed), so each listed blob is read by its own id.
         // Paths and ids are hook-chosen bytes: a refusal below never prints a listed name
         // that has not passed the allowlist.
-        const UNPARSEABLE_ENTRY: &str =
-            "Post-commit publication gate violation: unparseable committed entry";
-        let changes = match listing_diff(&base_listing, &listing, budget.deadline) {
-            Ok(changes) => changes,
-            Err(DiffDefect::Unparseable) => return Err(UNPARSEABLE_ENTRY.to_string()),
-            Err(DiffDefect::PastDeadline) => {
-                return Err(format!(
-                    "Post-commit publication gate violation: the changes of the commit to publish {LISTING_PAST_DEADLINE}"
-                ));
-            }
-        };
+        let changes =
+            listing_diff(&base_listing, &listing, budget.deadline).map_err(diff_refusal)?;
         let Some(entries) = raw_diff_entries(&changes) else {
             return Err(UNPARSEABLE_ENTRY.to_string());
         };
@@ -3634,6 +3625,21 @@ enum DiffDefect {
     Unparseable,
     /// The deadline came before the diff finished.
     PastDeadline,
+}
+
+/// The refusal text of a committed entry the publication gate cannot parse.
+const UNPARSEABLE_ENTRY: &str =
+    "Post-commit publication gate violation: unparseable committed entry";
+
+/// The refusal [`SyncEngine::validate_committed_tree`] gives when the [`listing_diff`] of
+/// the commit to publish against the fetched head did not produce a change list.
+fn diff_refusal(defect: DiffDefect) -> String {
+    match defect {
+        DiffDefect::Unparseable => UNPARSEABLE_ENTRY.to_string(),
+        DiffDefect::PastDeadline => format!(
+            "Post-commit publication gate violation: the changes of the commit to publish {LISTING_PAST_DEADLINE}"
+        ),
+    }
 }
 
 /// One `diff-tree -z --raw` record: `:<old mode> <new mode> <old id> <new id> <status>` NUL
@@ -19652,6 +19658,24 @@ git update-ref HEAD "$N"
                 b'D',
                 b"f"
             ))
+        );
+    }
+
+    /// Each way listing_diff can fail maps to its own refusal: a record that does not parse
+    /// to the unparseable-entry text, a deadline come to the changes of the commit to
+    /// publish past the time limit. The past-deadline arm has no end-to-end test: no seam
+    /// runs between the fetched head's listing and the diff.
+    #[test]
+    fn test_diff_refusal_names_each_defect() {
+        assert_eq!(
+            diff_refusal(DiffDefect::Unparseable),
+            "Post-commit publication gate violation: unparseable committed entry"
+        );
+        assert_eq!(
+            diff_refusal(DiffDefect::PastDeadline),
+            format!(
+                "Post-commit publication gate violation: the changes of the commit to publish {LISTING_PAST_DEADLINE}"
+            )
         );
     }
 
