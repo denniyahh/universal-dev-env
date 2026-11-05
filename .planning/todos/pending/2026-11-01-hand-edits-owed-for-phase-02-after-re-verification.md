@@ -71,3 +71,23 @@ The edits in this todo are owed by 02-15-PLAN.md's "Who updates which document, 
   - The two root-tree push rows now assert git status's refusal, and test_fetched_head_holds_refuses_root_tree_not_matching_its_id pins the gate's own root check.
   - Re-run each control row 02-26-SUMMARY.md lists after `Re-run at re-verification:` (none: all 13 rows came out `same`, so no corrected row and no T-02-109); the lists of 02-21 and 02-23 still stand.
   - 02-22-PLAN.md's verify commands and 02-23-PLAN.md's control rows 3, 4 and 8 name code plan 02-24 removed (verify_ancestor_trees, listed_tree_ids, test_listed_tree_ids). They describe superseded code and are not re-run; 02-23's SUMMARY lists none of them for re-running.
+
+## Added by plan 02-27
+
+The edits below are owed by 02-27-PLAN.md, as the earlier sections' edits are owed by their plans. They are still conditional on re-verification of phase 02 passing; if it finds gaps they wait.
+
+- 02-REVIEW-DISPOSITION.md: WR-600 to `fixed`, with plan 02-27 and its commits in the Source cell: 1125c68 feat(02-27): bound the walk by one deadline and refuse repeats before blob reads (RED 5452316), and e914a41 feat(02-27): cap the tree records one publication gate call lists (RED e818692). IN-600 is plan 02-28's.
+- 02-SECURITY.md, through `/gsd-secure-phase`, not by hand: T-02-102 (02-24) is superseded by T-02-110 of 02-27-PLAN.md; its claim that each read bounds the walk was wrong (the cost is spent outside the reads). Rows for T-02-110 to T-02-115 come from the same run.
+- The numbers 02-27 Task 3 measured (debug build, one host, one run each):
+  - This repository at 1125c68: 288 records, 56 trees; its walk took 1902 ms (test 1.924 s, peak RSS 40 124 kB).
+  - Production record limit, over (shared-subtree tree, depth 17): 3.371 s, peak RSS 40 332 kB.
+  - Production record limit, under (depth 16, 196 608 records, byte-identical to ls-tree): 2.856 s, peak RSS 49 588 kB.
+  - Committed gate at the record limit (196 610 records over both listings): gate call 6325 ms, test 6.960 s, peak RSS 64 764 kB.
+  - Committed gate at the byte limit (63 793 444 listing bytes, 6146 records): gate call 4117 ms, test 6.222 s, peak RSS 111 756 kB.
+  - Implied tree ceiling of the 30 s deadline for a legitimate push: 30 000 ms / (1902 ms / 56 trees = 34.0 ms a tree) = about 880 distinct trees.
+- When re-verifying, tell the verifier:
+  - The gate's walk is bounded per gate call by MAX_LISTING_RECORDS records and MAX_LISTING_BYTES listing bytes, one budget shared by both listings, and count_empty_directories is now linear in those bytes.
+  - One deadline, the local time limit from the start of the walk, covers both listings and listing_diff on the committed route, and the listing on the empty-status route.
+  - The repeated-path check now runs before the change loop reads any blob (T-02-115, orchestrator decision 2026-11-04). So five tests now expect `repeats a path` or `path component` (02-27-PLAN.md Task 2's table).
+  - NOT-14 is unchanged. DEF-09 and DEF-10 name the change once plan 02-28 lands.
+- 02-VALIDATION.md, when its validation strategy is updated: two rows describe the order before 02-27. They are the SEC-02 row of 02-13 (`A token-shaped second entry under a repeated name, or a token hidden by an index hook, is scanned and refused`) and the SEC-04 row `Each changed blob is read by its own object id, so a blob hidden behind a repeated entry or an index hook is the one checked`. Such a tree is now refused by the repeated-path check before any blob is read or scanned. Reword them then; not by hand here.
