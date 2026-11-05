@@ -579,6 +579,19 @@ impl SyncEngine {
         self
     }
 
+    /// The budget one publication gate call's listings draw on: [`MAX_LISTING_RECORDS`]
+    /// records and [`MAX_LISTING_BYTES`] bytes, or a test's lower limits when set.
+    fn listing_budget(&self) -> ListingBudget {
+        #[cfg(test)]
+        let (records, bytes) = (
+            self.listing_record_limit.unwrap_or(MAX_LISTING_RECORDS),
+            self.listing_byte_limit.unwrap_or(MAX_LISTING_BYTES),
+        );
+        #[cfg(not(test))]
+        let (records, bytes) = (MAX_LISTING_RECORDS, MAX_LISTING_BYTES);
+        ListingBudget::new(records, bytes)
+    }
+
     /// Runs the test hook set by `with_after_tree_listing`, if any. Called right after a
     /// publication gate's tree listing is read; in a non-test build it does nothing.
     fn after_tree_listing(&self) {
@@ -2566,7 +2579,9 @@ impl SyncEngine {
     /// whose stored bytes do not match its id could list a path the commit adds, or omit one
     /// it deletes, and a diff that read it would not show that change. In the order it
     /// checks: it has exactly one parent, `base`; its message is the sync commit message and
-    /// its header is free of secrets; every blob it changes, read by object id and checked
+    /// its header is free of secrets; its listing and the fetched head's together stay
+    /// within one budget of [`MAX_LISTING_RECORDS`] records and [`MAX_LISTING_BYTES`]
+    /// listing bytes; every blob it changes, read by object id and checked
     /// against it, is on the allowlist `paths` (relative to `repo`), free of secrets and
     /// identical to what `validated` recorded; its tree repeats no path and has no path
     /// component that is empty, `.` or `..`; it holds no empty directory; every path
@@ -2682,13 +2697,21 @@ impl SyncEngine {
         let named_under =
             |tree: &[u8]| first_path_under(tree, recorded.iter().chain(&allowed).copied());
         let mut verified = HashMap::new();
-        let listing = self.verified_tree_listing(repo, root, &mut verified);
+        // One budget for both listings of this call, so together they stay within the
+        // record and byte limits.
+        let mut budget = self.listing_budget();
+        let listing = self.verified_tree_listing(repo, root, &mut verified, &mut budget);
         self.after_tree_listing();
         let listing = match listing {
             Ok(listing) => listing,
             Err(ListingDefect::Unreadable) => {
                 return Err(format!(
                     "Post-commit publication gate violation: failed to list the tree of {commit}"
+                ));
+            }
+            Err(ListingDefect::TooLarge) => {
+                return Err(format!(
+                    "Post-commit publication gate violation: the tree of the commit to publish {LISTING_TOO_LARGE}"
                 ));
             }
             Err(ListingDefect::Unparseable) => {
@@ -2732,9 +2755,19 @@ impl SyncEngine {
         else {
             return Err(BASE_UNLISTED.to_string());
         };
-        let base_listing = match self.verified_tree_listing(repo, base_root, &mut verified) {
+        let base_listing = match self.verified_tree_listing(
+            repo,
+            base_root,
+            &mut verified,
+            &mut budget,
+        ) {
             Ok(base_listing) => base_listing,
             Err(ListingDefect::Unreadable) => return Err(BASE_UNLISTED.to_string()),
+            Err(ListingDefect::TooLarge) => {
+                return Err(format!(
+                    "Post-commit publication gate violation: the tree of the fetched head {LISTING_TOO_LARGE}"
+                ));
+            }
             Err(ListingDefect::Unparseable) => {
                 return Err(
                     "Post-commit publication gate violation: unparseable tree entry in the fetched head"
@@ -2977,7 +3010,8 @@ impl SyncEngine {
         else {
             return Err(cannot_list());
         };
-        let listing = self.verified_tree_listing(repo, root, &mut HashMap::new());
+        let mut budget = self.listing_budget();
+        let listing = self.verified_tree_listing(repo, root, &mut HashMap::new(), &mut budget);
         self.after_tree_listing();
         let unparseable = || {
             format!(
@@ -2987,6 +3021,11 @@ impl SyncEngine {
         let listing = match listing {
             Ok(listing) => listing,
             Err(ListingDefect::Unreadable) => return Err(cannot_list()),
+            Err(ListingDefect::TooLarge) => {
+                return Err(format!(
+                    "{PREFIX} the fetched head's tree {LISTING_TOO_LARGE}"
+                ));
+            }
             Err(ListingDefect::Unparseable) => return Err(unparseable()),
             Err(ListingDefect::IdMismatch(tree)) => {
                 // Named from the record, then the staged deletions, never from the tree.
@@ -3121,12 +3160,16 @@ impl SyncEngine {
     /// comes before its contents and its contents before its next sibling, and a gitlink is
     /// not entered. The id length follows `root`'s (40 or 64 hex digits). Trees already in
     /// `verified` are not read again, and each tree read is kept there by id. The walk is
-    /// iterative, so no depth can overflow the stack.
+    /// iterative, so no depth can overflow the stack. Every record is taken from `budget`
+    /// before it is pushed ([`Self::push_tree_entries`]), so the listing and the entries
+    /// still pending together never hold more records or bytes than `budget` had left;
+    /// past either, [`ListingDefect::TooLarge`].
     fn verified_tree_listing(
         &self,
         repo: &Path,
         root: &str,
         verified: &mut HashMap<String, Vec<u8>>,
+        budget: &mut ListingBudget,
     ) -> Result<Vec<u8>, ListingDefect> {
         let id_len = match root.len() {
             40 | 64 => root.len() / 2,
@@ -3135,18 +3178,14 @@ impl SyncEngine {
         let mut listing = Vec::new();
         // Entries still to print, the next one last: (path, mode, id as hex).
         let mut pending = Vec::new();
-        self.push_tree_entries(repo, root, &[], id_len, verified, &mut pending)?;
+        self.push_tree_entries(repo, root, &[], id_len, verified, &mut pending, budget)?;
         while let Some((path, mode, id)) = pending.pop() {
-            let kind = match mode {
-                MODE_DIRECTORY => "tree",
-                MODE_GITLINK => "commit",
-                _ => "blob",
-            };
+            let kind = listing_kind(mode);
             listing.extend_from_slice(format!("{mode:06o} {kind} {id}\t").as_bytes());
             listing.extend_from_slice(&path);
             listing.push(0);
             if mode == MODE_DIRECTORY {
-                self.push_tree_entries(repo, &id, &path, id_len, verified, &mut pending)?;
+                self.push_tree_entries(repo, &id, &path, id_len, verified, &mut pending, budget)?;
             }
         }
         Ok(listing)
@@ -3154,7 +3193,14 @@ impl SyncEngine {
 
     /// Reads the tree `id` at listing path `path` through `verified` (as
     /// [`Self::verified_tree_listing`] describes) and pushes its entries onto `pending` in
-    /// reverse stored order, so the first entry is popped next.
+    /// reverse stored order, so the first entry is popped next. Before it pushes any, it
+    /// takes from `budget` one record per entry and the bytes the listing will write for
+    /// them (mode, type word, id, the full path and the separators), summed with checked
+    /// arithmetic, so an overflow is [`ListingDefect::TooLarge`] too.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the walk state verified_tree_listing threads through each tree"
+    )]
     fn push_tree_entries(
         &self,
         repo: &Path,
@@ -3163,6 +3209,7 @@ impl SyncEngine {
         id_len: usize,
         verified: &mut HashMap<String, Vec<u8>>,
         pending: &mut Vec<(Vec<u8>, u32, String)>,
+        budget: &mut ListingBudget,
     ) -> Result<(), ListingDefect> {
         if !verified.contains_key(id) {
             let bytes = match self.read_verified_object(repo, id.as_bytes(), "tree") {
@@ -3175,6 +3222,20 @@ impl SyncEngine {
             verified.insert(id.to_string(), bytes);
         }
         let entries = parse_tree_object(&verified[id], id_len).ok_or(ListingDefect::Unparseable)?;
+        // Each record: six mode digits, a space, the type word, a space, the hex id, a tab,
+        // the parent's path and a `/` unless the parent is the root, the name, a NUL.
+        let parent = if path.is_empty() { 0 } else { path.len() + 1 };
+        let fixed = 6 + 1 + 1 + 2 * id_len + 1 + 1;
+        let bytes = entries
+            .iter()
+            .try_fold(0usize, |sum, entry| {
+                sum.checked_add(fixed)?
+                    .checked_add(parent)?
+                    .checked_add(listing_kind(entry.mode).len())?
+                    .checked_add(entry.name.len())
+            })
+            .ok_or(ListingDefect::TooLarge)?;
+        budget.take(entries.len(), bytes)?;
         for entry in entries.iter().rev() {
             let mut entry_path = path.to_vec();
             if !entry_path.is_empty() {
@@ -3208,6 +3269,77 @@ enum NotHeld {
 
 /// The refusal text of an object whose bytes do not hash to its id.
 const OBJECT_ID_MISMATCH: &str = "does not match its object id in the cache checkout; an object file there was most likely rewritten";
+
+/// The refusal text of a listing over the records or the bytes one gate call may list
+/// ([`ListingBudget`]). One text for both limits: it says the listing is too large, not
+/// which amount ran out, and prints no number, so a test's lower limit prints it too.
+const LISTING_TOO_LARGE: &str = "is larger than the publication gate lists for one push; a tree in the cache checkout most likely repeats a subtree or holds very long names";
+
+/// The records one publication gate call may list, over all its listings together
+/// ([`ListingBudget`]). A tree whose subtrees repeat lists 2^d paths from d + 3 tree
+/// objects, and git limits neither, so without a limit a hook in the cache checkout could
+/// make the walk exhaust memory (review WR-600).
+///
+/// ## Decisions and assumptions recorded here
+///
+/// - This repository's whole tree lists 286 records (56 trees) at e9165f0, so one push's
+///   two listings take about 570: the limit is over 400 times that.
+/// - The cost of a gate call at the limit is measured by plan 02-27 Task 3, not assumed.
+const MAX_LISTING_RECORDS: usize = 1 << 18;
+
+/// The listing bytes one publication gate call may list, over all its listings together
+/// ([`ListingBudget`]). A record holds its full path and git does not limit an entry
+/// name's length, so a record limit alone does not bound memory.
+///
+/// ## Decisions and assumptions recorded here
+///
+/// - This repository's whole listing is 29 457 bytes at e9165f0, so 64 MiB is over 2000
+///   times one push's two listings.
+/// - It equals 2^18 records at an average of 256 bytes a record, so neither limit is much
+///   looser than the other.
+/// - The cost of a gate call at the limit is measured by plan 02-27 Task 3, not assumed.
+const MAX_LISTING_BYTES: usize = 1 << 26;
+
+/// What one publication gate call may still list, shared by every listing of that call
+/// ([`SyncEngine::verified_tree_listing`]), so the call's listings together never hold
+/// more records or listing bytes than it started with.
+struct ListingBudget {
+    records_left: usize,
+    bytes_left: usize,
+}
+
+impl ListingBudget {
+    fn new(max_records: usize, max_bytes: usize) -> Self {
+        Self {
+            records_left: max_records,
+            bytes_left: max_bytes,
+        }
+    }
+
+    /// Takes `records` records and `bytes` listing bytes from what is left;
+    /// [`ListingDefect::TooLarge`], taking nothing, when either is more than is left.
+    fn take(&mut self, records: usize, bytes: usize) -> Result<(), ListingDefect> {
+        let (Some(records_left), Some(bytes_left)) = (
+            self.records_left.checked_sub(records),
+            self.bytes_left.checked_sub(bytes),
+        ) else {
+            return Err(ListingDefect::TooLarge);
+        };
+        self.records_left = records_left;
+        self.bytes_left = bytes_left;
+        Ok(())
+    }
+}
+
+/// The type word of a listing record for an entry of mode `mode`: `tree`, `commit` for a
+/// gitlink, `blob` otherwise.
+fn listing_kind(mode: u32) -> &'static str {
+    match mode {
+        MODE_DIRECTORY => "tree",
+        MODE_GITLINK => "commit",
+        _ => "blob",
+    }
+}
 
 /// Splits one `--name-status --no-renames` line into its status letter(s) and path.
 /// `None` when the line has no tab or an empty status or path (callers fail closed).
@@ -3434,13 +3566,17 @@ fn remove_git_test_env(command: &mut Command, inherited: impl IntoIterator<Item 
     }
 }
 
-/// Counts the `tree` records with no record below them in `ls-tree -r -t -z` output
-/// (records `<mode> SP <type> SP <oid> TAB <path>`, each ended by NUL). A record is below
-/// a path when its own path starts with that path followed by `/`, compared as raw bytes,
-/// never through a lossy decode. `None` for a record it cannot parse.
+/// Counts the `tree` records with no record directly below them in `ls-tree -r -t -z`
+/// output (records `<mode> SP <type> SP <oid> TAB <path>`, each ended by NUL). A record is
+/// directly below the path its own path holds before its last `/`, compared as raw bytes,
+/// never through a lossy decode. Only that parent path is kept per record, so the work is
+/// linear in the listing's bytes. Every listing it reads lists every intermediate tree
+/// (as `ls-tree -r -t` does), so on names holding no `/` this is the count of trees with
+/// no record anywhere below them; a name holding `/` can only add to the count, never
+/// hide an empty tree. `None` for a record it cannot parse.
 fn count_empty_directories(listing: &[u8]) -> Option<usize> {
     let mut trees = Vec::new();
-    let mut ancestors = HashSet::new();
+    let mut parents = HashSet::new();
     for record in listing.split_inclusive(|byte| *byte == 0) {
         let record = record.strip_suffix(&[0])?;
         let mut fields = record.splitn(2, |byte| *byte == b'\t');
@@ -3448,16 +3584,14 @@ fn count_empty_directories(listing: &[u8]) -> Option<usize> {
         if meta.split(|byte| *byte == b' ').nth(1)? == b"tree" {
             trees.push(path);
         }
-        for (end, byte) in path.iter().enumerate() {
-            if *byte == b'/' {
-                ancestors.insert(&path[..end]);
-            }
+        if let Some(slash) = path.iter().rposition(|byte| *byte == b'/') {
+            parents.insert(&path[..slash]);
         }
     }
     Some(
         trees
             .into_iter()
-            .filter(|tree| !ancestors.contains(tree))
+            .filter(|tree| !parents.contains(tree))
             .count(),
     )
 }
@@ -3598,6 +3732,8 @@ enum ListingDefect {
     /// The bytes stored under a tree's id do not hash to it. Holds that tree's listing
     /// path, empty for the root; it is tree-chosen text and never printed.
     IdMismatch(Vec<u8>),
+    /// The listing would take more records or bytes than its [`ListingBudget`] had left.
+    TooLarge,
 }
 
 /// `bytes` as lowercase hex, the way git prints an object id.
@@ -15608,7 +15744,12 @@ git update-ref HEAD "$N"
         commit: &str,
     ) -> Result<Vec<u8>, ListingDefect> {
         let root = git.output(repo, &["rev-parse", &format!("{commit}^{{tree}}")]);
-        engine.verified_tree_listing(repo, &root, &mut HashMap::new())
+        engine.verified_tree_listing(
+            repo,
+            &root,
+            &mut HashMap::new(),
+            &mut engine.listing_budget(),
+        )
     }
 
     /// Whether `needle` occurs in `haystack`.
@@ -18631,14 +18772,12 @@ git update-ref HEAD "$N"
 
     #[test]
     #[cfg(unix)]
-    #[ignore = "RED: fails until 02-27 Task 1 fix"]
     fn test_direct_push_refuses_tree_over_the_record_limit() {
         assert_tree_over_the_record_limit_refused(false);
     }
 
     #[test]
     #[cfg(unix)]
-    #[ignore = "RED: fails until 02-27 Task 1 fix"]
     fn test_pr_push_refuses_tree_over_the_record_limit() {
         assert_tree_over_the_record_limit_refused(true);
     }
@@ -18649,7 +18788,6 @@ git update-ref HEAD "$N"
     /// head holds the record. One record fewer refuses it as too large, naming no tree text.
     #[test]
     #[cfg(unix)]
-    #[ignore = "RED: fails until 02-27 Task 1 fix"]
     fn test_fetched_head_holds_refuses_tree_over_the_record_limit() {
         let git = GitFixture::new();
         let (repo, file) = gate_repo(&git);
@@ -18737,7 +18875,6 @@ git update-ref HEAD "$N"
     /// the commit plus the fetched head lists both, and the deletion is refused as
     /// unvalidated. One record fewer: the fetched head's listing is refused as too large.
     #[test]
-    #[ignore = "RED: fails until 02-27 Task 1 fix"]
     fn test_committed_gate_refuses_fetched_head_tree_over_the_record_limit() {
         let git = GitFixture::new();
         let (repo, fetched, _, f_new) = fetched_head_with_shared_subtree(&git);
@@ -18774,7 +18911,6 @@ git update-ref HEAD "$N"
     /// below. Just-under control: a limit of both counts together passes. One fewer refuses
     /// the fetched head's listing, which a budget per listing would have passed.
     #[test]
-    #[ignore = "RED: fails until 02-27 Task 1 fix"]
     fn test_committed_gate_counts_both_listings_against_one_record_limit() {
         let git = GitFixture::new();
         let (repo, fetched, bomb, f_new) = fetched_head_with_shared_subtree(&git);
@@ -18817,7 +18953,6 @@ git update-ref HEAD "$N"
     /// listing runs out of the shared budget. One byte under the commit's own count: the
     /// commit's listing is refused. No refusal holds the name.
     #[test]
-    #[ignore = "RED: fails until 02-27 Task 1 fix"]
     fn test_committed_gate_refuses_commit_tree_over_the_byte_limit() {
         let git = GitFixture::new();
         let (repo, base) = templates_repo(&git, &[("f", "f base\n")]);
@@ -18843,7 +18978,7 @@ git update-ref HEAD "$N"
         let records =
             ls_tree_record_count(&git, dir, &commit) + ls_tree_record_count(&git, dir, &base);
         assert!(
-            records < 1 << 18,
+            records < MAX_LISTING_RECORDS,
             "{records} records: the record limit must not be what fires"
         );
         let validate = |bytes: usize| {
@@ -18867,5 +19002,122 @@ git update-ref HEAD "$N"
 
         let err = validate(mc - 1).expect_err("one byte under the commit's listing must refuse");
         refused_as_too_large(&err, "the tree of the commit to publish");
+    }
+
+    /// A fresh repository and the root tree `templates/bomb`, where bomb is `bomb_tree` of
+    /// that repository (built by the closure from the repository and a leaf blob).
+    fn root_with_bomb(
+        git: &GitFixture,
+        bomb_tree: impl FnOnce(&Path, &str) -> String,
+    ) -> (tempfile::TempDir, String) {
+        let repo = tempdir().unwrap();
+        let dir = repo.path();
+        git.run(dir, &["init", "-b", "main"]);
+        let leaf = write_blob(git, dir, b"x\n");
+        let bomb = bomb_tree(dir, &leaf);
+        let mktree = |listing: String| git_with_input(git, dir, &["mktree"], listing.as_bytes());
+        let templates = mktree(format!("040000 tree {bomb}\tbomb\n"));
+        let root = mktree(format!("040000 tree {templates}\ttemplates\n"));
+        (repo, root)
+    }
+
+    /// The verified listing of the tree `root` through an engine with the fixture gitconfig
+    /// and the production limits.
+    fn production_listing(
+        git: &GitFixture,
+        dir: &Path,
+        root: &str,
+    ) -> Result<Vec<u8>, ListingDefect> {
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        engine.verified_tree_listing(dir, root, &mut HashMap::new(), &mut engine.listing_budget())
+    }
+
+    /// The smallest depth whose shared-subtree tree, with the two wrappers, lists more than
+    /// MAX_LISTING_RECORDS records (3 * 2^depth).
+    fn depth_over_the_production_record_limit() -> u32 {
+        (0..usize::BITS)
+            .find(|depth| 3usize << depth > MAX_LISTING_RECORDS)
+            .unwrap()
+    }
+
+    /// The production record limit is wired: a shared-subtree tree of the smallest depth
+    /// whose listing passes MAX_LISTING_RECORDS (17 for 1 << 18) is refused as too large.
+    #[test]
+    fn test_verified_tree_listing_refuses_tree_over_the_production_record_limit() {
+        let git = GitFixture::new();
+        let depth = depth_over_the_production_record_limit();
+        let (repo, root) = root_with_bomb(&git, |dir, leaf| {
+            shared_subtree_tree(&git, dir, leaf, depth)
+        });
+        let records = ls_tree_record_count(&git, repo.path(), &root);
+        assert_eq!(records, 3 << depth);
+        assert!(records > MAX_LISTING_RECORDS, "{records}");
+        assert_eq!(
+            production_listing(&git, repo.path(), &root).map(|listing| listing.len()),
+            Err(ListingDefect::TooLarge)
+        );
+    }
+
+    /// Control for the production record limit: one level less (196 608 records, under the
+    /// limit) lists, byte for byte as git lists it.
+    #[test]
+    fn test_verified_tree_listing_lists_tree_under_the_production_record_limit() {
+        let git = GitFixture::new();
+        let depth = depth_over_the_production_record_limit() - 1;
+        let (repo, root) = root_with_bomb(&git, |dir, leaf| {
+            shared_subtree_tree(&git, dir, leaf, depth)
+        });
+        let built = production_listing(&git, repo.path(), &root)
+            .map_err(|defect| format!("{defect:?}"))
+            .expect("a tree under the production limit lists");
+        let records = built.iter().filter(|byte| **byte == 0).count();
+        assert_eq!(records, 3 << depth);
+        assert!(records <= MAX_LISTING_RECORDS, "{records}");
+        let listed = raw_ls_tree(&git, repo.path(), &root);
+        if built != listed {
+            let first = built
+                .iter()
+                .zip(&listed)
+                .position(|(left, right)| left != right)
+                .unwrap_or(built.len().min(listed.len()));
+            panic!(
+                "the built listing ({} bytes) differs from git's ({} bytes) at offset {first}",
+                built.len(),
+                listed.len()
+            );
+        }
+    }
+
+    /// The production byte limit is wired: a shared-subtree tree whose entries at every
+    /// level carry 1024-byte names, at the smallest depth whose `ls-tree -r -t -z
+    /// --full-tree` byte count (read from git) passes MAX_LISTING_BYTES, is refused as too
+    /// large, while its record count is under a quarter of MAX_LISTING_RECORDS, so only the
+    /// byte limit can fire.
+    #[test]
+    fn test_verified_tree_listing_refuses_tree_over_the_production_byte_limit() {
+        let git = GitFixture::new();
+        let repo = tempdir().unwrap();
+        let dir = repo.path();
+        git.run(dir, &["init", "-b", "main"]);
+        let mktree = |listing: String| git_with_input(&git, dir, &["mktree"], listing.as_bytes());
+        let (leaf_name, a, b) = ("f".repeat(1024), "a".repeat(1024), "b".repeat(1024));
+        let leaf = write_blob(&git, dir, b"x\n");
+        let mut bomb = mktree(format!("100644 blob {leaf}\t{leaf_name}\n"));
+        let root = loop {
+            bomb = mktree(format!(
+                "040000 tree {bomb}\t{a}\n040000 tree {bomb}\t{b}\n"
+            ));
+            let templates = mktree(format!("040000 tree {bomb}\tbomb\n"));
+            let root = mktree(format!("040000 tree {templates}\ttemplates\n"));
+            if ls_tree_byte_count(&git, dir, &root) > MAX_LISTING_BYTES {
+                break root;
+            }
+        };
+        let records = ls_tree_record_count(&git, dir, &root);
+        assert!(records < MAX_LISTING_RECORDS / 4, "{records}");
+        assert_eq!(
+            production_listing(&git, dir, &root).map(|listing| listing.len()),
+            Err(ListingDefect::TooLarge)
+        );
     }
 }
