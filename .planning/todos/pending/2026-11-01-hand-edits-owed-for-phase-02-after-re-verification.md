@@ -111,3 +111,19 @@ Still conditional on re-verification of phase 02 passing, like the sections abov
   - WR-700, IN-700, IN-701, IN-703 → `fixed`, by commits 57ed03a, 5f64809, d69322b and e0e2d4c (code fixer, scoped by the orchestrator). Suite after them: 484 unit (1 ignored) and 114 e2e passed.
   - IN-702 → `not taken`: when the commit's listing uses up the shared budget, the refusal names the fetched head. The record-limit rows pin that route phrase by design.
 - docs/ARCHITECTURE.md and 02-20-PLAN.md (IN-704), byte-identical in both: DEF-09's "which also covers the changes" reads as if the change loop were under the deadline. It is not, by the 2026-11-04 decision. Reword it to say the deadline covers both listings and the change list (listing_diff), not the blob reads of the change loop, and that it is checked before each tree read (IN-701).
+
+## Done 2026-11-04, after re-verification passed (597921d, refreshed 6e939c1)
+
+- 02-SECURITY.md through `/gsd-secure-phase` (ead78f6):
+  - T-02-52 is now `mitigate`, naming T-02-62.
+  - AR-02-10 and T-02-102 are marked superseded.
+  - AR-02-12 to AR-02-16 hold T-02-77, -78, -80, -81 and -85, with the operator's quotes copied word for word.
+  - threats_open is 0.
+- 02-REVIEW-DISPOSITION.md (550613b, 6e939c1): every row this todo names is set, plus IN-704 as `fixed` by 95e88de. IN-205 stays open with its note; IN-500 stays open (out of scope).
+- 02-VALIDATION.md: the T-02-52 line is replaced (349deaa). The approval line already read COMPLIANT (0630ff7), and the two stale rows were reworded there as well.
+- DEF-09 deadline wording, IN-704 (95e88de): byte-identical in both files.
+- The control rows due for re-run at re-verification were re-run by the verifier (02-VERIFICATION.md).
+- The base-side channel is closed by 02-25. It is dropped from the still-open list; re-verification holds 02-25's rows.
+- REQUIREMENTS.md: SEC-01 to SEC-04 are Complete through `phase.complete` (11a1849).
+
+Still open, so this todo stays pending: T-02-60, T-02-61, T-02-64, T-02-65 and T-02-67. Each is still `pending the operator, not accepted` in 02-15-PLAN.md `## Operator answers`. Once the last is answered, record it in 02-SECURITY.md, move this todo to completed and run `state.resolve-blocker --text "Hand edits owed after re-verification"`.
