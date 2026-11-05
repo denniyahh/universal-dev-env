@@ -5,23 +5,23 @@ titles: json
 findings:
   - id: WR-700
     severity: warning
-    disposition: open
+    disposition: fixed
     title: "The deadline-carry test fails under CPU load on wall-clock assertions that add no discrimination"
   - id: IN-700
     severity: info
-    disposition: open
+    disposition: fixed
     title: "The refusal for a diff past the deadline is reachable in production but pinned by no test"
   - id: IN-701
     severity: info
-    disposition: open
+    disposition: fixed
     title: "The walk can run past its deadline by one object read, up to three local timeouts"
   - id: IN-702
     severity: info
-    disposition: open
+    disposition: skipped
     title: "A commit listing that uses up the shared budget is refused as \"the tree of the fetched head\""
   - id: IN-703
     severity: info
-    disposition: open
+    disposition: fixed
     title: "count_empty_directories' new doc comment claims a `/` in a name can never hide an empty tree; it can"
   - id: IN-704
     severity: info
@@ -29,23 +29,23 @@ findings:
     title: "DEF-09 says the deadline \"also covers the changes\", which reads as covering the change loop"
   - id: WR-600
     severity: warning
-    disposition: open
+    disposition: fixed
     title: "The verified tree walk has no size or time limit, and shared subtrees make its output grow exponentially"
   - id: IN-600
     severity: info
-    disposition: open
+    disposition: fixed
     title: "New tests chain several scenarios, so the first failing assertion hides the rest"
   - id: WR-500
     severity: warning
-    disposition: open
+    disposition: fixed
     title: "The tree check hashes a second read; the listing that decides \"held\" comes from the first"
   - id: WR-501
     severity: warning
-    disposition: open
+    disposition: fixed
     title: "The root-tree rows cited under DEF-12 are refused before the gate runs, and would be refused without the forgery"
   - id: WR-502
     severity: warning
-    disposition: open
+    disposition: fixed
     title: "The \"child ignores stdin\" test does not check the bound it is named for"
   - id: IN-500
     severity: info
@@ -53,11 +53,11 @@ findings:
     title: "A stdin writer thread can be leaked for the life of the process"
   - id: IN-501
     severity: info
-    disposition: open
+    disposition: skipped
     title: "A failed object read is reported as \"content not held, a hook most likely hid the change\""
   - id: CR-400
     severity: critical
-    disposition: open
+    disposition: fixed
     title: "The gate trusts local copies of objects the remote already holds, so a changed local object store gets Ok while the remote lacks the record"
   - id: WR-400
     severity: warning
@@ -81,23 +81,23 @@ findings:
     title: "The empty-status deletion check passes silently for a staged path outside the checkout"
   - id: CR-300
     severity: critical
-    disposition: open
+    disposition: fixed
     title: "A ref named after the commit id makes git push send another commit"
   - id: CR-301
     severity: critical
-    disposition: open
+    disposition: fixed
     title: "A hook can move the fetched head, and the injected commit goes out as the base"
   - id: WR-300
     severity: warning
-    disposition: open
+    disposition: fixed
     title: "An index flag makes the push return Ok with nothing published"
   - id: WR-301
     severity: warning
-    disposition: open
+    disposition: fixed
     title: "A hook-written pushurl sends the commit elsewhere and the push returns Ok"
   - id: WR-302
     severity: warning
-    disposition: open
+    disposition: fixed
     title: "A refusal prints hook-chosen bytes from a `parent` header, including terminal escapes"
   - id: IN-300
     severity: info
@@ -109,15 +109,15 @@ findings:
     title: "The new e2e helper runs `ude init` with the host's HOME"
   - id: CR-200
     severity: critical
-    disposition: open
+    disposition: fixed
     title: "A tree listing the managed path twice publishes unvalidated bytes, and consumers check them out"
   - id: CR-201
     severity: critical
-    disposition: open
+    disposition: fixed
     title: "A hook can delete or revert a validated file and the push still returns Ok"
   - id: WR-200
     severity: warning
-    disposition: open
+    disposition: fixed
     title: "A tree entry named `.` passes the allowlist and makes the remote unclonable"
   - id: WR-201
     severity: warning
@@ -129,7 +129,7 @@ findings:
     title: "`refuse_grafts_file` passes when the printed path is not one absolute path"
   - id: WR-203
     severity: warning
-    disposition: open
+    disposition: fixed
     title: "A post-commit hook's background process can write grafts after the gate has passed"
   - id: WR-204
     severity: warning
@@ -215,7 +215,7 @@ findings:
     severity: info
     disposition: open
     title: "The vendored rule pin is enforced only under `cargo test`, and line-ending conversion would break it"
-open: 51
+open: 30
 total: 53
 recorded: 2026-11-05T02:35:41.986Z
 ---
@@ -224,45 +224,45 @@ recorded: 2026-11-05T02:35:41.986Z
 
 | Finding | Severity | Disposition | Source |
 |---------|----------|-------------|--------|
-| WR-700 | warning | open | - |
-| IN-700 | info | open | - |
-| IN-701 | info | open | - |
-| IN-702 | info | open | - |
-| IN-703 | info | open | - |
+| WR-700 | warning | fixed | code fixer, scoped by the orchestrator (57ed03a); confirmed by re-verification 597921d |
+| IN-700 | info | fixed | code fixer (5f64809); confirmed by re-verification 597921d |
+| IN-701 | info | fixed | code fixer (d69322b), doc comments only; confirmed by re-verification 597921d |
+| IN-702 | info | skipped | not taken: the record-limit rows pin the fetched-head route phrase by design; fails closed |
+| IN-703 | info | fixed | code fixer (e0e2d4c); confirmed by re-verification 597921d |
 | IN-704 | info | open | - |
-| WR-600 | warning | open | - (not in the current review) |
-| IN-600 | info | open | - (not in the current review) |
-| WR-500 | warning | open | - (not in the current review) |
-| WR-501 | warning | open | - (not in the current review) |
-| WR-502 | warning | open | - (not in the current review) |
+| WR-600 | warning | fixed | plan 02-27 (e914a41, RED e818692; 1125c68, RED 5452316); confirmed by re-verification 597921d |
+| IN-600 | info | fixed | plan 02-28 (20d9a90); confirmed by re-verification 597921d |
+| WR-500 | warning | fixed | plan 02-24 (146fad2, RED c9e74a0; 7ee7eb3, RED 0737048); confirmed by re-verification 597921d |
+| WR-501 | warning | fixed | plan 02-24 (680ac12); confirmed by re-verification 597921d |
+| WR-502 | warning | fixed | plan 02-24 (680ac12); confirmed by re-verification 597921d |
 | IN-500 | info | open | - (not in the current review) |
-| IN-501 | info | open | - (not in the current review) |
-| CR-400 | critical | open | - (not in the current review) |
+| IN-501 | info | skipped | not taken (02-24-PLAN decisions): telling a type mismatch from a failed read needs ObjectDefect split, which changes texts DEF-11's rows pin; its two ancestor-tree sites went with verify_ancestor_trees and listed_tree_ids |
+| CR-400 | critical | fixed | plan 02-22 (91446c2 blobs, 3abb023 trees; efe86b6 pins git's root-tree refusal); confirmed by re-verification 597921d |
 | WR-400 | warning | open | - (not in the current review) |
 | IN-400 | info | open | - (not in the current review) |
 | IN-401 | info | open | - (not in the current review) |
 | IN-402 | info | open | - (not in the current review) |
 | IN-403 | info | open | - (not in the current review) |
-| CR-300 | critical | open | - (not in the current review) |
-| CR-301 | critical | open | - (not in the current review) |
-| WR-300 | warning | open | - (not in the current review) |
-| WR-301 | warning | open | - (not in the current review) |
-| WR-302 | warning | open | - (not in the current review) |
+| CR-300 | critical | fixed | plan 02-16 (a891d58, f1628d9); confirmed by re-verification 597921d |
+| CR-301 | critical | fixed | plan 02-17 (7eb7c6b); confirmed by re-verification 597921d |
+| WR-300 | warning | fixed | plan 02-19 (c9acbbf); confirmed by re-verification 597921d |
+| WR-301 | warning | fixed | plan 02-18 (9a83d3f, 4a681a8); confirmed by re-verification 597921d |
+| WR-302 | warning | fixed | plan 02-19 (84c2c86); confirmed by re-verification 597921d |
 | IN-300 | info | open | - (not in the current review) |
 | IN-301 | info | open | - (not in the current review) |
-| CR-200 | critical | open | - (not in the current review) |
-| CR-201 | critical | open | - (not in the current review) |
-| WR-200 | warning | open | - (not in the current review) |
+| CR-200 | critical | fixed | plan 02-13 (b9c03ce, a11d126, a44ae05); confirmed by re-verification 597921d |
+| CR-201 | critical | fixed | plan 02-13 (b9c03ce, a11d126, a44ae05); confirmed by re-verification 597921d |
+| WR-200 | warning | fixed | plan 02-13 (b9c03ce, a11d126, a44ae05); confirmed by re-verification 597921d |
 | WR-201 | warning | open | - (not in the current review) |
 | WR-202 | warning | open | - (not in the current review) |
-| WR-203 | warning | open | - (not in the current review) |
+| WR-203 | warning | fixed | plan 02-14 (d08e5fe, 9a561f4, 0aab389); confirmed by re-verification 597921d |
 | WR-204 | warning | open | - (not in the current review) |
 | IN-200 | info | open | - (not in the current review) |
 | IN-201 | info | open | - (not in the current review) |
 | IN-202 | info | open | - (not in the current review) |
 | IN-203 | info | open | - (not in the current review) |
 | IN-204 | info | open | - (not in the current review) |
-| IN-205 | info | open | - (not in the current review) |
+| IN-205 | info | open | open: its committed-gate half is done by plan 02-13; its staged-gate refusals still print names, and the enum has no partial value |
 | WR-01 | warning | open | - (not in the current review) |
 | WR-02 | warning | open | - (not in the current review) |
 | IN-01 | info | open | - (not in the current review) |
