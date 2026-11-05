@@ -3,6 +3,30 @@ phase: 02
 review: 02-REVIEW.md
 titles: json
 findings:
+  - id: WR-700
+    severity: warning
+    disposition: open
+    title: "The deadline-carry test fails under CPU load on wall-clock assertions that add no discrimination"
+  - id: IN-700
+    severity: info
+    disposition: open
+    title: "The refusal for a diff past the deadline is reachable in production but pinned by no test"
+  - id: IN-701
+    severity: info
+    disposition: open
+    title: "The walk can run past its deadline by one object read, up to three local timeouts"
+  - id: IN-702
+    severity: info
+    disposition: open
+    title: "A commit listing that uses up the shared budget is refused as \"the tree of the fetched head\""
+  - id: IN-703
+    severity: info
+    disposition: open
+    title: "count_empty_directories' new doc comment claims a `/` in a name can never hide an empty tree; it can"
+  - id: IN-704
+    severity: info
+    disposition: open
+    title: "DEF-09 says the deadline \"also covers the changes\", which reads as covering the change loop"
   - id: WR-600
     severity: warning
     disposition: open
@@ -191,17 +215,23 @@ findings:
     severity: info
     disposition: open
     title: "The vendored rule pin is enforced only under `cargo test`, and line-ending conversion would break it"
-open: 45
-total: 47
-recorded: 2026-11-04T20:00:57.953Z
+open: 51
+total: 53
+recorded: 2026-11-05T02:35:41.986Z
 ---
 
 # Phase 02: Code Review Disposition
 
 | Finding | Severity | Disposition | Source |
 |---------|----------|-------------|--------|
-| WR-600 | warning | open | - |
-| IN-600 | info | open | - |
+| WR-700 | warning | open | - |
+| IN-700 | info | open | - |
+| IN-701 | info | open | - |
+| IN-702 | info | open | - |
+| IN-703 | info | open | - |
+| IN-704 | info | open | - |
+| WR-600 | warning | open | - (not in the current review) |
+| IN-600 | info | open | - (not in the current review) |
 | WR-500 | warning | open | - (not in the current review) |
 | WR-501 | warning | open | - (not in the current review) |
 | WR-502 | warning | open | - (not in the current review) |
