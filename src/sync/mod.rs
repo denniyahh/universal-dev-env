@@ -10172,6 +10172,28 @@ git config "remote.$U.receivepack" "n=0; : > '$D/ude-go'; while [ ! -e '$D/ude-a
 "#
     );
 
+    /// post-commit tail: the injected commit now, and a replace ref swapping UDE's commit for
+    /// it written during the push, by the same handshake as [`HOOK_GRAFTS_WRITTEN_DURING_PUSH`].
+    #[cfg(unix)]
+    const HOOK_REPLACE_WRITTEN_DURING_PUSH: &str = concat!(
+        injected_commit_lines!(),
+        r#"C=$(git rev-parse HEAD); D=$(pwd)/.git
+git config "remote.$U.receivepack" "n=0; : > '$D/ude-go'; while [ ! -e '$D/ude-ack' ] && [ \$n -lt 1000 ]; do sleep 0.01; n=\$((n+1)); done; git receive-pack"
+( n=0; while [ ! -e "$D/ude-go" ] && [ $n -lt 1000 ]; do sleep 0.01; n=$((n+1)); done; mkdir -p "$D/refs/replace"; printf '%s\n' "$X" > "$D/refs/replace/$C"; : > "$D/ude-ack" ) >/dev/null 2>&1 &
+"#
+    );
+
+    /// post-commit tail: the injected commit now, and a shallow file naming UDE's commit
+    /// written during the push, by the same handshake as [`HOOK_GRAFTS_WRITTEN_DURING_PUSH`].
+    #[cfg(unix)]
+    const HOOK_SHALLOW_WRITTEN_DURING_PUSH: &str = concat!(
+        injected_commit_lines!(),
+        r#"C=$(git rev-parse HEAD); D=$(pwd)/.git
+git config "remote.$U.receivepack" "n=0; : > '$D/ude-go'; while [ ! -e '$D/ude-ack' ] && [ \$n -lt 1000 ]; do sleep 0.01; n=\$((n+1)); done; git receive-pack"
+( n=0; while [ ! -e "$D/ude-go" ] && [ $n -lt 1000 ]; do sleep 0.01; n=$((n+1)); done; printf '%s\n' "$C" > "$D/shallow"; : > "$D/ude-ack" ) >/dev/null 2>&1 &
+"#
+    );
+
     /// post-commit tail: the shallow file names UDE's commit, so git sees it as having no
     /// parent and calls it a non-fast-forward.
     #[cfg(unix)]
@@ -11815,6 +11837,85 @@ byte() { printf "\\$(printf '%03o' "$1")"; }
             pushed.res
         );
         assert_no_injected_blob_with_control(&git, &pushed, open_pr);
+    }
+
+    /// One run of a hook that writes state during the push over a `file://` URL: the write
+    /// happened (`.git/ude-ack`), the push returned Ok with exactly the validated bytes, and
+    /// the injected blob is not on the remote.
+    #[cfg(unix)]
+    fn push_with_state_written_during_push(
+        open_pr: bool,
+        hook: &'static str,
+    ) -> (GitFixture, HookedPush) {
+        let git = GitFixture::new();
+        let engine = SyncEngine::new().with_extra_env(git.gitconfig_env());
+        let pushed = push_over_file_url(&git, &engine, open_pr, "post-commit", hook);
+        assert!(pushed.hook_ran, "the hook never ran");
+        assert!(
+            pushed.checkout.join(".git/ude-ack").exists(),
+            "the state was never written during the push; result: {:?}",
+            pushed.res
+        );
+        assert!(pushed.res.is_ok(), "{:?}", pushed.res);
+        assert_published_exact(&git, &pushed, open_pr);
+        let injected = hook_recorded_id(&pushed, "ude-test-injected-blob");
+        assert!(
+            !holds_object(&git, pushed.bare.path(), &injected),
+            "the remote holds the injected blob"
+        );
+        (git, pushed)
+    }
+
+    /// The replace ref was in effect on the published commit: a read that honours replace
+    /// refs reaches the injected blob, so the push really ran with it present.
+    #[cfg(unix)]
+    fn assert_replace_ref_reaches_injected_blob(git: &GitFixture, pushed: &HookedPush) {
+        let published = git.output(
+            &pushed.checkout,
+            &["--no-replace-objects", "rev-parse", "HEAD"],
+        );
+        let injected = hook_recorded_id(pushed, "ude-test-injected-blob");
+        let objects = git.output(&pushed.checkout, &["rev-list", "--objects", &published]);
+        assert!(
+            objects.contains(&injected),
+            "the replace ref did not reach the injected blob, so it had no effect"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_direct_push_sends_no_object_from_replace_ref_written_during_push() {
+        for _ in 0..GRAFTS_DURING_PUSH_RUNS {
+            let (git, pushed) =
+                push_with_state_written_during_push(false, HOOK_REPLACE_WRITTEN_DURING_PUSH);
+            assert_replace_ref_reaches_injected_blob(&git, &pushed);
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_pr_push_sends_no_object_from_replace_ref_written_during_push() {
+        for _ in 0..GRAFTS_DURING_PUSH_RUNS {
+            let (git, pushed) =
+                push_with_state_written_during_push(true, HOOK_REPLACE_WRITTEN_DURING_PUSH);
+            assert_replace_ref_reaches_injected_blob(&git, &pushed);
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_direct_push_publishes_exactly_with_shallow_written_during_push() {
+        for _ in 0..GRAFTS_DURING_PUSH_RUNS {
+            push_with_state_written_during_push(false, HOOK_SHALLOW_WRITTEN_DURING_PUSH);
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_pr_push_publishes_exactly_with_shallow_written_during_push() {
+        for _ in 0..GRAFTS_DURING_PUSH_RUNS {
+            push_with_state_written_during_push(true, HOOK_SHALLOW_WRITTEN_DURING_PUSH);
+        }
     }
 
     /// Publishes [`HOOKED_TEMPLATE`] to a seeded bare remote whose pre-receive hook prints
