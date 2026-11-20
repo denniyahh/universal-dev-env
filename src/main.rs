@@ -320,10 +320,12 @@ fn main() {
             if let Some(ref tdir) = root_template_dir {
                 if !tracked(".gitconfig")
                     && !keep(".gitconfig")
-                    && let Err(e) = copy_template_file(
+                    && let Err(e) = materialize_template(
+                        &renderer,
                         tdir,
                         &tdir.join("projects/generic/gitconfig.repo"),
                         &project_path.join(".gitconfig"),
+                        &ctx,
                     )
                 {
                     eprintln!("  {} Initialization failed: {e}", "✗".red());
@@ -361,7 +363,13 @@ fn main() {
                         }
                     }
                 } else if src_gitignore.exists()
-                    && let Err(e) = copy_template_file(tdir, &src_gitignore, &target_gitignore)
+                    && let Err(e) = materialize_template(
+                        &renderer,
+                        tdir,
+                        &src_gitignore,
+                        &target_gitignore,
+                        &ctx,
+                    )
                 {
                     eprintln!("  {} Initialization failed: {e}", "✗".red());
                     std::process::exit(EXIT_HARD_FAILURE);
@@ -375,7 +383,9 @@ fn main() {
                     }
                     let src_hook = tdir.join(format!("projects/generic/hooks/{hook}"));
                     let dst_hook = hooks_dir.join(hook);
-                    if let Err(e) = copy_template_file(tdir, &src_hook, &dst_hook) {
+                    if let Err(e) =
+                        materialize_template(&renderer, tdir, &src_hook, &dst_hook, &ctx)
+                    {
                         eprintln!("  {} Initialization failed: {e}", "✗".red());
                         std::process::exit(EXIT_HARD_FAILURE);
                     }
@@ -388,7 +398,9 @@ fn main() {
                 {
                     let src_cont = tdir.join("projects/generic/container/check-in-container.sh");
                     let dst_cont = container_dir.join("check-in-container.sh");
-                    if let Err(e) = copy_template_file(tdir, &src_cont, &dst_cont) {
+                    if let Err(e) =
+                        materialize_template(&renderer, tdir, &src_cont, &dst_cont, &ctx)
+                    {
                         eprintln!("  {} Initialization failed: {e}", "✗".red());
                         std::process::exit(EXIT_HARD_FAILURE);
                     }
@@ -407,7 +419,7 @@ fn main() {
                     }
                     let src_s = tdir.join(format!("projects/agents/scratch/{s}"));
                     let dst_s = scratch_dir.join(s);
-                    if let Err(e) = copy_template_file(tdir, &src_s, &dst_s) {
+                    if let Err(e) = materialize_template(&renderer, tdir, &src_s, &dst_s, &ctx) {
                         eprintln!("  {} Initialization failed: {e}", "✗".red());
                         std::process::exit(EXIT_HARD_FAILURE);
                     }
@@ -1027,8 +1039,8 @@ fn main() {
                     }
                 }
                 cli::SyncAction::Push { force, pr } => {
-                    let (root_template_dir, remote_checkout_root, remote_cache) =
-                        open_sync_templates(&engine, remote_url.as_deref(), &branch, &cache_dir);
+                    let (root_template_dir, _remote_checkout_root, remote_cache) =
+                        open_push_templates(&engine, remote_url.as_deref(), &branch, &cache_dir);
                     // The same deletion check as status and pull, so push agrees with them.
                     let engine = match &remote_cache {
                         Some(cache) => {
@@ -1135,7 +1147,7 @@ fn main() {
                         }
                     }
 
-                    let persist_immediately = remote_checkout_root.is_none();
+                    let persist_immediately = remote_cache.is_none();
                     match engine.push_updates(
                         &local_project,
                         &root_template_dir,
@@ -1154,6 +1166,7 @@ fn main() {
                             skipped_boundary,
                             skipped_templates,
                             skipped_missing_upstream,
+                            validated_blobs,
                         } => {
                             println!(
                                 "  {} Sanitization gate passed: clean of secrets & parameters applied.",
@@ -1234,20 +1247,16 @@ fn main() {
                                 );
                             }
 
-                            if let Some(ref remote_checkout) = remote_checkout_root {
+                            if let Some(ref cache) = remote_cache {
                                 println!(
                                     "  {} Pushing synchronized templates to remote repository...",
                                     "==>".cyan()
                                 );
-                                let fetched_sha = remote_cache
-                                    .as_ref()
-                                    .map_or("", |cache| cache.fetched_sha.as_str());
                                 match engine.push_to_remote(
-                                    remote_checkout,
-                                    &branch,
+                                    &cache.publish_target(&branch),
                                     pr,
                                     &staged_files,
-                                    fetched_sha,
+                                    &validated_blobs,
                                 ) {
                                     Ok(msg) => {
                                         println!("  {} {msg}", "✓".green());
@@ -1324,6 +1333,11 @@ fn main() {
                                 reason
                             );
                             std::process::exit(1);
+                        }
+                        sync::PushResult::ReversibilityBlocked { path, reason } => {
+                            let path = path.display();
+                            eprintln!("  {} Push rejected on {path}: {reason}", "✗".red());
+                            std::process::exit(EXIT_DRIFT);
                         }
                         sync::PushResult::ScanFailed { reason } => {
                             eprintln!(
@@ -1463,6 +1477,18 @@ fn missing_tracked_files(
         .collect()
 }
 
+/// Whether init renders `template` (below `root`) by [`template::should_render`]. Its
+/// text counts as empty when it is not readable UTF-8 or is a symlink under `root`, so
+/// an unreadable `.jinja` template still counts as rendered.
+fn renders_template(root: Option<&Path>, template: &Path) -> bool {
+    let text = root
+        .and_then(|root| sync::refuse_symlink_under(root, template).ok())
+        .and_then(|()| fs::read(template).ok())
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+        .unwrap_or_default();
+    template::should_render(template, &text)
+}
+
 /// Warns that init left the tracked file `rel` missing, what `ude sync push` will do
 /// with its shared template, and how to restore the file.
 fn print_missing_tracked_warning(
@@ -1509,7 +1535,7 @@ fn print_missing_tracked_warning(
             format!("Restore it from {} to clear this", template.display())
         }
         (PushBoundary::Never, None) => "Restore it locally to clear this".to_string(),
-        (_, Some(template)) if template.extension().is_some_and(|ext| ext == "jinja") => {
+        (_, Some(template)) if renders_template(template_root, &template) => {
             format!(
                 "To keep it, restore it before pushing (git restore {} if it is committed; init does not re-render its template {} while it is tracked), then check ude sync status",
                 rel.display(),
@@ -1581,6 +1607,46 @@ fn open_sync_templates(
     }
 }
 
+/// [`open_sync_templates`] for `ude sync push`: a remote is opened through
+/// [`sync::SyncEngine::ensure_remote_repo_for_push`], so the fetched head the push builds
+/// on is the commit the remote reports. A remote that moved during the fetch exits with
+/// [`EXIT_DRIFT`] and the pull-first line; any other failure exits with
+/// [`EXIT_HARD_FAILURE`]. Without a remote this is [`open_sync_templates`].
+fn open_push_templates(
+    engine: &sync::SyncEngine,
+    remote_url: Option<&str>,
+    branch: &str,
+    cache_dir: &Path,
+) -> (PathBuf, Option<PathBuf>, Option<sync::RemoteCache>) {
+    let Some(r_url) = remote_url else {
+        return open_sync_templates(engine, remote_url, branch, cache_dir);
+    };
+    match engine.ensure_remote_repo_for_push(r_url, branch, cache_dir) {
+        Ok(cache) => {
+            let tmpl_dir = cache.templates_dir.clone();
+            let checkout_dir = cache.checkout_dir.clone();
+            (tmpl_dir, Some(checkout_dir), Some(cache))
+        }
+        Err(sync::PushRemoteError::UpstreamMoved { branch }) => {
+            eprintln!(
+                "  {} Upstream branch {branch} moved since UDE fetched it; nothing was published.",
+                "✗".red()
+            );
+            eprintln!("  upstream changed, run ude sync pull");
+            std::process::exit(EXIT_DRIFT);
+        }
+        Err(sync::PushRemoteError::Failed(e)) => {
+            eprintln!(
+                "  {} Failed to sync with remote {}: {}",
+                "✗".red(),
+                process::redact_userinfo(r_url),
+                e
+            );
+            std::process::exit(EXIT_HARD_FAILURE);
+        }
+    }
+}
+
 /// `ude sync resolve <file>`: prints what the resolution means, or the error to stderr
 /// with exit [`EXIT_HARD_FAILURE`].
 fn run_sync_resolve(engine: &sync::SyncEngine, local_project: &Path, file: &Path) {
@@ -1638,21 +1704,46 @@ fn first_ude_templates(candidates: impl IntoIterator<Item = PathBuf>) -> Option<
         .find(|candidate| is_ude_templates(candidate))
 }
 
-fn copy_template_file(root: &Path, src: &Path, dst: &Path) -> Result<(), String> {
+/// Materializes the template `src` (below `root`) at `dst`: rendered with `ctx` when
+/// it is UTF-8 and [`template::should_render`] holds, otherwise copied byte for byte.
+/// A missing `src` writes nothing.
+fn materialize_template(
+    renderer: &template::TemplateRenderer,
+    root: &Path,
+    src: &Path,
+    dst: &Path,
+    ctx: &template::TemplateContext,
+) -> Result<(), String> {
     sync::refuse_symlink_under(root, src)?;
-    if src.exists() {
-        if let Some(parent) = dst.parent() {
-            fs::create_dir_all(parent).map_err(|e| {
-                format!(
-                    "Failed to create parent directory {}: {e}",
-                    parent.display()
-                )
-            })?;
-        }
-        fs::copy(src, dst)
-            .map_err(|e| format!("Failed to copy {} to {}: {e}", src.display(), dst.display()))?;
+    if !src.exists() {
+        return Ok(());
     }
-    Ok(())
+    let bytes =
+        fs::read(src).map_err(|e| format!("Failed to read template {}: {e}", src.display()))?;
+    let rendered = match std::str::from_utf8(&bytes) {
+        Ok(text) if template::should_render(src, text) => Some(
+            renderer
+                .render_str(text, ctx)
+                .map_err(|e| format!("Failed to render template {}: {e}", src.display()))?,
+        ),
+        _ => None,
+    };
+    if let Some(parent) = dst.parent() {
+        fs::create_dir_all(parent).map_err(|e| {
+            format!(
+                "Failed to create parent directory {}: {e}",
+                parent.display()
+            )
+        })?;
+    }
+    match rendered {
+        Some(text) => {
+            fs::write(dst, text).map_err(|e| format!("Failed to write {}: {e}", dst.display()))
+        }
+        None => fs::copy(src, dst)
+            .map(|_| ())
+            .map_err(|e| format!("Failed to copy {} to {}: {e}", src.display(), dst.display())),
+    }
 }
 
 fn render_and_write(
@@ -1696,7 +1787,8 @@ fn rendered_template(
 }
 
 /// What init would have written for the managed file `rel` from its template under
-/// `template_root` (rendered for a `.jinja` template); `None` without a template.
+/// `template_root` (rendered whenever [`template::should_render`] holds, as
+/// [`materialize_template`] writes it); `None` without a template.
 fn kept_ancestor(
     renderer: &template::TemplateRenderer,
     template_root: Option<&Path>,
@@ -1709,14 +1801,18 @@ fn kept_ancestor(
     let Some(src) = sync::map_to_upstream(root, rel) else {
         return Ok(None);
     };
-    if src.extension().is_some_and(|ext| ext == "jinja") {
-        return Ok(rendered_template(renderer, root, &src, ctx)?.map(String::into_bytes));
-    }
     sync::refuse_symlink_under(root, &src)?;
-    match fs::read(&src) {
-        Ok(bytes) => Ok(Some(bytes)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(format!("Failed to read template {}: {e}", src.display())),
+    let bytes = match fs::read(&src) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("Failed to read template {}: {e}", src.display())),
+    };
+    match std::str::from_utf8(&bytes) {
+        Ok(text) if template::should_render(&src, text) => renderer
+            .render_str(text, ctx)
+            .map(|rendered| Some(rendered.into_bytes()))
+            .map_err(|e| format!("Failed to render template {}: {e}", src.display())),
+        _ => Ok(Some(bytes)),
     }
 }
 
